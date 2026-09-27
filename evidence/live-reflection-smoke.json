@@ -1,0 +1,14 @@
+{
+  "date": "2026-09-26",
+  "layer": "real model distillation, synthetic task",
+  "model": "qwen3.7-plus",
+  "reasoning": { "enabled": true, "effort": "ultra" },
+  "hostSettingsChanged": false,
+  "fullNativeAgentSession": false,
+  "reflectionCandidateCreated": true,
+  "candidateCount": 1,
+  "verified": 0,
+  "reflectionsLast24h": 1,
+  "ok": true,
+  "elapsedSeconds": 16.65
+}

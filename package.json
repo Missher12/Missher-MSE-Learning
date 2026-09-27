@@ -1,0 +1,15 @@
+{
+  "name": "@missher/mse-learning",
+  "version": "0.8.0-alpha.1",
+  "private": true,
+  "type": "module",
+  "description": "Scoped persistent lessons with bounded context for Agent adapters",
+  "engines": { "node": ">=22.19.0" },
+  "exports": { ".": "./src/index.mjs", "./harness": "./adapters/harness.mjs", "./adapters/dsh": "./adapters/dsh/index.mjs" },
+  "bin": { "mse-learn": "./src/cli.mjs" },
+  "files": ["src", "adapters", "README.md", "LICENSE", "cordis.patch.yml"],
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "peerDependencies": { "@deepseek-ai/dsh-llm": "0.1.5-rc.2" },
+  "peerDependenciesMeta": { "@deepseek-ai/dsh-llm": { "optional": true } },
+  "scripts": { "test": "node --test --test-concurrency=1 tests/*.test.mjs", "pack:local": "node scripts/pack.mjs" }
+}

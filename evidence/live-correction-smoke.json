@@ -1,0 +1,20 @@
+{
+  "date": "2026-09-26",
+  "layer": "real model controlled smoke, synthetic task",
+  "model": "qwen3.7-plus",
+  "reasoning": { "enabled": true, "effort": "ultra" },
+  "hostSettingsChanged": false,
+  "fullNativeAgentSession": false,
+  "baselineMatchedLearnedPreference": false,
+  "newSessionRecall": true,
+  "treatmentMatchedLearnedPreference": true,
+  "contextBytes": 177,
+  "unrelatedContextBytes": 0,
+  "adopted": 1,
+  "hostVerified": 1,
+  "failed": 0,
+  "reflectionRequestSettled": true,
+  "ok": true,
+  "elapsedSeconds": 40.76,
+  "interpretation": "One learned output preference was applied in a fresh conversation and checked independently. The baseline was not given that preference. This is not a measured reduction in general error rate."
+}
