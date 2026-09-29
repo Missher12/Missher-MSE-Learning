@@ -8,6 +8,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const root = fileURLToPath(new URL('..', import.meta.url)), dist = join(root, 'dist')
 const manifest = JSON.parse(readFileSync(join(dist, 'candidate-manifest.json'), 'utf8'))
+const dshOnly = manifest.targets?.length === 1 && manifest.targets[0] === 'dsh'
+assert.equal(manifest.artifacts.length, dshOnly ? 1 : 2)
 const sha = path => createHash('sha256').update(readFileSync(path)).digest('hex')
 const stage = mkdtempSync(join(tmpdir(), 'mse-package-'))
 try {
@@ -24,8 +26,9 @@ try {
   for (const path of ['src/index.mjs', 'src/store.mjs', 'src/cli.mjs']) {
     const expected = manifest.sources.find(x => x.path === path).sha256
     assert.equal(sha(join(stage, 'package', path)), expected)
-    assert.equal(sha(join(stage, 'mse-learning/runtime', path)), expected)
+    if (!dshOnly) assert.equal(sha(join(stage, 'mse-learning/runtime', path)), expected)
   }
+  assert.equal(JSON.parse(readFileSync(join(stage, 'package/package.json'), 'utf8')).version, manifest.version)
   const clean = { PATH: dirname(process.execPath), LANG: 'C.UTF-8' }
   const config = { stateRoot: join(stage, 'state'), adapterId: 'generic' }
   const invoke = (op, input = {}) => JSON.parse(execFileSync(process.execPath, [join(stage, 'package/src/cli.mjs')], {
@@ -41,6 +44,7 @@ try {
     pathToFileURL(join(stage, 'package/src/index.mjs')).href], { cwd: stage, env: clean, encoding: 'utf8', timeout: 5000 })
   assert.equal(exported, '')
   console.log(JSON.stringify({ ok: true, sourcesMatchManifest: true, artifactsMatchManifest: true,
-    hermesAndSdkUseIdenticalCore: true, genericClientNeedsNoHostDependencies: true, cleanProcessRecall: true,
+    hermesArtifactIncluded: !dshOnly, hermesAndSdkUseIdenticalCore: dshOnly ? null : true,
+    genericClientNeedsNoHostDependencies: true, cleanProcessRecall: true,
     recallBytes: recalled.bytes, artifactBytes: manifest.artifacts.map(x => x.bytes) }))
 } finally { rmSync(stage, { recursive: true, force: true }) }

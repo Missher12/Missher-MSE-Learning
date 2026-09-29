@@ -1,6 +1,6 @@
 // Exercises the packed plugin through installed Cordis, with isolated state and no model calls.
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, symlinkSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -13,6 +13,9 @@ let ctx, fiber
 try {
   execFileSync('tar', ['-xzf', archive, '-C', root])
   symlinkSync(modules, join(root, 'package/node_modules'), 'dir')
+  const { evaluatePluginCompatibility, getDshRuntimeVersion } = await import(pathToFileURL(join(modules, '@deepseek-ai/dsh-app-boot/lib/index.js')))
+  const manifest = JSON.parse(readFileSync(join(root, 'package/package.json'), 'utf8'))
+  assert.equal(evaluatePluginCompatibility(manifest), undefined, 'packed manifest must pass the real host compatibility gate without exemptions')
   const { Context } = await import(pathToFileURL(join(modules, '@deepseek-ai/cordis/lib/index.js')))
   const { default: plugin } = await import(pathToFileURL(join(root, 'package/adapters/dsh/index.mjs')))
   const mount = async () => {
@@ -55,7 +58,8 @@ try {
   await legacy.dispose()
   await new Promise(resolve => setImmediate(resolve))
   assert.equal((await enter({ id: 'resumed', header: {} }, '导出金额并排序')).messages.length, 2)
-  console.log(JSON.stringify({ ok: true, layer: 'packed Cordis lifecycle', restartRecall: true,
+  console.log(JSON.stringify({ ok: true, layer: 'packed Cordis lifecycle', runtimeVersion: getDshRuntimeVersion(),
+    compatibilityAccepted: true, restartRecall: true,
     committedAdoption: true, repeatedContextSuppressed: true, legacyConflictPaused: true, modelCalls: 0 }))
 } finally {
   await fiber?.dispose(); await ctx?.fiber.dispose()
