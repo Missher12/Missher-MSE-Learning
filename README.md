@@ -1,4 +1,6 @@
-# MSE Learning 0.8.0-alpha.3
+# MSE Learning 0.8.0-alpha.4
+
+自家插件不再限制 DSH 宿主版本号；运行时按实际接口能力工作。开发依赖版本用于复现构建，不是安装门槛。本轮验证基线为 0.2.0-rc.1 与 0.2.0-rc.2，其他版本尚未验证。
 
 同一个持久学习核心，供 DSH、Hermes 及其他 Agent 分别接入。当前是隔离开发候选：没有替换已安装的 MSE，没有导入旧学习库，也没有改动任何宿主的模型设置。
 
@@ -27,16 +29,16 @@ npm run pack:dsh
 
 ## 接入
 
-DSH：包内 `cordis.patch.yml` 注册 `@missher/mse-learning/adapters/dsh`。本版精确声明 `@deepseek-ai/dsh-llm=0.2.0-rc.1`，对应 DSH 0.2.0-rc.1；其他版本应先验收。旧 alpha.2 的 0.1.7-rc.2 声明会被当前宿主拒绝，需使用新的 alpha.3 候选；不要用版本豁免绕过检查。状态位于当前 profile 的 `dshHomePath('mse-learning')`。配置 `reflectionEnabled: false` 可关闭复盘；检测到 `missherEvolutionCore` 时暂停新控制器，避免双重学习。
+DSH：包内 `cordis.patch.yml` 注册 `@missher/dsh-mse-learning/adapters/dsh`。本版将 `@deepseek-ai/dsh-llm` 的宿主版本约束改为 `*`；其他版本应先验收。旧 alpha.2 的 0.1.7-rc.2 声明会被当前宿主拒绝，需使用新的 alpha.4 候选；不要用版本豁免绕过检查。状态位于当前 profile 的 `dshHomePath('mse-learning')`。配置 `reflectionEnabled: false` 可关闭复盘；检测到 `missherEvolutionCore` 时暂停新控制器，避免双重学习。
 
-本版只处理 DSH 兼容；先使用 0.2.0-rc.1 的真实 AgentLoop 和内存假模型核验持久召回、实际请求内容、工具失败、可信结果、独立复盘及卸载重载，再更新精确版本声明。未发现需要变更适配业务代码的接口差异。学习算法、数据格式和上下文预算保持不变，Hermes 未升级。安装/Loader 检查使用隔离 profile，不等于已经升级日常应用。已知的 DSH 暂停后排队复盘和请求准入失败归因问题仍见源码 `PROJECT_CONTEXT.md`，本版未修复。
+本版只处理 DSH 兼容；先使用 0.2.0-rc.1 的真实 AgentLoop 和内存假模型核验持久召回、实际请求内容、工具失败、可信结果、独立复盘及卸载重载，并记录验证基线。未发现需要变更适配业务代码的接口差异。学习算法、数据格式和上下文预算保持不变，Hermes 未升级。安装/Loader 检查使用隔离 profile，不等于已经升级日常应用。已知的 DSH 暂停后排队复盘和请求准入失败归因问题仍见源码 `PROJECT_CONTEXT.md`，本版未修复。
 
 Hermes：独立压缩包的根目录为 `mse-learning`，内含 Python Hook 与 `runtime/src`；解压后可放到一个**隔离测试 profile** 的 `plugins/`，再按宿主机制启用。数据位于该 profile 的 `mse-learning/`。默认不接管 `missher-evolution`；旧插件仍启用时新控制器暂停。`MSE_REFLECTION_ENABLED=0` 关闭复盘。若任务模型和配置路由无法可靠对应，跳过复盘。不得把旧插件的数据复制成新格式。
 
 其他 Agent：导入 `LearningEngine`，或用 `mse-learn` / `node src/cli.mjs`，标准输入传一条 JSON，标准输出返回一条 JSON。需要宿主自动调用生命周期才能自动学习；当前没有 MCP Server。
 
 ```js
-import { LearningEngine } from '@missher/mse-learning'
+import { LearningEngine } from '@missher/dsh-mse-learning'
 const engine = new LearningEngine({
   stateRoot: '/absolute/private/learning-state',
   adapterId: 'my-agent',
