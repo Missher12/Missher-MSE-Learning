@@ -45,8 +45,10 @@ try {
   }
   symlinkSync(modules, join(stage, 'node_modules'), 'dir')
 
+  const manifest = JSON.parse(readFileSync(join(stage, 'package.json'), 'utf8'))
   const { TYPERT } = await import(new URL('./adapters/dsh/typert.mjs', `file://${stage}/`).href)
   const { MseDetails } = await import(new URL('./adapters/dsh/details.mjs', `file://${stage}/`).href)
+  const { MseControl } = await import(new URL('./adapters/dsh/control.mjs', `file://${stage}/`).href)
   const core = await import(new URL('./src/index.mjs', `file://${stage}/`).href)
   const root = await import(new URL('./src/root.mjs', `file://${stage}/`).href)
   const { LearningEngine } = core
@@ -57,13 +59,28 @@ try {
       && typeof root.RECALL_REASONS === 'object' && typeof root.apply === 'function'
       && root.name === 'mse-learning' && Array.isArray(root.inject))
   const coreKeys = new Set(Object.keys(core))
-  check('every package-root export except the plugin trio comes from the portable core',
-    Object.keys(root).filter(key => !['apply', 'name', 'inject', 'default'].includes(key)).every(key => coreKeys.has(key)))
+  check('every package-root export except the plugin trio and the optional schema comes from the portable core',
+    Object.keys(root).filter(key => !['apply', 'name', 'inject', 'default', 'Config'].includes(key)).every(key => coreKeys.has(key)))
+  // The settings schema is resolved at load time and is optional: with a Host beside the
+  // package it must be a real schemastery schema, and without one the root still imports.
+  check('the package root exposes the host settings schema when it can be resolved',
+    root.Config !== undefined && typeof root.Config['~standard']?.validate === 'function'
+      && root.default.Config === root.Config, 'the Loader reads `default.Config`, so both must agree')
 
+  const byService = service => TYPERT.invocations.filter(row => row.service === service)
   const markers = remoteMethods(Object.create(MseDetails.prototype))
-  check('the class marks every endpoint the manifest declares',
-    markers.length === TYPERT.invocations.length
-      && markers.map(row => row.method).sort().join() === TYPERT.invocations.map(row => row.method).sort().join())
+  const detailsDeclared = byService('mseDetails')
+  check('the read-only class marks every endpoint its manifest declares',
+    markers.length === detailsDeclared.length
+      && markers.map(row => row.method).sort().join() === detailsDeclared.map(row => row.method).sort().join())
+  const controlMarkers = remoteMethods(Object.create(MseControl.prototype))
+  const controlDeclared = byService('mseControl')
+  check('the control class marks every endpoint its manifest declares',
+    controlMarkers.length === controlDeclared.length && controlMarkers.length > 0
+      && controlMarkers.map(row => row.method).sort().join() === controlDeclared.map(row => row.method).sort().join())
+  check('one manifest carries both namespaces',
+    new Set(TYPERT.invocations.map(row => row.namespace)).size === 2
+      && TYPERT.model.services.map(row => row.key).sort().join() === 'mseControl,mseDetails')
   check('the manifest is owned by this package, host face, strict codecs',
     TYPERT.package === '@missher/dsh-mse-learning' && TYPERT.face === 'host'
       && TYPERT.invocations.every(row => row.result.mode === 'strict' && typeof row.result.create === 'function'))
@@ -105,8 +122,23 @@ try {
   ctx.typert.register(TYPERT)
   const recallCalls = []
   const state = { diagnosis: 'ok' }
+  const jobs = []
   ctx.provide('mseLearning', {
     engine,
+    version: manifest.version,
+    // The control plane reads the same service through a different face; a stub that only
+    // satisfied the read-only half used to make a settings read throw instead of answering.
+    settings: () => ({ namespace: 'mse-learning', pluginVersion: manifest.version, settingsSource: 'plugin_config',
+      user: { enabled: true, reflectionEnabled: true, maxContextBytes: 768, evaluationTokensPerDay: 0, evaluationCallsPerDay: 2 },
+      effective: { learning: true, reflection: true, reasons: [], legacyOwner: false, disposed: false },
+      budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2, evaluationTokensPerDay: 0, evaluationCallsPerDay: 2 },
+      review: { autoEnabled: true, savedAutoEnabled: true, perDay: 3, windowMs: 86_400_000, cooldownMs: 1_800_000,
+        maxTokens: 384, sharedWithManual: true, usedLast24h: 0, allowance: 3 },
+      settlement: null, jobs: { pending: 0, running: null, retained: 0, capacity: 8, inMemoryOnly: true } }),
+    permissions: () => ({ allowed: true, code: null }),
+    resolveScope: async sessionId => ({ ok: true, code: null, projectKey: '/synthetic/alpha-project', sessionId: sessionId ?? null }),
+    scopeHashFor: value => typeof value === 'string' ? createHash('sha256').update(value).digest('hex').slice(0, 12) : null,
+    jobs: { list: () => jobs, status: () => ({ pending: 0, running: null, retained: jobs.length, capacity: 8, inMemoryOnly: true }) },
     capabilities: { recallReasons: ['recalled', 'not_learned'] },
     isEnabled: () => true,
     recallStatus: (sessionId, scopeKey) => {
@@ -132,17 +164,37 @@ try {
     },
   })
   await ctx.plugin(MseDetails)
+  await ctx.plugin(MseControl)
   const gateway = ctx.get('typertGateway')
   const invoke = (method, input = {}) => gateway.invoke({ namespace: 'mseDetails', method, args: { input } })
+  const control = (method, input = {}) => gateway.invoke({ namespace: 'mseControl', method, args: { input } })
 
   const storePath = join(stateRoot, 'lessons-v1.json')
   const snapshot = () => ({ sha256: createHash('sha256').update(readFileSync(storePath)).digest('hex'),
     size: statSync(storePath).size, mtimeMs: statSync(storePath).mtimeMs })
   const before = snapshot()
 
+  // The control namespace is reachable, and without a learning core it refuses instead of
+  // inventing a state: "I could not read it" must never arrive as "it is paused".
+  const controlStatus = await control('status')
+  check('the control namespace reports the saved settings and the effective state',
+    controlStatus?.ok === true && controlStatus.settings?.user?.enabled === true
+      && controlStatus.effective?.learning === true && controlStatus.settings.namespace === 'mse-learning',
+    JSON.stringify(controlStatus).slice(0, 300))
+  check('the control status carries no scope path or state root',
+    !JSON.stringify(controlStatus).includes(stateRoot) && !JSON.stringify(controlStatus).includes('/synthetic'))
+  check('a manual review on a session with no readable log is refused with a code',
+    (await control('startReview', { sessionId: 's-live', turnId: 1, requestId: 'abcdefgh' })).ok === false,
+    'no session log means no job')
+  check('an unknown request id never starts a job',
+    (await control('startReview', { sessionId: 's-live', turnId: 1, requestId: 'x' })).code === 'invalid_request_id')
+  const crossNamespace = await control('overview').then(() => 'answered', error => String(error?.code ?? error))
+  check('the control namespace is not the read-only namespace', crossNamespace === 'gateway/invocation-unavailable',
+    crossNamespace)
+
   const overview = await invoke('overview')
   check('overview reports version, store readability and the byte budget', overview.ok === true
-    && overview.version === '0.9.0-alpha.10' && overview.store.readable === true
+    && overview.version === manifest.version && overview.store.readable === true
     && overview.budget.turnBytes === 768 && overview.budget.sessionBytes === 1536)
   check('overview shows the session directory state instead of a guessed count',
     overview.sessionDirectory.available === true && overview.sessionDirectory.archivedKnown === true

@@ -1,6 +1,12 @@
-# MSE Learning 0.9.0-alpha.10
+# MSE Learning 0.9.0-alpha.13
 
 供 DSH、Hermes 和其他 Agent 接入的持久学习核心。保存明确用户纠错，在任务中限额召回；推断方法经过比较评测或登记算法回归后才进入日常召回。采用、独立检查、负面证据、停用、替代和回滚形成同一个有版本的闭环。
+
+## 0.9.0-alpha.13 更新
+
+- 在 DSH「设置 → 自我进化」统一管理配置、学习详情、复盘与评测；沿用宿主菜单和按钮样式，导航与详情排版已对齐。
+- 修复带参数的 `/mse why`、`/mse detail`、`/mse now <任务文本>` 被当作普通聊天发送的问题。命令在同一插件内声明参数输入，沿用宿主命令路由，无需额外兼容包。只输入 `/mse` 时先进入参数输入，再按 Enter 显示状态。
+- 保留 schema 2 学习数据和会话预算。alpha.10 至 alpha.13 升级无需数据迁移；schema 1 用户仍须按下方迁移说明处理。
 
 ## 本版行为
 
@@ -45,7 +51,7 @@ MSE_REFLECTION_ENABLED=0 可停用复盘。MSE_EVALUATION_TOKENS_PER_DAY / MSE_E
 
 ## 通用 SDK / JSON CLI
 
-包根 `@missher/dsh-mse-learning` 同时是通用 SDK 与 DSH Bundle 入口：它重导出 `./core` 的全部符号，且只有在 DSH 宿主调用 `apply` 时才动态加载宿主适配器，因此没有任何 DSH 依赖的进程也能 `import '@missher/dsh-mse-learning'` 拿到 `LearningEngine`。DSH 侧同一 Bundle 还带浏览器端「学习详情」只读页（设置 → 插件 → MSE）。其他 Agent 通过可信生命周期接入，能力语义见 [Adapter 协议](docs/ADAPTER_PROTOCOL.md) 与 [召回说明](docs/RECALL_2026-09-30.md)。SDK 可导入 LearningEngine、reflect、runEvaluation、guardedAction、getMethod、listMethods、checkArtifact、applyMethod、assessEvaluation、RECALL_REASONS，以及 `@missher/dsh-mse-learning/status` 的状态格式化与命令实现。`LearningEngine#diagnose({ projectKey, sessionId, environmentId, prompt })` 给出只读库状态或在给定任务下的召回预演。
+包根 `@missher/dsh-mse-learning` 同时是通用 SDK 与 DSH Bundle 入口：它重导出 `./core` 的全部符号，且只有在 DSH 宿主调用 `apply` 时才动态加载宿主适配器，因此没有任何 DSH 依赖的进程也能 `import '@missher/dsh-mse-learning'` 拿到 `LearningEngine`。DSH 侧同一 Bundle 提供「设置 → 自我进化」管理页，并保留插件详情入口。其他 Agent 通过可信生命周期接入，能力语义见 [Adapter 协议](docs/ADAPTER_PROTOCOL.md) 与 [召回说明](docs/RECALL_2026-09-30.md)。SDK 可导入 LearningEngine、reflect、runEvaluation、guardedAction、getMethod、listMethods、checkArtifact、applyMethod、assessEvaluation、RECALL_REASONS，以及 `@missher/dsh-mse-learning/status` 的状态格式化与命令实现。`LearningEngine#diagnose({ projectKey, sessionId, environmentId, prompt })` 给出只读库状态或在给定任务下的召回预演。
 
 ```js
 import { LearningEngine } from '@missher/dsh-mse-learning/core'
@@ -92,8 +98,8 @@ npm run pack:local
 npm run verify:package
 ```
 
-构建在隔离源码副本执行，输出 `dist/0.9.0-alpha.10/` 的 DSH npm 包、Hermes 包和 SHA256 清单；已有候选不覆盖。两包使用相同核心源码。单独 `pack:dsh` 仍可使用。
+构建在隔离源码副本执行，输出 `dist/0.9.0-alpha.13/` 的 DSH npm 包、Hermes 包和 SHA256 清单；已有候选不覆盖。两包使用相同核心源码。单独 `pack:dsh` 仍可使用。
 
-`node scripts/pack-source.mjs` 生成源码归档并**从原始归档条目**验证可移植性（Python tarfile 读取，拒绝 `._*`/`.DS_Store`/`__MACOSX`/绝对路径/链接），同时校验运行包；`node scripts/verify-package.mjs` 复核 52 项来源清单与源码归档逐文件一致。`node scripts/verify-review-counters.mjs` 用独立检修报告中的原始反例做回归；`tests/fixtures/` 由 `scripts/make-legacy-fixtures.mjs` 用真实的 0.9.0-alpha.2 与 0.8.0-alpha.4 引擎生成。
+`node scripts/pack-source.mjs` 生成源码归档并**从原始归档条目**验证可移植性（Python tarfile 读取，拒绝 `._*`/`.DS_Store`/`__MACOSX`/绝对路径/链接），同时校验运行包；`node scripts/verify-package.mjs` 按当前候选清单复核源码归档逐文件一致。`node scripts/verify-review-counters.mjs` 用独立检修报告中的原始反例做回归；`tests/fixtures/` 由 `scripts/make-legacy-fixtures.mjs` 用真实的 0.9.0-alpha.2 与 0.8.0-alpha.4 引擎生成。
 
 原生 Loader、真实 AgentLoop 加假模型、受控真实模型调用、日常安装、长期效果分别报告。完成测试不能证明开放任务从此不犯错；长期验收应统计有检查依据的同类错误复发率。当前交付状态见 PROJECT_CONTEXT.md 和对应 dist 交付回执。

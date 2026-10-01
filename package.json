@@ -1,6 +1,6 @@
 {
   "name": "@missher/dsh-mse-learning",
-  "version": "0.9.0-alpha.10",
+  "version": "0.9.0-alpha.13",
   "private": true,
   "type": "module",
   "description": "Scoped persistent lessons with bounded context for Agent adapters",
@@ -13,6 +13,7 @@
     "./harness": "./adapters/harness.mjs",
     "./checks": "./src/checks.mjs",
     "./evaluation": "./src/evaluation.mjs",
+    "./cases": "./src/cases.mjs",
     "./adapters/dsh": "./adapters/dsh/index.mjs",
     "./status": "./src/status.mjs",
     "./recall": "./src/recall.mjs",
@@ -26,7 +27,11 @@
   },
   "files": [
     "src",
-    "adapters",
+    "adapters/dsh",
+    "adapters/harness.mjs",
+    "adapters/hermes/__init__.py",
+    "adapters/hermes/bridge.py",
+    "adapters/hermes/plugin.yaml",
     "README.md",
     "docs/ADAPTER_PROTOCOL.md",
     "LICENSE",
@@ -42,6 +47,7 @@
         "@deepseek-ai/dsh-api-remotes",
         "@deepseek-ai/dsh-client-ui-plugin-manager",
         "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-locale"
       ]
     }
@@ -49,7 +55,8 @@
   "peerDependencies": {
     "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/dsh-typert-protocol": "*"
+    "@deepseek-ai/dsh-typert-protocol": "*",
+    "@deepseek-ai/schemastery": "*"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-llm": {
@@ -59,6 +66,9 @@
       "optional": true
     },
     "@deepseek-ai/dsh-typert-protocol": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
       "optional": true
     }
   },

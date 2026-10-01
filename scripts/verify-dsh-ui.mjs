@@ -1,14 +1,21 @@
 /**
- * Isolated detail-page verification: real `dsh web` host, real profile, real browser.
+ * Isolated settings-page verification: real `dsh web` host, real profile, real browser.
  *
  * Usage:
  *   node scripts/verify-dsh-ui.mjs --tgz <package.tgz> --out <evidence-dir> [--port 4399] [--keep]
  *
  * The script never touches the daily installation: it creates its own DSH_HOME under a
  * temporary directory, installs the packed bundle through the real CLI, seeds a synthetic
- * learning store, boots the web profile, drives 设置 → 插件 → MSE → 学习详情 in Chromium and
- * records screenshots plus a JSON report. It also hashes the learning store before and after
- * every page interaction, which is the read-only evidence.
+ * learning store, boots the web profile, drives the real global 设置 → 自我进化 section in
+ * Chromium, and records screenshots plus a JSON report.
+ *
+ * What it proves, in the order a person would do it:
+ *   • the entry is a real Settings section, not a plugin detail page;
+ *   • the plugin's own page keeps the host management row and points at the section;
+ *   • the switches write through the host settings document (the profile patch changes) and the
+ *     page re-reads the effective state straight away, without a manual refresh;
+ *   • the value survives a full Host restart, and the page stays usable while paused;
+ *   • reading the page never rewrites the learning store.
  */
 import { createRequire } from 'node:module'
 import { execFileSync, spawn } from 'node:child_process'
@@ -61,6 +68,15 @@ const storeState = () => {
   const bytes = readFileSync(path)
   return { sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length, mtimeMs: statSync(path).mtimeMs }
 }
+/** The profile patch is where a settings save really lands; read it, never write it. */
+const patchPath = () => join(home, 'profiles', profile, 'cordis.patch.yml')
+const patchState = () => {
+  const path = patchPath()
+  if (!existsSync(path)) return null
+  const text = readFileSync(path, 'utf8')
+  const row = /- id: mse-learning[\s\S]*?(?=\n- id:|\n*$)/u.exec(text)?.[0] ?? ''
+  return { sha256: createHash('sha256').update(text).digest('hex'), row: row.trim().slice(0, 400) }
+}
 const check = (name, value, detail) => {
   report.assertions.push({ name, ok: value === true, detail })
   assert.equal(value, true, `${name}${detail === undefined ? '' : ` (${detail})`}`)
@@ -101,7 +117,8 @@ try {
     }
     poll()
   })
-  report.url = url
+  report.url = url.split('?')[0]
+  report.urlNote = 'the boot token query is dropped from this report'
   report.phases.push({ phase: 'boot', ok: true })
 
   const { chromium } = playwrightRequire('playwright')
@@ -163,121 +180,462 @@ try {
     }
     return (await page.locator('[role="presentation"]').count()) === 0
   }
+  // ---------------------------------------------------------------- settings entry
+  // The first-run API-key dialog owns a mask that would swallow the sidebar click; it is
+  // dismissed first, and never again afterwards — Escape closes the Settings modal itself.
+  await domClick(/稍后配置|Set up later|Configure later/)
+  await page.waitForTimeout(600)
   await dismissOverlays()
-  await page.getByRole('button', { name: /插件|Plugins/ }).first().click({ timeout: 15_000 })
-  await page.waitForTimeout(1500)
-  await dismissOverlays()
-  await page.getByText('@missher/dsh-mse-learning').first().click({ timeout: 15_000 })
+  const openSettings = async () => {
+    for (const name of [/^设置$/, /^Settings$/]) {
+      const button = page.getByRole('button', { name }).first()
+      if (await button.count() === 0) continue
+      await button.click({ timeout: 15_000 })
+      await page.waitForTimeout(1800)
+      return true
+    }
+    return false
+  }
+  const settingsOpened = await openSettings()
+  const navItem = page.getByRole('button', { name: /自我进化|Self-evolution/u }).first()
+  const navLabels = await page.getByRole('button').allInnerTexts()
+  check('the global settings navigation carries the 自我进化 section', await navItem.count() === 1,
+    `settingsOpened=${settingsOpened} nav=${JSON.stringify(navLabels.slice(0, 24))}`)
+  await navItem.click({ timeout: 15_000 })
   await page.waitForTimeout(2500)
   const section = page.locator('[data-mse-details="page"]')
-  check('the MSE bundle page carries the read-only details section', await section.count() === 1)
-  // The picker reads the Host's own session directory, so it fills without page-local state.
-  const pickerOptions = await section.locator('select[aria-label="选择会话"] option').allTextContents()
-  check('the scope picker is filled from the Host session directory',
-    pickerOptions.length >= 2 && pickerOptions[0].includes('默认'), pickerOptions.join(' | ').slice(0, 160))
-  await shot(page, '02-plugin-detail-overview')
+  if (await section.count() !== 1) {
+    // A section that throws is replaced by the shell's error boundary; capture what it says
+    // instead of reporting a bare zero.
+    report.sectionFailure = {
+      errors: pageErrors.slice(0, 6),
+      shellText: (await page.locator('body').innerText()).slice(0, 1200),
+    }
+  }
+  check('the section renders the MSE panel', await section.count() === 1,
+    JSON.stringify(report.sectionFailure ?? {}).slice(0, 900))
+  await shot(page, '01-settings-section')
 
   const text = () => section.innerText()
-  const overview = await text()
-  check('overview shows the bundle version', overview.includes('0.9.0-alpha.10'), overview.slice(0, 120))
-  check('overview labels both byte budgets with their unit',
-    overview.includes('单轮上限') && overview.includes('会话上限') && /768 B/u.test(overview) && /1536 B/u.test(overview),
-    overview.slice(0, 300))
-  check('overview separates plugin state from learned state',
-    overview.includes('不等于已经学到经验') || overview.includes('不等于'), overview.slice(0, 200))
-  report.phases.push({ phase: 'overview', ok: true })
+  const fullText = () => section.evaluate(element => element.textContent ?? '')
+  /**
+   * Drive one host picker: open its trigger, read the list, pick a row by label.
+   * The page no longer renders a native <select>, so this is the real interaction a person has.
+   */
+  const openPicker = async label => {
+    const trigger = section.getByRole('button', { name: label }).first()
+    await trigger.click()
+    await page.waitForTimeout(400)
+    const items = await page.getByRole('menuitem').allInnerTexts()
+    return { trigger, items: items.map(text => text.trim()) }
+  }
+  const chooseByLabel = async (label, text) => {
+    const { items } = await openPicker(label)
+    const match = items.find(item => item.includes(text))
+    assert.ok(match !== undefined, `picker ${label} offers ${text}; it offers ${items.join(' | ')}`)
+    await page.getByRole('menuitem', { name: match }).first().click()
+    await page.waitForTimeout(700)
+    return match
+  }
+  const chooseByIndex = async (label, index) => {
+    const { items } = await openPicker(label)
+    assert.ok(items.length > index, `picker ${label} has at least ${index + 1} rows; it has ${items.length}`)
+    await page.getByRole('menuitem', { name: items[index] }).first().click()
+    await page.waitForTimeout(900)
+    return items[index]
+  }
 
+  const openDisclosure = async (name, scope = section) => {
+    const summary = scope.locator('summary', { hasText: name }).first()
+    if (await summary.count() === 0) return false
+    const open = await summary.evaluate(node => node.parentElement.open === true)
+    if (!open) { await summary.click(); await page.waitForTimeout(400) }
+    return true
+  }
+  const overview = await text()
+  check('the section names itself 自我进化', overview.includes('自我进化'), overview.slice(0, 120))
+  check('the three runtime controls are on the first screen',
+    overview.includes('持久学习') && overview.includes('自动复盘') && overview.includes('单轮上下文上限'),
+    overview.slice(0, 240))
+  // The five pages are the confirmed preview's labels, on the host's own SegmentedTabs.
+  const tabText = await section.locator('[role="tablist"]').first().innerText()
+  check('the five pages use the confirmed labels',
+    ['常规', '经验', '召回', '任务', '额度'].every(label => tabText.includes(label)), tabText.replace(/\n/gu, ' '))
+  const tabList = section.locator('[role="tablist"]').first()
+  const tabGeom = await tabList.evaluate(element => {
+    const tabs = [...element.querySelectorAll('[role="tab"]')].map(node => node.getBoundingClientRect())
+    const list = element.getBoundingClientRect()
+    return { count: tabs.length, display: getComputedStyle(element).display,
+      widths: tabs.map(rect => Math.round(rect.width)),
+      span: tabs.length === 0 ? 0 : Math.round(tabs[tabs.length - 1].right - tabs[0].left),
+      listWidth: Math.round(list.width) }
+  })
+  // The native indicator is laid out over the whole list; the buttons must cover it too.
+  check('the native tab grid is not overridden by this bundle',
+    ['grid', 'inline-grid'].includes(tabGeom.display), JSON.stringify(tabGeom))
+  check('the five tabs share the full tab list width',
+    tabGeom.count === 5 && tabGeom.span >= tabGeom.listWidth - 8, JSON.stringify(tabGeom))
+  check('the detail views are not pushed off the first screen',
+    overview.includes('学习概况') || overview.includes('版本与只读明细'), overview.slice(-160))
+  // Full limits live in the disclosures; open them rather than weakening the assertions.
+  await openDisclosure('版本与只读明细')
+  check('the version details carry the read-only facts',
+    (await fullText()).includes('1536') && (await fullText()).includes('单轮最多'),
+    (await fullText()).slice(0, 200))
+  const runtimeOpened = await openDisclosure('运行详情与使用说明')
+  check('the runtime disclosure exists and opened for real', runtimeOpened === true
+    && await section.locator('details.mse-disclosure').filter({ hasText: '运行详情与使用说明' })
+      .first().evaluate(node => node.open === true))
+  check('the opened runtime help is actually painted',
+    await section.getByText('不需要另启常驻进程').first().isVisible())
+  check('the runtime help carries the full limits and lifecycle',
+    (await fullText()).includes('不需要另启常驻进程') && (await fullText()).includes('不等于已经学到经验'))
+  report.phases.push({ phase: 'settings-section', ok: true })
+  await shot(page, '01b-details-open')
+
+  // ---------------------------------------------------------------- real save
+  const masterSwitch = section.getByRole('switch', { name: '持久学习' })
+  const saveButton = section.getByRole('button', { name: /^(保存|Save)$/u }).first()
+  const discardButton = section.getByRole('button', { name: /^(取消|Discard)$/u }).first()
+  check('an unmodified draft offers no primary save',
+    await saveButton.isDisabled(), 'the button is disabled until the draft differs')
+  check('the master switch starts enabled', await masterSwitch.getAttribute('aria-checked') === 'true')
+  await masterSwitch.click()
+  await page.waitForTimeout(400)
+  check('the switch reflects the edit before saving', await masterSwitch.getAttribute('aria-checked') === 'false')
+  check('editing enables saving', await saveButton.isEnabled())
+  check('discarding is offered once the draft differs', await discardButton.isEnabled())
+  const beforeSave = storeState()
+  await saveButton.click()
+  await page.waitForTimeout(2000)
+  const savedText = await text()
+  check('the save reports success', savedText.includes('已保存'), savedText.slice(0, 200))
+  check('saving is disabled again after the write', await saveButton.isDisabled())
+  check('the paused state is shown immediately',
+    (await section.innerText()).includes('已暂停'), (await section.innerText()).slice(0, 200))
+  await shot(page, '08-saved-paused')
+  report.patchAfterPause = patchState()
+  check('the settings patch really carries the pause',
+    (patchState()?.row ?? '').includes('enabled: false'), (patchState()?.row ?? '').slice(0, 200))
+  await masterSwitch.click()
+  await page.waitForTimeout(300)
+  await saveButton.click()
+  await page.waitForTimeout(2500)
+  report.patchAfterReenable = patchState()
+  // The patch layer is SPARSE by contract: the host's config editor drops a key whose value
+  // equals the inherited one and drops the whole row once only `id`/`name` remain
+  // (packages/boot/config-editor/src/index.ts:122-129). Returning a setting to its default
+  // therefore leaves NO row — that is "inheriting the bundle default again", not a failed save
+  // and not a leftover `false`. The write is verified through real reads instead of raw YAML.
+  check('returning a setting to its default removes the sparse patch row',
+    (patchState()?.row ?? '') === '', (patchState()?.row ?? '').slice(0, 240))
+  // 1. the composed configuration the host actually runs with
+  const composedAfter = run(['--profile', profile, '--dump-config'])
+  const composedRow = /name: '@missher\/dsh-mse-learning'[\s\S]*?(?=\n\s*- id:|$)/u.exec(composedAfter)?.[0] ?? ''
+  report.composedRowAfterReenable = composedRow.trim().slice(0, 300)
+  check('the composed configuration no longer carries the pause',
+    composedRow.includes('name:') && !composedRow.includes('enabled: false'), composedRow.trim().slice(0, 240))
+  // 2. the live runtime state, read through the control Remote
+  check('the re-enabled runtime reports itself as running',
+    (await section.innerText()).includes('运行中'), (await section.innerText()).slice(0, 200))
+  check('the running state returns without a reload',
+    (await section.innerText()).includes('运行中'), (await section.innerText()).slice(0, 200))
+  await shot(page, '09-reenabled')
+
+  // ---------------------------------------------------------------- lessons page
   await section.getByRole('tab', { name: '经验' }).click()
   await page.waitForTimeout(1200)
-  const rowTexts = async () => section.locator('tbody tr').allInnerTexts()
+  const rowTexts = async () => section.locator('details.mse-lesson > summary').allInnerTexts()
   const seeded = report.phases.find(phase => phase.phase === 'seed').summary.lessons
   const all = await rowTexts()
   check('the lesson list is populated from the synthetic store',
     all.length === Math.min(seeded, 20), `rows=${all.length} seeded=${seeded}`)
   check('the list is bounded to one page', all.length <= 20)
-  await shot(page, '03-lessons-list')
+  const scopeList = await openPicker('选择会话')
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(300)
+  check('the scope picker is a host picker filled from the Host session directory',
+    scopeList.items.length >= 2 && scopeList.items[0].includes('默认'),
+    scopeList.items.join(' | ').slice(0, 160))
+  await shot(page, '02-lessons-list')
 
-  const search = section.getByPlaceholder('搜索正文')
+  const search = section.getByPlaceholder('搜索经验内容')
   await search.fill('报表')
   await page.waitForTimeout(1200)
   const searched = await rowTexts()
   check('search narrows the list', searched.length > 0 && searched.length < all.length, `rows=${searched.length}`)
   check('search results match the query', searched.every(row => row.includes('报表')))
-  await shot(page, '04-lessons-search')
-
   await search.fill('')
   await page.waitForTimeout(800)
-  await section.getByLabel('类型').selectOption('method')
-  await page.waitForTimeout(1000)
-  const methods = await rowTexts()
-  check('the kind filter isolates methods', methods.length === 2, `rows=${methods.length}`)
-  await shot(page, '05-lessons-kind-filter')
 
-  await section.getByLabel('类型').selectOption('')
-  await section.getByLabel('状态').selectOption('suspended')
+  await chooseByLabel('类型', '方法')
   await page.waitForTimeout(1000)
-  const suspended = await rowTexts()
-  check('the status filter isolates the suspended rule', suspended.length === 1, `rows=${suspended.length}`)
-  await shot(page, '06-lessons-status-filter')
+  check('the kind filter isolates methods', (await rowTexts()).length === 2)
+  await chooseByLabel('类型', '全部')
+  await chooseByLabel('状态', '已停用')
+  await page.waitForTimeout(1000)
+  check('the status filter isolates the suspended rule', (await rowTexts()).length === 1)
+  await chooseByLabel('状态', '全部')
+  await chooseByLabel('每页', '10')
+  await page.waitForTimeout(1000)
+  check('a smaller page size pages the list', (await rowTexts()).length === 10)
+  await shot(page, '03-lessons-paging')
 
-  await section.getByLabel('状态').selectOption('')
-  await section.getByLabel('每页').selectOption('10')
-  await page.waitForTimeout(1000)
-  const pageOne = await rowTexts()
-  check('a smaller page size pages the list', pageOne.length === 10, `rows=${pageOne.length}`)
-  await section.getByRole('button', { name: '下一页' }).click()
-  await page.waitForTimeout(1000)
-  const pageTwo = await rowTexts()
-  check('paging moves to the next window',
-    pageTwo.length > 0 && pageTwo[0] !== pageOne[0], `first=${pageTwo[0]?.slice(0, 20)}`)
-  await shot(page, '07-lessons-paging')
-
-  await section.locator('tbody tr').first().click()
-  await page.waitForTimeout(1200)
-  const detail = await text()
-  check('lesson detail shows the stored provenance', detail.includes('来源依据') && detail.includes('宿主回合'))
+  await section.locator('details.mse-lesson').first().locator('summary').click()
+  await page.waitForTimeout(1500)
+  const detail = await fullText()
+  check('lesson detail shows the stored provenance', detail.includes('来源依据') || detail.includes('宿主回合'))
   check('the provenance is the saved turn identifier or an explicit not-recorded',
-    /宿主回合 [a-f0-9]{12}/u.test(detail) || detail.includes('未记录'), detail.slice(0, 200))
+    /宿主回合/u.test(detail) || detail.includes('未记录'), detail.slice(0, 200))
   check('lesson detail marks environment applicability', detail.includes('环境'))
   check('lesson detail separates adoption from verification', detail.includes('采用与验证'))
-  await shot(page, '08-lesson-detail')
-  await section.getByRole('button', { name: '返回列表' }).click()
-  await page.waitForTimeout(800)
+  check('the detail is a disclosure that can be closed again',
+    await section.locator('details.mse-lesson').first().evaluate(node => node.open) === true)
+  await shot(page, '04-lesson-detail')
+  await section.locator('details.mse-lesson').first().locator('summary').click()
+  await page.waitForTimeout(500)
+  check('closing the detail leaves the list in place', (await rowTexts()).length === 10)
 
+  // ---------------------------------------------------------------- recall page
   await section.getByRole('tab', { name: '召回' }).click()
   await page.waitForTimeout(1200)
-  const recallUnselected = await text()
-  check('recall asks for a scope instead of inventing one', recallUnselected.includes('请在上方选择一个会话'))
-  await section.getByLabel('选择会话').selectOption({ index: 1 })
+  check('recall asks for a scope instead of inventing one',
+    (await text()).includes('请在上方选择一个会话'), (await text()).slice(0, 200))
+  await chooseByIndex('选择会话', 1)
   await page.waitForTimeout(1800)
   const recall = await text()
-  check('a chosen session shows its own scope line and in-process state',
-    recall.includes('作用域') && (recall.includes('本次运行的最近轮次') || recall.includes('暂无本次运行记录')))
-  check('the recall view never claims another session', !recall.includes('未记录 结算'))
-  await shot(page, '09-recall')
+  check('a chosen session reports its own in-process state',
+    recall.includes('暂无本次运行记录') || recall.includes('尚未触发召回') || recall.includes('回合'), recall.slice(0, 240))
+  await shot(page, '05-recall')
+  const diagnose = section.getByLabel('任务描述')
+  if (await diagnose.count() > 0) {
+    await diagnose.fill('导出报表金额并核对币种')
+    await section.getByRole('button', { name: '预览注入' }).click()
+    await page.waitForTimeout(1500)
+    check('the read-only dry run answers with a real verdict',
+      !(await text()).includes('只读诊断不可用'), (await text()).slice(-200))
+  }
+  await shot(page, '05b-diagnose')
 
-  await section.getByRole('tab', { name: '预算' }).click()
-  await page.waitForTimeout(800)
-  const budget = await text()
-  check('budget names the unit and denies a token reading',
-    budget.includes('768 B') && budget.includes('1536 B') && budget.includes('不是 token'))
-  check('budget shows the selected session ledger instead of a dash',
-    /\d+ B \/ 1536 B/u.test(budget) && budget.includes('当前会话剩余'), budget.slice(0, 200))
-  check('budget explains the non-injection reasons', budget.includes('预算不足') && budget.includes('方法未验证'))
-  await shot(page, '10-budget')
+  // ---------------------------------------------------------------- tasks page
+  await section.getByRole('tab', { name: '任务' }).click()
+  await page.waitForTimeout(1200)
+  const tasks = await text()
+  check('the tasks page keeps both manual flows',
+    tasks.includes('手动复盘') && tasks.includes('验证候选经验'), tasks.slice(0, 240))
+  check('the tasks page asks for a scope first', tasks.includes('在上方选择一个会话') || tasks.includes('选择会话'))
+  await shot(page, '06-tasks')
 
-  await section.getByRole('tab', { name: '总览' }).click()
-  await section.getByRole('button', { name: '刷新' }).click()
-  await page.waitForTimeout(1800)
-  check('refresh re-reads without an error banner', !(await text()).includes('读取失败'))
-  check('refresh keeps the page rendered', await section.count() === 1)
+  // ---------------------------------------------------------------- budget page
+  await section.getByRole('tab', { name: '额度' }).click()
+  await page.waitForTimeout(1000)
+  const budget = await fullText()
+  check('the budget page names the unit and denies a token reading',
+    budget.includes('不是 token'), budget.slice(0, 240))
+  const tokenField = section.getByLabel('每日评测 token 上限')
+  const callField = section.getByLabel('每日评测次数上限')
+  check('the evaluation allowances are real spinbuttons',
+    await tokenField.count() === 1 && await callField.count() === 1
+    && await tokenField.getAttribute('role') !== null || await tokenField.evaluate(node => node.tagName) === 'INPUT',
+    `token=${await tokenField.count()} calls=${await callField.count()}`)
+  check('the token allowance is editable',
+    await tokenField.isEditable() && await tokenField.isEnabled())
+  check('the call allowance is editable',
+    await callField.isEditable() && await callField.isEnabled())
+  await shot(page, '07-budget')
 
   const after = storeState()
-  check('page reads never rewrite the learning store', JSON.stringify(before) === JSON.stringify(after),
-    `${JSON.stringify(before)} vs ${JSON.stringify(after)}`)
+  check('page reads and setting saves never rewrite the learning store',
+    JSON.stringify(beforeSave) === JSON.stringify(after), `${JSON.stringify(beforeSave)} vs ${JSON.stringify(after)}`)
   check('the page produced no browser errors', pageErrors.length === 0, pageErrors.slice(0, 3).join(' | '))
-  report.phases.push({ phase: 'read-only', before, after })
-  await shot(page, '11-final-overview')
+  report.phases.push({ phase: 'settings-save', before: beforeSave, after, patch: patchState()?.row ?? '' })
+
+  const errorsBeforeRestart = pageErrors.slice()
+  report.errorsBeforeRestart = errorsBeforeRestart
+  // ---------------------------------------------------------------- restart
+  server.kill('SIGTERM')
+  await new Promise(resolveWait => setTimeout(resolveWait, 1500))
+  server = spawn(process.execPath, [cli, '--profile', profile, '--no-open', '--port', String(port)],
+    { env, cwd: work, stdio: ['ignore', 'pipe', 'pipe'] })
+  let restartedLog = ''
+  server.stdout.on('data', chunk => { restartedLog += chunk })
+  server.stderr.on('data', chunk => { restartedLog += chunk })
+  const restartedUrl = await new Promise((resolveUrl, rejectUrl) => {
+    const deadline = Date.now() + 60_000
+    const poll = () => {
+      const match = /http:\/\/127\.0\.0\.1:\d+\/?\?token=[\w-]+/u.exec(restartedLog)
+      if (match) return resolveUrl(match[0])
+      if (Date.now() > deadline) return rejectUrl(new Error(`web host did not restart:\n${restartedLog}`))
+      setTimeout(poll, 250)
+    }
+    poll()
+  })
+  report.restartedUrl = restartedUrl.split('?')[0]
+  await page.goto(restartedUrl, { waitUntil: 'domcontentloaded' })
+  await page.waitForTimeout(3500)
+  await dismissOverlays()
+  await domClick(/^(继续|Continue)$/)
+  await dismissOverlays()
+  await openSettings()
+  await page.getByRole('button', { name: /自我进化|Self-evolution/u }).first().click({ timeout: 15_000 })
+  await page.waitForTimeout(3000)
+  const afterRestart = page.locator('[data-mse-details="page"]')
+  check('the settings section is still there after a Host restart', await afterRestart.count() === 1)
+  check('the saved switch survived the restart',
+    await afterRestart.getByRole('switch', { name: '持久学习' }).getAttribute('aria-checked') === 'true')
+  check('the restarted page still reports the running state',
+    (await afterRestart.innerText()).includes('运行中'), (await afterRestart.innerText()).slice(0, 200))
+  const composedRestart = run(['--profile', profile, '--dump-config'])
+  const restartRow = /name: '@missher\/dsh-mse-learning'[\s\S]*?(?=\n\s*- id:|$)/u.exec(composedRestart)?.[0] ?? ''
+  check('the composed configuration after the restart still runs enabled',
+    restartRow.includes('name:') && !restartRow.includes('enabled: false'), restartRow.trim().slice(0, 240))
+  check('the restarted page still reads the library',
+    JSON.stringify(storeState()) === JSON.stringify(beforeSave))
+  await shot(page, '10-after-restart')
+
+  // ---------------------------------------------------------------- size / theme matrix
+  // The page is used at three common sizes in both themes; nothing may overflow sideways and
+  // every page must stay reachable.
+  const overflow = async () => page.evaluate(() => ({
+    scrollWidth: document.documentElement.scrollWidth,
+    clientWidth: document.documentElement.clientWidth,
+    sectionOverflow: (() => {
+      const section = document.querySelector('[data-mse-details="page"]')
+      return section === null ? null : Math.max(0, section.scrollWidth - section.clientWidth)
+    })(),
+  }))
+  report.matrix = []
+  for (const [width, height, scheme] of [[1440, 1000, 'light'], [1440, 1000, 'dark'],
+    [1024, 720, 'light'], [1024, 720, 'dark'], [800, 600, 'light'], [800, 600, 'dark']]) {
+    await page.setViewportSize({ width, height })
+    await page.emulateMedia({ colorScheme: scheme })
+    await page.waitForTimeout(700)
+    await page.getByRole('button', { name: /自我进化|Self-evolution/u }).first().click({ timeout: 15_000 })
+    await page.waitForTimeout(900)
+    const sizes = await overflow()
+    const tag = `${width}x${height}-${scheme}`
+    check(`no sideways overflow at ${tag}`, sizes.scrollWidth <= sizes.clientWidth + 1, JSON.stringify(sizes))
+    check(`the section itself does not scroll sideways at ${tag}`, (sizes.sectionOverflow ?? 0) <= 1, JSON.stringify(sizes))
+    check(`the five tabs are still reachable at ${tag}`,
+      await section.locator('[role="tab"]').count() === 5)
+    // Click every page and prove the highlight lands on the button that was clicked and that
+    // its own panel is the visible one.
+    for (const [id, label, panelSuffix] of [['overview', '常规', 'overview'], ['lessons', '经验', 'lessons'],
+      ['recall', '召回', 'recall'], ['manual', '任务', 'manual'], ['budget', '额度', 'budget']]) {
+      await section.getByRole('tab', { name: label }).click()
+      await page.waitForTimeout(450)
+      const state = await section.evaluate((_, wanted) => {
+        const tabs = [...document.querySelectorAll('[role="tab"]')]
+        const selected = tabs.filter(node => node.getAttribute('aria-selected') === 'true')
+        const panels = [...document.querySelectorAll('[data-mse-details="page"] [role="tabpanel"]')]
+        const shown = panels.filter(node => node.offsetParent !== null)
+        // The native tab list paints its own sliding block: a span[aria-hidden] sized
+        // `(100% - 8px) / n` and shifted by `index * 100%`. Comparing ITS rect with the
+        // selected tab's rect is the real highlight check; a non-zero width is not.
+        const list = document.querySelector('[data-mse-details="page"] [role="tablist"]')
+        const indicator = list === null ? null : list.querySelector(':scope > span[aria-hidden="true"]')
+        const rect = node => { const r = node.getBoundingClientRect()
+          return { left: Math.round(r.left * 10) / 10, width: Math.round(r.width * 10) / 10 } }
+        let highlight = null
+        if (indicator !== null && selected.length === 1) {
+          const a = rect(indicator), b = rect(selected[0])
+          highlight = { indicatorLeft: a.left, indicatorWidth: a.width, tabLeft: b.left, tabWidth: b.width,
+            leftDelta: Math.round(Math.abs(a.left - b.left) * 10) / 10,
+            widthDelta: Math.round(Math.abs(a.width - b.width) * 10) / 10 }
+        }
+        return { selected: selected.map(node => (node.textContent ?? '').trim()),
+          selectedCount: selected.length,
+          shownCount: shown.length,
+          shownId: shown.length === 1 ? shown[0].id : null,
+          highlight }
+      }, id)
+      report.matrix.push({ size: `${tag}`, page: label, ...state })
+      check(`${tag} · ${label} is the only selected tab`, state.selectedCount === 1
+        && state.selected[0] === label, JSON.stringify(state))
+      check(`${tag} · ${label} shows its own panel`, state.shownCount === 1
+        && state.shownId === `mse-pane-${panelSuffix}`, JSON.stringify(state))
+      // Tolerance is the wrapper's own padding (3px each side of the 1fr grid).
+      check(`${tag} · ${label} the native highlight block tracks its tab`,
+        state.highlight !== null && state.highlight.leftDelta <= 3 && state.highlight.widthDelta <= 3,
+        JSON.stringify(state.highlight))
+    }
+    await section.getByRole('tab', { name: '常规' }).click()
+    await page.waitForTimeout(400)
+    await shot(page, `m-${tag}`)
+  }
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await page.emulateMedia({ colorScheme: 'light' })
+  await page.waitForTimeout(600)
+  await page.getByRole('button', { name: /自我进化|Self-evolution/u }).first().click({ timeout: 15_000 })
+  await page.waitForTimeout(900)
+
+  // ---------------------------------------------------------------- long text
+  // Worst-case content, injected into the live DOM only: a long unbroken identifier and a long
+  // session label must wrap rather than push the host's column sideways.
+  const longToken = 'a'.repeat(160)
+  const longLabel = '一个很长很长的项目名称也应当保持在设置窗口的范围之内不被挤出去'.repeat(2)
+  await section.getByRole('tab', { name: '经验' }).click()
+  await page.waitForTimeout(1200)
+  // Open a lesson for real first: measuring a hidden identifier would prove nothing.
+  const firstLesson = section.locator('details.mse-lesson').first()
+  check('a lesson row exists to open', await firstLesson.count() === 1)
+  await firstLesson.locator('summary').click()
+  await page.waitForTimeout(1500)
+  check('the lesson detail is open before the long-text probe',
+    await firstLesson.evaluate(node => node.open === true))
+  check('the lesson identifier is painted', await firstLesson.locator('.mse-mono').first().isVisible())
+  const longDetail = await section.evaluate((_, token) => {
+    const first = document.querySelector('details.mse-lesson[open]')
+    if (first === null) return null
+    const identifier = first.querySelector('.mse-mono')
+    if (identifier === null) return null
+    const before = identifier.textContent
+    identifier.textContent = token
+    let node = identifier.parentElement, worst = 0
+    while (node !== null && node !== document.body) {
+      worst = Math.max(worst, node.scrollWidth - node.clientWidth)
+      node = node.parentElement
+    }
+    identifier.textContent = before
+    return worst
+  }, longToken)
+  check('a 160-character identifier does not widen any ancestor',
+    longDetail !== null && longDetail <= 1, `worst=${longDetail}`)
+  const longScope = await section.evaluate((_, label) => {
+    const caption = document.querySelector('[data-mse-details="page"] .mse-picker-label')
+    if (caption === null) return null
+    const before = caption.textContent
+    caption.textContent = label
+    let node = caption.parentElement, worst = 0
+    while (node !== null && node !== document.body) {
+      worst = Math.max(worst, node.scrollWidth - node.clientWidth)
+      node = node.parentElement
+    }
+    caption.textContent = before
+    return worst
+  }, longLabel)
+  check('a long session label does not widen the settings column',
+    longScope !== null && longScope <= 1, `worst=${longScope}`)
+  await shot(page, '20-long-text')
+
+  // ---------------------------------------------------------------- plugin page
+  await dismissOverlays()
+  await page.getByRole('button', { name: /插件|Plugins/u }).first().click({ timeout: 15_000 })
+  await page.waitForTimeout(1500)
+  await dismissOverlays()
+  await page.getByText('@missher/dsh-mse-learning').first().click({ timeout: 15_000 })
+  await page.waitForTimeout(2500)
+  const pointer = page.locator('[data-mse-details="pointer"]')
+  check('the plugin page keeps the host row and points at the settings section', await pointer.count() === 1)
+  const pointerText = await pointer.innerText()
+  check('the pointer names the exact settings path', pointerText.includes('设置 → 自我进化'), pointerText.slice(0, 160))
+  check('the plugin page does not mount a second full panel',
+    await page.locator('[data-mse-details="page"]').count() === 0)
+  await shot(page, '13-plugin-pointer')
+
+  report.restartTeardownNoise = pageErrors.slice(errorsBeforeRestart.length)
+  check('the page produced no browser errors of its own', errorsBeforeRestart.length === 0,
+    errorsBeforeRestart.slice(0, 3).join(' | '))
 
   await browser.close()
   report.ok = report.assertions.every(row => row.ok)

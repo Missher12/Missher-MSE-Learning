@@ -95,6 +95,57 @@ function scopeFor(project, adapter, instance) {
   return hash(JSON.stringify(project === undefined ? ['instance', adapter, instance] : ['project', identity(project)]))
 }
 function turnKey(input) { return hash(JSON.stringify([identity(input.sessionId), identity(String(input.turnId))])) }
+/**
+ * Admission rules for one reflection, as a pure function of the stored state.
+ *
+ * `reflectionRequest` (which writes a ticket) and `reflectionPlan` (which must not) both call
+ * this, so a preview and the real request can never disagree about whether a turn is a
+ * duplicate, over the rolling 3-per-24h allowance, or inside the 30-minute cooldown. A
+ * settings page that decided this for itself could promise a review it would then refuse —
+ * or, worse, count a review it never charged.
+ */
+function reflectionChecks({ taskSummary, resultSummary }) {
+  // No raw transcript is persisted or silently sent to a different provider.
+  if (sensitive.test(taskSummary + resultSummary) || authorityChange.test(taskSummary + resultSummary)) {
+    return { skipped: 'sensitive_summary' }
+  }
+  if (taskSummary.trim().length < 8 || resultSummary.trim().length < 8) return { skipped: 'insufficient_summary' }
+  return { skipped: null }
+}
+/**
+ * Drop everything that is no longer in force at `now`, in place.
+ *
+ * The plan methods are read-only, but they must answer the *same* question the writing path
+ * will answer. The writing path reaches its decision inside `transaction`, which prunes the
+ * state first — an expired job, a receipt from yesterday and a 25-hour-old reflection spend are
+ * all gone by then. A preview that read the raw document would count those, and would tell the
+ * operator "no allowance left" about a request that would in fact be issued and charged. So
+ * both paths prune through this one function: the transaction on the stored state, the plans
+ * on a shallow copy that is never written.
+ */
+function pruneState(state, now) {
+  state.receipts = state.receipts.filter(x => x.expiresAt > now)
+  state.events = state.events.filter(x => x.at > now - 90 * DAY).slice(-2047)
+  state.jobs = state.jobs.filter(x => x.expiresAt > now)
+  state.spends = state.spends.filter(x => x.at > now - DAY)
+  return state
+}
+
+function reflectionGate(state, input, now) {
+  const turn = turnKey(input)
+  const eventId = hash(`reflection:${turn}`)
+  const recent = state.spends.filter(x => x.kind === 'reflection')
+  const lastAt = recent.reduce((newest, row) => Math.max(newest, row.at), 0)
+  const cooldownUntil = recent.length === 0 ? 0 : lastAt + 30 * 60_000
+  const allowance = Math.max(0, 3 - recent.length)
+  if (state.events.some(x => x.id === eventId)) {
+    return { turn, eventId, skipped: 'duplicate', allowance, cooldownUntil, existing: true }
+  }
+  if (allowance === 0 || cooldownUntil > now) {
+    return { turn, eventId, skipped: 'reflection_budget', allowance, cooldownUntil, existing: false }
+  }
+  return { turn, eventId, skipped: null, allowance, cooldownUntil, existing: false }
+}
 // A correction must be the user's own forward-looking requirement, never quoted
 // material, an example, a question, or a background excerpt.
 const CORRECTION_LEAD = /^(?:(?:请|麻烦|帮我)?(?:记住|记一下|记牢|纠正一下|纠正|注意)[，,:：\s]*)+/u
@@ -375,15 +426,54 @@ export class LearningEngine {
     this.evaluationTokensPerDay = evaluationTokensPerDay; this.evaluationCallsPerDay = evaluationCallsPerDay
     this.store = new LessonStore(stateRoot, hash(JSON.stringify([this.adapter, this.instance])))
   }
+  /**
+   * Apply a validated runtime-limit change to this live engine.
+   *
+   * This is the *only* supported way to change a running engine's limits. It exists because
+   * the alternative — constructing a second engine or a second bridge to pick up new values —
+   * would silently discard in-flight turns, session byte ledgers and the frozen settlement
+   * queue, and would let a settings save "refresh" the budget by forgetting what was spent.
+   *
+   * Every field is checked before anything is assigned, so a rejected call changes nothing.
+   * Nothing here touches the store: raising the byte cap cannot revive a spent session
+   * budget, and lowering it cannot delete an already-offered lesson. The new values take
+   * effect at the next `prepare`/`evaluationRequest`; an already-issued turn keeps the
+   * limits it was prepared with.
+   *
+   * `undefined` means "leave as is"; a present key is always validated, never coerced.
+   * @param input - `{ maxContextBytes?, evaluationTokensPerDay?, evaluationCallsPerDay? }`
+   * @returns the effective values after the change.
+   */
+  configure(input = {}) {
+    check(input !== null && typeof input === 'object' && !Array.isArray(input), 'invalid_configuration')
+    check(Object.keys(input).every(key => ['maxContextBytes', 'evaluationTokensPerDay', 'evaluationCallsPerDay'].includes(key)),
+      'invalid_configuration')
+    const next = {}
+    if (input.maxContextBytes !== undefined) {
+      check(Number.isSafeInteger(input.maxContextBytes) && input.maxContextBytes >= 128
+        && input.maxContextBytes <= MAX_CONTEXT_BYTES, 'invalid_context_bytes')
+      next.budget = input.maxContextBytes
+    }
+    if (input.evaluationTokensPerDay !== undefined) {
+      check(Number.isSafeInteger(input.evaluationTokensPerDay) && input.evaluationTokensPerDay >= 0
+        && input.evaluationTokensPerDay <= 1_000_000, 'invalid_evaluation_budget')
+      next.evaluationTokensPerDay = input.evaluationTokensPerDay
+    }
+    if (input.evaluationCallsPerDay !== undefined) {
+      check(Number.isSafeInteger(input.evaluationCallsPerDay) && input.evaluationCallsPerDay >= 0
+        && input.evaluationCallsPerDay <= 8, 'invalid_evaluation_calls')
+      next.evaluationCallsPerDay = input.evaluationCallsPerDay
+    }
+    Object.assign(this, next)
+    return { ok: true, maxContextBytes: this.budget, sessionBudgetBytes: 1536, maxLessons: this.maxLessons,
+      evaluationTokensPerDay: this.evaluationTokensPerDay, evaluationCallsPerDay: this.evaluationCallsPerDay }
+  }
   transaction(fn) {
     return this.store.update(state => {
       validateState(state)
       check(state.schema === 2, 'migration_required')
       const now = this.now()
-      state.receipts = state.receipts.filter(x => x.expiresAt > now)
-      state.events = state.events.filter(x => x.at > now - 90 * DAY).slice(-2047)
-      state.jobs = state.jobs.filter(x => x.expiresAt > now)
-      state.spends = state.spends.filter(x => x.at > now - DAY)
+      pruneState(state, now)
       const result = fn(state, now)
       validateState(state)
       return result
@@ -828,7 +918,10 @@ export class LearningEngine {
       reflectionsLast24h: (state.spends ?? []).filter(x => x.kind === 'reflection' && x.at > this.now() - DAY).length,
       experiments: state.experiments?.length ?? 0,
       evaluationTokensReserved24h: (state.spends ?? []).filter(x => x.kind === 'evaluation' && x.at > this.now() - DAY).reduce((n, x) => n + x.tokens, 0),
+      evaluationCallsLast24h: (state.spends ?? []).filter(x => x.kind === 'evaluation' && x.at > this.now() - DAY).length,
       evaluationTokensPerDay: this.evaluationTokensPerDay,
+      evaluationCallsPerDay: this.evaluationCallsPerDay,
+      evaluationJobsOpen: (state.jobs ?? []).length,
       capabilities: { protocol: 2, persistentRecall: true, requestEvidence: 'trusted_host',
         registeredCheckers: listMethods().map(x => x.methodId), isolatedEvaluation: true, portableMethods: true,
         automaticArbitraryTaskVerification: false, recallDiagnostics: true, environmentBound: true,
@@ -1076,8 +1169,69 @@ export class LearningEngine {
       return { ok: true, ticket, maxTokens: input.maxTokens }
     })
   }
-  evaluationCancel({ ticket }) {
-    return this.transaction(state => { state.jobs = state.jobs.filter(x => x.ticket !== ticket); return { ok: true } })
+  /**
+   * Release an evaluation ticket, keeping what the run already cost.
+   *
+   * A run that stops early — over budget, cancelled, timed out, or failed — still made real
+   * provider calls, and the usage it already received is known. Releasing the ticket without
+   * `spent` would leave the reservation at its original value and silently lose every observed
+   * token past it; refunding below the reservation would be worse. The debit therefore only
+   * ever moves up, to the larger of the reservation and what was actually measured.
+   */
+  evaluationCancel({ ticket, spent }) {
+    return this.transaction(state => {
+      state.jobs = state.jobs.filter(x => x.ticket !== ticket)
+      if (Number.isSafeInteger(spent) && spent >= 0) {
+        const debit = state.spends.find(x => x.ticket === ticket)
+        if (debit) debit.tokens = Math.max(debit.tokens, spent)
+      }
+      return { ok: true }
+    })
+  }
+  /**
+   * Read-only twin of `evaluationRequest`: may this lesson be evaluated right now, and what
+   * would it cost. Writes nothing, issues no ticket, debits nothing.
+   *
+   * A settings page must be able to show the plan — model or no model, cases, paired calls,
+   * reserved tokens, remaining daily allowance — *before* the person commits, and it must
+   * show the same verdict the real request will produce. Deriving that on the page would be
+   * a second, drifting copy of the budget rules; this is the one copy.
+   */
+  evaluationPlan(input = {}) {
+    const stored = this.store.read(); validateState(stored)
+    check(stored.schema === 2, 'migration_required')
+    const state = pruneState({ ...stored }, this.now())
+    const lesson = this.findLesson(state, input)
+    check(lesson.kind === 'method' && lesson.status !== 'suspended' && input.expectedVersion === lesson.version, 'method_not_evaluable')
+    const recent = state.spends.filter(x => x.kind === 'evaluation')
+    const tokensUsed = recent.reduce((sum, row) => sum + row.tokens, 0)
+    const maxTokens = Number.isSafeInteger(input.maxTokens) && input.maxTokens > 0 ? input.maxTokens : 0
+    const reasons = []
+    if (state.jobs.length > 0) reasons.push('evaluation_job_open')
+    if (recent.length >= this.evaluationCallsPerDay) reasons.push('evaluation_calls_exhausted')
+    if (tokensUsed + maxTokens > this.evaluationTokensPerDay) reasons.push('evaluation_tokens_exhausted')
+    return { ok: true, allowed: lesson.methodId ? true : reasons.length === 0, reasons,
+      lessonId: lesson.id, version: lesson.version, status: lesson.status, methodId: lesson.methodId ?? null,
+      basis: lesson.methodId ? 'registered_algorithm' : 'host_trial', modelRequired: !lesson.methodId,
+      tokensUsed, callsUsed: recent.length, remainingTokens: Math.max(0, this.evaluationTokensPerDay - tokensUsed),
+      remainingCalls: Math.max(0, this.evaluationCallsPerDay - recent.length), jobsOpen: state.jobs.length,
+      evaluationTokensPerDay: this.evaluationTokensPerDay, evaluationCallsPerDay: this.evaluationCallsPerDay }
+  }
+  /**
+   * Read-only twin of `reflectionRequest`. Reports the exact verdict — duplicate, rolling
+   * allowance, cooldown, summary filters — without issuing a ticket or spending an allowance.
+   */
+  reflectionPlan(input = {}) {
+    const stored = this.store.read(); validateState(stored)
+    check(stored.schema === 2, 'migration_required')
+    const now = this.now()
+    const state = pruneState({ ...stored }, now)
+    const gate = reflectionGate(state, input, now)
+    const summary = reflectionChecks({ taskSummary: typeof input.taskSummary === 'string' ? input.taskSummary : '',
+      resultSummary: typeof input.resultSummary === 'string' ? input.resultSummary : '' })
+    return { ok: true, skipped: summary.skipped ?? gate.skipped, duplicate: gate.existing,
+      allowance: gate.allowance, limit: 3, cooldownUntil: gate.cooldownUntil, cooldownMs: 30 * 60_000, windowMs: DAY,
+      turn: gate.turn, now }
   }
   reflectionRequest(input) {
     const turn = turnKey(input), scope = scopeFor(input.projectKey, this.adapter, this.instance)
@@ -1087,13 +1241,12 @@ export class LearningEngine {
     check(typeof taskSummary === 'string' && typeof resultSummary === 'string'
       && taskSummary.length <= 800 && resultSummary.length <= 1200, 'invalid_reflection')
     // No raw transcript is persisted or silently sent to a different provider.
-    if (sensitive.test(taskSummary + resultSummary) || authorityChange.test(taskSummary + resultSummary)) return { ok: true, skipped: 'sensitive_summary' }
-    if (taskSummary.trim().length < 8 || resultSummary.trim().length < 8) return { ok: true, skipped: 'insufficient_summary' }
+    const summary = reflectionChecks({ taskSummary, resultSummary })
+    if (summary.skipped !== null) return { ok: true, skipped: summary.skipped }
     return this.transaction((state, now) => {
-      const eventId = hash(`reflection:${turn}`)
-      if (state.events.some(x => x.id === eventId)) return { ok: true, skipped: 'duplicate' }
-      const recent = state.spends.filter(x => x.kind === 'reflection')
-      if (recent.length >= 3 || recent.some(x => x.at > now - 30 * 60_000)) return { ok: true, skipped: 'reflection_budget' }
+      const gate = reflectionGate(state, input, now)
+      if (gate.skipped !== null) return { ok: true, skipped: gate.skipped }
+      const eventId = gate.eventId
       const ticket = randomUUID()
       state.spends.push({ kind: 'reflection', at: now, tokens: 0 })
       // The environment travels with the ticket: the method it produces must be
@@ -1175,44 +1328,94 @@ export async function reflect(engine, input, runner, externalSignal) {
   }
 }
 
-/** Host-owned paired runner. One job at a time, prepaid daily budget, no provider/model switching. */
-export async function runEvaluation(engine, input, runner, externalSignal) {
+/**
+ * Host-owned paired runner. One job at a time, prepaid daily budget, no provider/model switching.
+ *
+ * The defaults are the original contract: one minute for the whole run, and a runner that must
+ * report a real, bounded token count for every arm. A host that legitimately needs longer — a
+ * human-started verification of a dozen paired cases cannot finish 24 model calls in a minute —
+ * may raise `options.totalDeadlineMs`, and may allow an arm whose provider reported no usage to
+ * say so with `tokens: null` by supplying `options.unknownTokenDebit`. That debit is what the
+ * arm still costs against the run's budget when its true cost is unknown: ignoring it would let
+ * an unreported call look free, which is exactly the accounting the budget exists to prevent.
+ * A run containing an unknown cost can never be assessed as an improvement
+ * (`assessEvaluation` marks it `unknown_cost` → inconclusive), so the conservative debit buys
+ * an honest verdict rather than a better one.
+ *
+ * @param options.totalDeadlineMs - whole-run bound; default 60_000, unchanged.
+ * @param options.unknownTokenDebit - integer a `null` token count is charged; `null` (default)
+ *   keeps the original rule that every arm must report a bounded integer.
+ * @param options.allowOverrun - when true, an arm may report a real measurement larger than the
+ *   budget left. The measurement is kept exactly (never clipped, because a clipped cost would
+ *   hide both the overspend and the cost comparison the assessment is based on), the run stops
+ *   before the next arm, and the caller gets `evaluation_budget_exceeded` instead of a verdict.
+ *   The default stays `false`, so the original contract is unchanged.
+ */
+export async function runEvaluation(engine, input, runner, externalSignal, options = {}) {
   if (externalSignal?.aborted) return { ok: false, code: 'cancelled' }
   check(typeof runner === 'function', 'trusted_runner_required')
+  const totalDeadlineMs = Number.isSafeInteger(options.totalDeadlineMs) && options.totalDeadlineMs > 0
+    ? options.totalDeadlineMs : 60_000
+  const unknownTokenDebit = Number.isSafeInteger(options.unknownTokenDebit) && options.unknownTokenDebit >= 0
+    ? options.unknownTokenDebit : null
+  const allowOverrun = options.allowOverrun === true
   const prepared = engine.evaluationRequest(input)
   if (!prepared.ticket) return prepared
   const controller = new AbortController()
-  let rejectAbort, timer
+  let rejectAbort, timer, failure = null
+  // Declared outside the try so every exit path — including an early stop — can still settle
+  // the ticket with what the provider already reported.
+  let spent = 0
   const aborted = new Promise((_, reject) => { rejectAbort = reject })
   const abort = () => { controller.abort(); rejectAbort(new Error('cancelled')) }
   externalSignal?.addEventListener('abort', abort, { once: true })
   try {
-    const deadline = new Promise((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(new Error('timeout')) }, 60_000) })
+    const deadline = new Promise((_, reject) => { timer = setTimeout(() => {
+      failure = 'deadline_exceeded'; controller.abort(); rejectAbort(new Error('timeout'))
+    }, totalDeadlineMs) })
     const trials = [], state = engine.store.read(), lesson = engine.findLesson(state, input)
     let remaining = input.maxTokens
     for (let index = 0; index < input.cases.length; index++) {
       const item = input.cases[index], row = { caseId: item.caseId, family: item.family, split: item.split, guardPassed: true }
       // Alternate arm order to reduce systematic warm-cache/time-order differences.
       for (const arm of index % 2 ? ['candidate', 'baseline'] : ['baseline', 'candidate']) {
-        if (controller.signal.aborted || remaining <= 0) throw new Error('evaluation_budget')
+        if (controller.signal.aborted) throw new Error('cancelled')
+        if (remaining <= 0) { failure = 'evaluation_budget_exceeded'; throw new Error('evaluation_budget') }
         const result = await Promise.race([Promise.resolve().then(() => runner({ arm, sample: item,
           instruction: arm === 'candidate' ? methodText(lesson) : null,
           maxTokens: remaining, signal: controller.signal })), aborted, deadline])
+        const unknown = result !== null && typeof result === 'object' && result.tokens === null
         check(result && typeof result.passed === 'boolean' && typeof result.guardPassed === 'boolean'
-          && Number.isSafeInteger(result.tokens) && result.tokens >= 0 && result.tokens <= remaining, 'invalid_runner_result')
-        row[arm] = { passed: result.passed, tokens: result.tokens }
+          && (unknown ? unknownTokenDebit !== null
+            : Number.isSafeInteger(result.tokens) && result.tokens >= 0
+              && (allowOverrun || result.tokens <= remaining)), 'invalid_runner_result')
+        row[arm] = { passed: result.passed, tokens: unknown ? null : result.tokens }
         row.guardPassed &&= result.guardPassed
-        remaining -= result.tokens
+        const charged = unknown ? unknownTokenDebit : result.tokens
+        remaining -= charged
+        spent += charged
+        if (typeof options.onArm === 'function') {
+          try { options.onArm({ index, arm, passed: result.passed, tokens: row[arm].tokens }) } catch {}
+        }
       }
       trials.push(row)
     }
     if (controller.signal.aborted) throw new Error('cancelled')
-    return engine.evaluate({ lessonId: lesson.id, expectedVersion: lesson.version, projectKey: input.projectKey,
-      eventId: `evaluation:${prepared.ticket}`, suiteId: input.suiteId, ticket: prepared.ticket, trials })
-  } catch { return { ok: false, code: 'evaluation_incomplete' } }
+    // `environmentId` is carried through to the final settle, exactly as the ticket was issued
+    // with it: a lesson may only be promoted in the environment that produced it. An overspend
+    // still settles here on purpose: the core records the real amount and marks the verdict
+    // inconclusive, so an over-budget run is never promoted and never under-reported.
+    return { ...engine.evaluate({ lessonId: lesson.id, expectedVersion: lesson.version, projectKey: input.projectKey,
+      ...(input.environmentId === undefined ? {} : { environmentId: input.environmentId }),
+      eventId: `evaluation:${prepared.ticket}`, suiteId: input.suiteId, ticket: prepared.ticket, trials }),
+    spent, overspent: spent > input.maxTokens }
+  } catch {
+    if (failure !== null) return { ok: false, code: failure }
+    return { ok: false, code: controller.signal.aborted ? 'cancelled' : 'evaluation_incomplete' }
+  }
   finally {
     controller.abort(); clearTimeout(timer); externalSignal?.removeEventListener('abort', abort)
-    try { engine.evaluationCancel({ ticket: prepared.ticket }) } catch {}
+    try { engine.evaluationCancel({ ticket: prepared.ticket, spent }) } catch {}
   }
 }
 

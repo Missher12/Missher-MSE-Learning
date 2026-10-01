@@ -30,6 +30,10 @@ export function createHarnessBridge({ engine, createMessage, review, warn = () =
   settlement: settlementOptions = {} }) {
   const turns = new Map(), reviews = new Set(), statuses = new Map()
   let enabled = true, disposed = false, generation = 0
+  // Reflection has its own generation. Closing "automatic reflection" must cancel the reviews it
+  // queued without touching direct corrections, recall or settlement — bumping the main
+  // generation would close every open turn and make the switch do far more than it says.
+  let reflectionEpoch = 0
   const guarded = fn => { try { return fn() } catch (error) { warn(error.code ?? 'learning_unavailable') } }
   const active = epoch => enabled && !disposed && generation === epoch
   const statusFor = sessionId => {
@@ -138,10 +142,10 @@ export function createHarnessBridge({ engine, createMessage, review, warn = () =
     turns.delete(k)
     if (!cancelled && active(state.generation) && review && (checks.length || state.taskFailed || state.tools >= 2) && state.resultSummary) {
       const controller = new AbortController()
-      const job = { controller, sessionId, generation: state.generation }
+      const job = { controller, sessionId, generation: state.generation, epoch: reflectionEpoch }
       reviews.add(job)
       Promise.resolve().then(() => {
-        if (!active(job.generation) || controller.signal.aborted) return
+        if (!active(job.generation) || controller.signal.aborted || job.epoch !== reflectionEpoch) return
         return review({ ...state.input, taskSummary: state.taskSummary, resultSummary: state.resultSummary,
           outcome: state.taskFailed || outcome === 'failed' ? 'failed' : outcome === 'unknown' ? 'supported' : outcome },
         state.route, controller.signal)
@@ -339,6 +343,22 @@ export function createHarnessBridge({ engine, createMessage, review, warn = () =
       // Frozen outcomes stay as they are; only this session's retries stop.
       settlementQueue.stopSession(sessionId)
     },
+    /**
+     * Cancel queued and in-flight reviews only, leaving recall, corrections and settlement
+     * exactly as they are. Bumping the reflection epoch also discards a queued microtask that
+     * has not called the runner yet, so switching reflection off and straight back on cannot
+     * revive an old job: it either never started, or its aborted ticket no longer settles.
+     */
+    abortReflections() {
+      reflectionEpoch += 1
+      const pending = [...reviews]
+      for (const job of pending) job.controller.abort()
+      return pending.length
+    },
+    /** Whether a reflection runner is currently installed and allowed. */
+    isReflecting() { return enabled && !disposed && typeof review === 'function' },
+    /** Sessions with an in-process status row; used for an honest "no runs yet" display. */
+    trackedSessions() { return statuses.size },
     setEnabled(value) {
       const next = value === true && !disposed
       if (next !== enabled) generation += 1
