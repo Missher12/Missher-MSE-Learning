@@ -11,8 +11,11 @@ const dshOnly = process.argv.includes('--dsh-only')
 if (!dshOnly && !readFileSync(join(root, 'adapters/hermes/plugin.yaml'), 'utf8').includes(`version: "${pkg.version}"`)) {
   throw new Error('Hermes has an independent version; use --dsh-only for this DSH candidate')
 }
-const dist = resolve(root, 'dist')
+const dist = resolve(root, 'dist', pkg.version)
 mkdirSync(dist, { recursive: true })
+if (readdirSync(dist).some(name => name.endsWith('.tgz') || name.endsWith('.tar.gz') || name === 'candidate-manifest.json')) {
+  throw new Error('candidate_exists: preserve prior artifacts; build from a fresh isolated source copy')
+}
 const run = (command, args, cwd = root) => execFileSync(command, args, { cwd, encoding: 'utf8', maxBuffer: 2 * 1024 * 1024,
   env: { ...process.env, COPYFILE_DISABLE: '1' } })
 const digest = file => createHash('sha256').update(readFileSync(file)).digest('hex')
@@ -38,7 +41,9 @@ function sources(dir, prefix = '') {
   })
 }
 const artifacts = [packed.filename, ...(dshOnly ? [] : [hermesName])].map(name => ({ name, sha256: digest(join(dist, name)), bytes: statSync(join(dist, name)).size }))
+const baseCommit = process.env.MSE_SOURCE_COMMIT ?? run('git', ['rev-parse', 'HEAD']).trim()
+if (!/^[a-f0-9]{40}$/u.test(baseCommit)) throw new Error('invalid_source_commit')
 const manifest = { version: pkg.version, targets: dshOnly ? ['dsh'] : ['dsh', 'hermes'], generatedAt: new Date().toISOString(),
-  baseCommit: run('git', ['rev-parse', 'HEAD']).trim(), sourceState: 'uncommitted candidate', artifacts, sources: sources(root) }
+  baseCommit, sourceState: 'uncommitted candidate', artifacts, sources: sources(root) }
 writeFileSync(join(dist, 'candidate-manifest.json'), JSON.stringify(manifest, null, 2) + '\n')
 console.log(JSON.stringify({ version: pkg.version, artifacts }, null, 2))

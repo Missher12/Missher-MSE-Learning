@@ -1,5 +1,5 @@
 name: mse-learning
-version: "0.8.0-alpha.2"
+version: "0.9.0-alpha.10"
 description: "Persistent scoped correction learning with bounded context. Requires the packaged Node runtime entry."
 author: Missher
 hooks:

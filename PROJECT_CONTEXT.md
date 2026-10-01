@@ -1,4 +1,111 @@
+## 2026-10-01：0.9.0-alpha.6 alpha.5 收尾修复（A/B/C/D 四组 11 项）
+
+Codex 独立复验 `dist/review-20261001-alpha5/REVIEW.md` 提出 11 项后，本轮按"只修原因、不新增能力"完成收尾：
+
+- 纠错提取改用**原文区间**：受保护区间（引号/反引号/成对单引号）内不分句、存储取原文切片；一次性限定语跨分句传播，只有新长期标记才重新收集。修 A1/A2。
+- 偏好替代：切回历史值重开为新世代（版本升级、旧证据不给新世代信用）；只有选择语境才占用币种槽位，独立精度要求按普通纠错保存；所有显式替代共用 `expectedSupersededVersion` 检查，并拒绝替代已被替代且后继仍有效的行。修 B1/B2/B3。
+- 到期重学：新增 `originEvent`/`generationEvent` 永久世代标识＋有界事件环；旧库缺世代证据时返回 `new_observation_required`，需 `newGeneration: true` 显式断言；已完成的历史替代不再阻断新世代评测。修 C1/C2。
+- 结算重试：结果事件携带 session/turn 且只写自己的回合；`on_session_reset` 与 legacy 冲突停用真正停止/暂停队列；终态退出活动容量并进入有界历史；epoch 毫秒与队列时钟在单一边界换算。修 D1/D2/D3/D4。
+- 验证：11 项正确行为 Node 11/11、Hermes 5/5；上轮 31 项仍 31/31（期望未改）；Node 128/128、Hermes 28/28；R1–R7 通过；打包与源码归档一致，干净解包即跑通全部套件；DSH 0.2.0-rc.2 隔离安装/Loader/真实 AgentLoop 与 Hermes PluginManager 通过。真实模型、日常安装与长期收益仍未验证；结算仍为进程内重试。
+- 不可变候选、SHA256、兼容与回滚、未验证层见 `dist/0.9.0-alpha.6/DELIVERY.md`。本轮未安装日常、未迁移真实库、未提交 Git。
+
 # MSE Learning 产品上下文
+
+## 2026-10-01：0.9.0-alpha.10 DSH「学习详情」只读设置页
+
+Codex 复验了 alpha.9 之后，本轮的交付是在同一 `@missher/dsh-mse-learning` Bundle 内新增设置页，并修掉复验提出的 6 项 + 1 项打包问题。
+
+- **入口**：插件声明 `dsh.client`（web）与 `./client`；浏览器端把页面注册进公开 slot `plugins.bundle.config`，key 为本包名，渲染在 设置 → 插件 → MSE 详情页内的「学习详情」。未新增兼容插件、未改宿主、未要求手动命令。
+- **只读 RPC**：新增 Cordis 服务 `mseDetails`（`TypertRemoteService` + 公开 `Remote` 装饰器按标准方法上下文手工标注并用 `remoteMethods()` 自检）与 `./typert` 清单；6 个端点 `overview/sessions/lessons/lesson/recall/diagnose`，全部只读、全部经真实 Gateway 验证。
+- **作用域可信**：会话目录来自宿主公开服务 `sessionQuery.listSessions()`（`workspaceRegistry.archivedSessionIds`、`sessions.get`、`agents.get` 只读补充），因此进程重启前的历史会话与"刚建未发消息"的会话都可选择；子智能体会话不列为普通会话；未知/消失的 sessionId 一律 `session_unknown` 拒绝，浏览器传来的 `projectKey` 被忽略。`cwd` 只以中文标签 + 12 位单向哈希展示，不出现路径。
+- **不伪装的状态**：`overview` 只给聚合结算计数，不给别的会话明细；`recall` 的结算按所选会话过滤并附该会话字节账本；`diagnose` 的原库错误（如 `migration_required`）原样上报而不是包装成 `ok:true`；存储不可读时 `counts` 为 null 且带 `countsError`；缺少会话目录服务时报 `session_directory_unavailable`。
+- **完整而不是抽样**：核心新增只读 `inspect()`（返回作用域内全部行与真实已保存 metadata：`sourceTurn`、`environment`、`currentEnvironment`、适用/排除条件、评测结论），因为 `put()` 把库上限固定在 300 行，单个作用域的读取天然完整；列表页据此给出真实 `scopeTotal` 而不是每状态 100 条的截取片段。
+- **前端请求代次**：作用域、列表查询、经验详情与只读诊断各持请求序号；跨作用域或同作用域内的迟到响应都不会覆盖当前视图（Codex 的 5 项组件检查与 2 项 query/detail 竞态检查全过）。
+- **打包**：包根 `"."` 改为薄入口 `src/root.mjs`（重导出通用 core，只有宿主调用 `apply` 时才动态加载 `adapters/dsh/index.mjs`），`./core` 保留；`cordis.patch.yml` 的行名改为包根，前端才能被 `client-modules` 发现。`verify-package.mjs` 增加"无任何 DSH peer 的干净进程 import 包根并读到 LearningEngine"的检查。
+- **验证**：Node 150/150、Hermes 39/39（同一轮内已跑）、Gateway 只读 RPC 39/39、固定 31/31（`casesSHA256` 未变）、alpha.6/7/8 基线与 R1–R7 结论不变、包一致性通过；隔离 web 宿主的 29 项页面断言与 11 张截图在最终 tgz 上复跑通过。未验证：真实供应商请求、日常安装；页面里的"发送一条消息以产生召回"这一步在隔离环境未完成（未配置模型，点击输入框超时），因此本轮的召回/注入不是实测结论，只读页面本身已验。
+
+## 2026-10-01：0.9.0-alpha.9 alpha.8 复验收尾（R3 锁等待期间的有效性复核）
+
+Codex 独立复验 `dist/review-20261001-alpha8/REVIEW.md` 复现 1 项后，本轮按"只修根因"收尾：
+
+- R3：alpha.8 让后台结算在共用写入边界上**有界等待**，但等待前的许可/生命周期/期限检查在拿到边界后没有重做。等待期间 `set_enabled(False)`、关闭会话、卸载或收据到期，重试仍会调用 `complete`；`close_session` 已把条目退休为 stopped，随后又被追加 settled。
+- 修复：把最终有效性检查和实际写入放进**同一个串行化边界**（`SettlementQueue.attempt` 持有边界后才复核），并复核 ①最新宿主许可 ②queue/queue-lifecycle（disposed/paused）③条目身份与存续（`entries.get(key) is entry`，含被 close/reset 移除或同键替换的情形）④当前时钟下的截止时间。失效项按原契约处理：暂停保留原冻结载荷（不吃尝试次数）、关闭/卸载只退出不写、过期退休为 expired；不记为 settled、不重复退休、不重新入队。边界通过 `Hooks._write_boundary()` **每次尝试重新解析**（不是构造时捕获），因此前台/后台始终用同一把锁。前台 `_foreground_call` 的退避也在每次重试前重读同一生命周期边界。有界等待、有限重试、冻结 outcome、恢复召回、单次信用与上下文预算全部保留。
+- 验证：`scripts/verify-alpha9-fixes.py` R3 **6/6**（对照 2 次调用；许可撤回、显式暂停、关闭会话、卸载、到期五种等锁期间失效各 1 次且状态正确；暂停后恢复未过期重放一次、恢复已过期只退休；前台退避生命周期；原生前后台先后交错）；Codex 自己的 `mse-alpha8-adapter-review-wait-boundary.py` 重跑 **6/6**（原 0/6，其中对照 1/1 通过）；Hermes **39/39**（新增 5 项 R3 常驻回归）；Node **134/134**、固定 31 项 **31/31**、alpha.8 R1 8/8 与 R2 5/5、alpha.7 11/11+6/6、alpha.6 10/11+5/5 的既有结论不变。
+- 未验证层：真实模型调用保持 0（受控替身/假核心分层标注）；日常安装/重启/原生窗口未做；R3 的确定性交错为受控时钟＋假核心验证，不据此声称真实学习库已被写坏或真实核心必然接受过期信用。候选与哈希见 `dist/0.9.0-alpha.9/DELIVERY.md`。
+
+## 2026-10-01：0.9.0-alpha.8 alpha.7 复验收尾（R1 历史完整性、R2 前后台写入互斥）
+
+Codex 独立复验 `dist/review-20261001-alpha7/REVIEW.md` 复现 2 项后，本轮按"只修根因"收尾：
+
+- R1 历史完整性：`completeHistory` 原先只看 `eventIds.length < 8`，而短环根本不构成完整证据——升级时给旧行补出的短环、以及合法重开后新建的环都不含此前的历史。现改为**持久标记** `historyComplete`：只在建立行时写入 `true`，只在追加导致淘汰（第 9 个事件）或为原本没有环的行补环时永久写为 `false`；缺该标记的旧行/旧版本短环一律不完整。只有标记完整的行才能走"环外事件即新观察"，否则必须由已重新观察该行的宿主给出 `expectedVersion`+`expectedGeneration`。一次合法重开不再能追溯补全历史，`generation` 字段本身也不作为证明。
+- R2 前后台写入互斥：F5 的许可门禁让取消结算留在暂停队列，恢复时零延迟后台 `complete` 与前台 `prepare` 并发争抢核心存储锁，前台 `lock_busy` 时静默跳过注入。现让后台 `_settle_payload` 与前台 hook 共用同一把可重入锁，后台以 2 秒**有界**超时获取，超时按可重试的 `lock_busy` 延后（保留冻结载荷与尝试预算）；前台另加 50/150ms 两次有界重试，仅针对瞬时忙，永久失败仍不注入。不删除排他锁、不用固定长 sleep、不吞错、不关闭重试。
+- 验证：`scripts/verify-alpha8-fixes.mjs` R1 **8/8**（含用冻结 alpha.4/alpha.6 引擎重跑的两条真实跨版本链）、`scripts/verify-alpha8-fixes.py` R2 **5/5**；Codex 自己的 alpha.7 生命周期探针重跑 **17/17**（原 14/17）；Node **134/134**、Hermes **34/34**（各新增 R1/R2 常驻回归）；固定 31 项仍 **31/31**（`casesSHA256` 未变）；alpha.7 定向脚本 Node 11/11、Hermes 6/6 与 alpha.6 契约脚本 10/11 的既有结论不变。
+- 未验证层：真实模型调用保持 0；日常安装/重启/原生窗口未做；R2 的确定性交错为受控假时钟＋假存储验证，受控慢 I/O 不等同自然稳定复现。候选与哈希见 `dist/0.9.0-alpha.8/DELIVERY.md`。
+
+## 2026-10-01：0.9.0-alpha.7 alpha.6 收尾修复（F1–F5 五项根因）
+
+Codex 独立复验 `dist/review-20261001-alpha6/REVIEW.md` 复现 5 项后，本轮按"只修根因、不新增能力"收尾：
+
+- F1 原文偏移：起点/终点分别追踪，每一步只累计**左侧**删除量，句尾空白不再把起点右移（`不要把空值改成零 ，保留原始空值` 曾存成 `要把空值改成零 …` 并跨会话注入）；顺带修正"只有学习提示词、没有内容"的分句把后继逗号带进存储（`纠正一下，以后…` 曾存成 `，以后…`）。
+- F2 币种同义要求：选择提示词改为按词判定（`以后` 里的"以"不再被当成选择语境），独立精度要求因此走普通纠错而不被槽位吞掉；同一币种的同义改写保留槽位归属并作为同义选择去重（不再清空 `topicKey/value` 退化成普通纠错）；替代停用该槽位**所有**旧值，`expectedSupersededVersion` 仍对主行校验。
+- F3 重开契约（公开输入契约变化，已在 README 与 ADAPTER_PROTOCOL 标注）：事件环完整（`eventIds.length < 8`，从未淘汰）时，环外事件可证明为新观察；环写满后必须由已重新观察该行的宿主传 `newGeneration: true` + `expectedVersion` + `expectedGeneration`，事务内核对并进入事件指纹，旧输入返回 `new_observation_required`、过时条件返回 `stale_generation`；每行新增有界 `generation` 计数（旧行报告 0），不再接受"单个布尔值即证明新鲜"。历史 31 项无重开用例，期望文件未改。
+- F4 DSH receipt 截止：`SettlementQueue` 构造器接收并保存 `deadlineForReceipt`（此前被丢弃，`enqueue` 只看到 `undefined`），转换回到实际 bridge→队列路径；真实 receipt 剩 100ms 时第二次 `complete` 不再发出。Hermes 的秒制换算与 5 分钟总年龄上限保留。
+- F5 Hermes 停用绕过：队列在每次真正写入前重新读取最新许可（`permitted` 回调，无 hook 也会生效）；许可消失则暂停并保留原冻结载荷，恢复只重放未过期的同一条 `complete`，不重跑模型/工具/复盘，不改写为 cancelled。
+- 验证：新增 `scripts/verify-alpha7-fixes.mjs`（11/11）与 `scripts/verify-alpha7-fixes.py`（6/6）；Codex 自己的 alpha.6 探针重跑为提取 **4/4**（原 1/4）、生命周期 **13/13**（原 10/13）、DSH 适配器 `ok:true`（D4 由 2 次调用降为 1 次）、Hermes 适配器 `ok:true`（`legacy_idle` 由 2 次降为 1 次）；上轮 31 项仍 31/31（`casesSHA256` 未变）；Node 131/131、Hermes 30/30；alpha.6 修复脚本 Node 11 项中 10 项通过、1 项为**已标注的兼容性变化**（重开用例需世代条件）；Hermes 侧 5/5 不变。
+- 与 alpha.6 的已知差异仅此一项公开契约变化；`prepare`（用户当轮直接要求）仍按当轮新事实续期，环写满的行需宿主显式重开。
+- 未验证层：真实供应商请求与长期收益、日常安装/重启/原生窗口、跨进程结算恢复（仍为进程内有界重试）、结算并发的全部交错；F5 为假时钟＋假存储受控验证。不可变候选、SHA256、兼容与回滚见 `dist/0.9.0-alpha.7/DELIVERY.md`。本轮未安装日常、未迁移真实库、未提交 Git。
+
+## 2026-10-01：0.9.0-alpha.5 两阶段完善（纠错来源/格式适用 + 三个生命周期缺口）
+
+依据 `dist/handoff-20261001-completion/PROMPT.md` 与 `ACCEPTANCE.md`，并保留已通过的 R2/R3/R5/R6/R7。
+
+- **纠错来源**：分句保留标点后再判疑问；`仅这次` 与转述（引号、逗号、冒号变体）不再落库；混合语句只保存长期分句；不再因为出现引号就拒绝整条 —— 英文撇号、字符串字面量、反引号字段名照常保存；被讨论的引用内容（`从「以后」这个词…`）不触发标记。
+- **格式适用**：JSON/JSONL/YAML/XML/TOML/CSV/TSV/Excel 各自独立，并且是**适用条件**：经验绑定格式时，另一格式的任务直接判 `format_mismatch`；转换/多格式任务按交集放行，通用规则不被过度限制。
+- **明确替代**：新增结构化 `topicKey`/`value`（当前 `report.currency`）与自然语言识别；明确替代（纠正一下/改成…或显式 supersedes）在同一事务内停用旧规则，无依据时返回 `conflict_unresolved` 且旧规则继续生效；迟到结果不得给新版本加信用。
+- **到期重学**：到期方法在**新的可信提案**下重开为候选（同 ID、version+1、validation 清空、expiresAt 续期、实验历史记 `reopened`）；事件重放仍是 duplicate（lesson 级 `eventIds` 账本，覆盖 90 天事件裁剪）；手动/回归撤回不自动复活；跨环境独立。
+- **结算重试**：`src/settlement.mjs` 与 Hermes `SettlementQueue` 同语义：冻结唯一 payload，只重放 `complete`；64 条 / 4 次 / 5 分钟 / receipt 截止；永久错误立即终止；暂停、会话关闭、卸载分别停止；重复事件单飞。仅进程内，不宣称跨重启。
+- 交付：新增 `scripts/pack-source.mjs`（生成并从原始条目验证源码归档，过滤并拒绝 Mac 元数据），`scripts/verify-package.mjs` 增加源码归档覆盖校验；`tests/upgrade.test.mjs` 只按真实账本文件名读取会话预算。
+- 分层结果、SHA256 与剩余限制见 `dist/0.9.0-alpha.5/DELIVERY.md`；设计细节见 [召回说明](docs/RECALL_2026-09-30.md) 与 [生命周期说明](docs/LIFECYCLE_2026-10-01.md)。
+
+## 2026-10-01：0.9.0-alpha.4 检修回归修复（R1—R7）
+
+按独立检修报告 `dist/review-20261001-alpha3/REVIEW.md` 修复 7 项并补齐交付边界。alpha.3 冻结产物保留。
+
+- **R1（P1）**：疑问句、仅限本次的要求、他人转述与引号内容不再成为长期纠错；分句保留标点，明确纠错与反引号字段引用保持。
+- **R2（P1）**：会话关闭恢复取消排队/在途复盘，迟到结果不落库，且不影响其他会话（`closeSession` 的 ID 类型统一）。
+- **R3**：DSH/Hermes/SDK 默认环境统一为核心默认 `default`，alpha.2 登记的 validated 方法升级后仍召回；显式换环境仍不召回，不放宽验证范围。
+- **R4**：JSON/YAML/XML/TOML/CSV/Excel 各自独立成组，JSON 专属经验不会因归一注入 YAML 任务。
+- **R5**：prepare 与 diagnose 共用“选择和字节核算”计划；只有实际装入非空上下文才报 `recalled`，匹配但放不下报 `budget_exhausted`。
+- **R6**：`/mse` 从可信 `session.header.cwd` 取项目身份，新会话/重启恢复/缓存淘汰后首次查询即正确。
+- **R7**：状态结算显示与核心一致的结果；学习库写入失败显示 `pending` + 错误码，不显示成功。
+- 交付边界：schema 2 小版本升级与 schema 1 → 2 显式迁移分开表述并有真实旧库形状回归（`tests/fixtures/`）；`/mse now` 反映控制器暂停；内部判定以可信结构优先，文本信封标注为启发式兜底。
+- 反例回归脚本：`scripts/verify-review-counters.mjs`（R1—R7 逐项，0 模型调用）。分层结果与 SHA256 见 `dist/0.9.0-alpha.4/DELIVERY.md`。
+- 未修旧账继续登记：相反偏好并存、到期方法重学、结果写入失败重试（现显示为 pending）。日常安装仍由唯一安装负责人执行。
+
+## 2026-09-30：0.9.0-alpha.3 召回可用性与可观测性修复
+
+本轮按日常检修报告修复三个问题并保持 0.9 语义：正常含「MSE」的用户任务不再被内部任务过滤跳过；纠错句式与召回判定改为本地术语归一 + 主题强弱键 + CJK 二元佐证；每次 prepare 返回唯一原因码并提供插件内可见状态（`/mse`、`/mse why`、`/mse now`、`recallStatus`、`diagnose`）。环境身份在记录、复盘票据、评测与召回之间保持一致。
+
+- 内部任务判定只用可信结构信号（子代理/非首步/非 user 来源/内部复盘信封/旧控制器暂停），不再匹配用户正文里的产品名。
+- 召回不再依赖入库时的 `terms`：按 `instruction` 现场归一，旧经验同样适用，无需迁移；存储字段与校验未变。
+- 未验证方法依旧不召回；768 字节/2 条、会话 1536 字节、同会话同版本只提供一次均未放宽；日常 3 条候选不会因本版变为可召回。
+- 状态展示只读、不进入模型上下文、不占召回预算；它不是注入成功的证据，注入证据仍来自消息、最终请求与检查结果。
+- 未包含 REVIEW 中的相反偏好冲突、到期重学与 DSH 结算重试，登记为后续范围。
+- 设计、原因码表与门槛标定见 [召回与纠错说明](docs/RECALL_2026-09-30.md)；分层结果、包 SHA256 与限制见 `dist/0.9.0-alpha.3/DELIVERY.md`。日常安装仍由项目约定唯一负责人执行，本会话不写日常 profile。
+
+## 2026-09-30：0.9.0-alpha.2 完整学习闭环
+
+用户在 RRSI 研究后明确要求“完成度大一点、一步到位”，本轮已授权实现全套闭环。当前权威源码仍为本目录，既有改动已在 `dist/upgrade-20260930-baseline/` 保存源码与 SHA256。具体单写分工见 [实施记录](docs/UPGRADE_2026-09-30.md)，协议见 [Adapter 协议](docs/ADAPTER_PROTOCOL.md)。下方 alpha.3/alpha.2 均是历史。
+
+- 新核心 schema 2：用户纠错即时召回，方法候选先评测；实验摘要、未知成本、反证、晋升、替代、撤回、前任回滚与可移植方法已实现。保留现有字节预算和宿主状态隔离。
+- 三种登记算法覆盖日期、空值、精确数值升序排序，带纯检查/转换和 SDK 执行前检查入口。泛化方法使用可信宿主的成对评测；登记算法通过不能冒充真实模型效果。
+- DSH 已修复 MSE-AUD-01/02：暂停取消排队/在途复盘，成功 llm/stream 内容匹配后采用，普通 error 不再惩罚经验。Hermes 对齐版本检查与代次失效；同步模型请求只能取消结算和丢弃迟到结果。
+- SDK/CLI 新增诊断、评测、方法治理、导入导出与显式迁移。旧 tested 迁移为候选，原计数/会话预算保留，原主库字节另行备份。模型评测默认额度为 0，需独立配置；不改变模型或推理设置。
+- alpha.1 的真实模型纠错召回通过，但当前 qwen3.7-plus / ultra 的复盘触发旧 15 秒超时；alpha.2 将复盘等待上限设为 60 秒，保留输出额度、模型/推理路由与取消结算保护。alpha.1 冻结包及证据保留。
+- DSH 与 Hermes 包版本统一为 0.9.0-alpha.2；候选从隔离源码副本构建，保留旧包。本轮未写日常 profile、未重启宿主、未执行 Git 发布。日常安装仍由项目约定唯一负责人执行。
+- 分层结果、产物路径与尚未验证的效果以 `dist/0.9.0-alpha.2/DELIVERY.md` 为准；该回执在最终打包与原生验收后写入，不把下面历史真实模型实验算作本版通过。
+
+2026-09-29 追加 UI-REFINE：当前 DSH 包名统一为 `@missher/dsh-mse-learning`，配置和存储标识保留。此处为源码候选；本轮安装与验收以协调目录 `coordination/2026-09-29/ui-refinements/` 的回执为准，下面的版本与透明空格等描述保留为历史。
 
 更新：2026-09-29。本文件仅描述 `learning-product/`；工作区分工以 [PROJECT_GOVERNANCE.md](/Users/missher/Documents/Deepseek-harness-Cordis/PROJECT_GOVERNANCE.md) 为准。当前执行 UPGRADE-20260929 中 MSE 独立导出的 DSH 兼容适配，不参与其他插件业务开发。
 

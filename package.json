@@ -1,6 +1,6 @@
 {
   "name": "@missher/dsh-mse-learning",
-  "version": "0.8.0-alpha.4",
+  "version": "0.9.0-alpha.10",
   "private": true,
   "type": "module",
   "description": "Scoped persistent lessons with bounded context for Agent adapters",
@@ -8,9 +8,18 @@
     "node": ">=22.19.0"
   },
   "exports": {
-    ".": "./src/index.mjs",
+    "./core": "./src/index.mjs",
+    ".": "./src/root.mjs",
     "./harness": "./adapters/harness.mjs",
-    "./adapters/dsh": "./adapters/dsh/index.mjs"
+    "./checks": "./src/checks.mjs",
+    "./evaluation": "./src/evaluation.mjs",
+    "./adapters/dsh": "./adapters/dsh/index.mjs",
+    "./status": "./src/status.mjs",
+    "./recall": "./src/recall.mjs",
+    "./client": "./adapters/dsh/client.js",
+    "./typert": "./adapters/dsh/typert.mjs",
+    "./details": "./adapters/dsh/details.mjs",
+    "./project": "./adapters/dsh/project.mjs"
   },
   "bin": {
     "mse-learn": "./src/cli.mjs"
@@ -19,25 +28,45 @@
     "src",
     "adapters",
     "README.md",
+    "docs/ADAPTER_PROTOCOL.md",
     "LICENSE",
     "cordis.patch.yml"
   ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-ui-plugin-manager",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-locale"
+      ]
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-llm": "*"
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-typert-protocol": "*"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-typert-protocol": {
       "optional": true
     }
   },
   "scripts": {
     "test": "node --test --test-concurrency=1 tests/*.test.mjs",
     "pack:local": "node scripts/pack.mjs",
+    "verify:package": "node scripts/verify-package.mjs",
     "pack:dsh": "node scripts/pack.mjs --dsh-only"
-  }
+  },
+  "main": "./src/root.mjs"
 }

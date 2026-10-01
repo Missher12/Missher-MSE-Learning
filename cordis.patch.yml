@@ -1,6 +1,6 @@
 - insert:
     - id: mse-learning
-      name: "@missher/dsh-mse-learning/adapters/dsh"
+      name: "@missher/dsh-mse-learning"
       config:
         enabled: true
         maxContextBytes: 768

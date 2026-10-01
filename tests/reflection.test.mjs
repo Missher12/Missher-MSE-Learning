@@ -20,7 +20,7 @@ test('bounded background reflection learns an open method without giving it veri
   assert.equal(engine.status().counts.candidate, 1)
   assert.equal(engine.status().verified, 0)
   const prepared = engine.prepare({ sessionId: 'next', turnId: '1', origin: 'user', prompt: '导出金额并排序' })
-  assert.match(prepared.context, /待验证方法/)
+  assert.equal(prepared.context, '', 'unvalidated generated advice must not affect live tasks')
   assert.ok(!readFileSync(join(stateRoot, 'lessons-v1.json'), 'utf8').includes('独特的测试摘要'))
   assert.equal((await reflect(engine, input, runner)).skipped, 'duplicate')
   assert.equal((await reflect(engine, { ...input, turnId: '2' }, runner)).skipped, 'reflection_budget')

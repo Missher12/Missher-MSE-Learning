@@ -14,7 +14,7 @@ import time
 
 root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(sys.argv[1]).resolve()))
-from hermes_cli.config import load_config_readonly
+from hermes_cli.config import load_config_readonly, split_model_config_default
 from hermes_cli.runtime_provider import resolve_runtime_provider
 from hermes_constants import resolve_reasoning_config
 from agent.auxiliary_client import call_llm
@@ -24,9 +24,11 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 config = load_config_readonly()
 model_cfg = config.get("model", {})
-model = model_cfg if isinstance(model_cfg, str) else model_cfg.get("default")
-assert isinstance(model, str), "unsupported model configuration"
-route = resolve_runtime_provider(requested=model_cfg.get("provider") if isinstance(model_cfg, dict) else None, target_model=model)
+raw_model = model_cfg if isinstance(model_cfg, str) else model_cfg.get("default", model_cfg.get("model"))
+model, default_provider = split_model_config_default(raw_model)
+assert model, "unsupported model configuration"
+provider = (model_cfg.get("provider") if isinstance(model_cfg, dict) else None) or default_provider or None
+route = resolve_runtime_provider(requested=provider, target_model=model)
 reasoning = resolve_reasoning_config(config, model)
 logging.disable(logging.CRITICAL)
 os.environ.update(MSE_NODE_EXECUTABLE=shutil.which("node"), MSE_LEARN_CLI=str(root / "src/cli.mjs"), MSE_REFLECTION_ENABLED="0")
@@ -94,7 +96,10 @@ try:
         learned_text = request(augmented)
         fresh.post_api_request(**common)
         matched = parse(learned_text) == expected
-        fresh.verification("new", "1", "synthetic-integer-cents-and-order", matched)
+        adopted = fresh.turns[("new", "1")]["lesson_versions"]
+        assert len(adopted) == 1, "expected one learned correction"
+        assert fresh.verification("new", "1", "synthetic-integer-cents-and-order", matched,
+                                  lesson_ids=[adopted[0]["id"]], expected_version=adopted[0]["version"])
         fresh.post_llm_call(session_id="new", turn_id="1", assistant_response=learned_text)
         fresh.on_session_end(session_id="new", turn_id="1", completed=True)
         report["treatmentMatchedLearnedPreference"] = matched

@@ -63,21 +63,16 @@ test('only a confirmed accepted lesson earns outcome credit; replay cannot upgra
   assert.equal(engine.prepare(turn('s3')).bytes, 0)
 })
 
-test('a method gains tested status only after accepted, host-verified uses in different sessions', t => {
+test('an unvalidated method stays offline even when ordinary tasks complete successfully', t => {
   const { engine } = setup(t)
   record(engine, { kind: 'method', source: 'host_proposal' })
   for (const session of ['s1', 's2']) {
-    const r = engine.prepare(turn(session)); assert.match(r.context, /待验证方法/)
-    engine.accept({ receipt: r.receipt, lessonIds: r.lessons })
+    const r = engine.prepare(turn(session)); assert.equal(r.bytes, 0)
     assert.throws(() => engine.complete({ ...turn(session), outcome: 'verified' }), /verification_required/)
     engine.complete({ ...turn(session), outcome: 'verified', evidence: { source: 'host_verifier', checkId: `numeric-${session}` } })
   }
-  assert.equal(engine.status().counts.tested, 1)
-  const next = engine.prepare(turn('new'))
-  assert.match(next.context, /有通过记录的方法/)
-  engine.accept({ receipt: next.receipt, lessonIds: next.lessons })
-  engine.complete({ ...turn('new'), outcome: 'failed' })
   assert.equal(engine.status().counts.tested, 0)
+  assert.equal(engine.status().counts.validated, 0)
   assert.equal(engine.status().counts.candidate, 1)
 })
 

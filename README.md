@@ -1,68 +1,99 @@
-# MSE Learning 0.8.0-alpha.4
+# MSE Learning 0.9.0-alpha.10
 
-自家插件不再限制 DSH 宿主版本号；运行时按实际接口能力工作。开发依赖版本用于复现构建，不是安装门槛。本轮验证基线为 0.2.0-rc.1 与 0.2.0-rc.2，其他版本尚未验证。
+供 DSH、Hermes 和其他 Agent 接入的持久学习核心。保存明确用户纠错，在任务中限额召回；推断方法经过比较评测或登记算法回归后才进入日常召回。采用、独立检查、负面证据、停用、替代和回滚形成同一个有版本的闭环。
 
-同一个持久学习核心，供 DSH、Hermes 及其他 Agent 分别接入。当前是隔离开发候选：没有替换已安装的 MSE，没有导入旧学习库，也没有改动任何宿主的模型设置。
+## 本版行为
 
-## 已实现
+- 用户明确的未来纠错即时保存；直接用户来源由宿主确认。普通聊天、工具输出和模型自评不能伪造用户指令或验证等级。捕获句式见 [召回与纠错说明](docs/RECALL_2026-09-30.md)；正常讨论或开发 MSE 的任务不会被当成内部调用跳过。
+- 召回使用本地术语归一、主题强弱键与 CJK 二元佐证，不调用模型、不建索引；每次 prepare 返回唯一原因码（已召回/未学到/作用域不符/匹配不足/方法未验证/已提供过/预算不足/内部任务跳过/存储失败等），供用户判断是否真的生效。只有真正选中非空经验才报告 `recalled`；匹配成功但放不下报 `budget_exhausted`。同类技术格式（JSON/YAML/XML/TOML/CSV/Excel）各成一体，不做同义归一。
+- 只有用户自己的持续性要求才会落库：疑问句、他人转述与引号内容都不保存；混合语句只保留长期分句（详见 [召回说明](docs/RECALL_2026-09-30.md)）。**一次性限定语跨分句生效**（`仅这次，把报表金额统一为人民币` 不落库），只有明确的新长期标记才重新开始长期收集；存储直接取用户原文切片，起止偏移分别按"只从左侧删除的字符数"累计（句尾空白不再挪动起点，`不要把…` 不会被截成肯定句），只有学习提示词自身、没有内容的分句不再把后面的逗号带进存储；引号与反引号里的英文逗号、空白与 JSON 字面量逐字节保留。
+- 明确替代的偏好只保留当前值：同一作用域的金额币种被明确纠正后，旧规则停用且不再共注入；切回曾经用过的值时把它重开为新世代（版本升级，旧证据不给新世代记信用）。币种必须出现在选择语境才占用槽位（提示词按词判定，`以后…` 不再因为一个"以"字被当成选择），`人民币金额保留两位小数` 这类独立要求按普通纠错单独保存；**同一币种的同义改写仍归该槽位**（仅作为同义选择去重，不再退化成普通纠错），因此后续替代会停用该槽位**所有**旧值，不以原文字面相同为前提。所有显式替代都校验 `expectedSupersededVersion`，过时调用返回 `stale_replacement` 且不改变库。无明确替代依据时返回 `conflict_unresolved` 并保持旧规则。
+- 方法到期后可由新的可信提案重开为新世代候选，旧验证只作历史；重学不改变已有会话预算，手动/回归撤回不会被到期自动复活。每行永久记住开启本世代的事件并保留有界事件环，重放不会重开；**到期重开需要可核验的世代证据**：行是否"历史完整"是**持久标记**，只在确定性建立该行时写入，并只在追加事件导致淘汰、或为原本没有事件环的行补环时永久失效（写满但从未淘汰仍算完整）。只有标记为完整的行，环外事件才能证明为新观察；否则旧事件与"看似新"的事件无法区分，必须由已重新观察该行的宿主给出 `expectedVersion` 与 `expectedGeneration`（事务内核对并进入事件指纹，旧输入与过时条件分别返回 `new_observation_required`、`stale_generation`）。升级前的旧行、旧版本写入的短环、以及任何缺该标记的行一律保守处理，合法重开也不会追溯补全历史；旧库报告 `generation 0`，同样不接受单独的布尔断言。已完成的历史替代不再阻断新世代评测。
+- 结算写入支持有界、幂等的进程内重试：只重放冻结的 `complete`，成功只记账一次；上限 64 条 / 单项 4 次（250ms、1s、3s）/ 5 分钟，永久错误立即终止。结果事件带 session/turn 标识，迟到结果只写自己的回合；`on_session_reset` 与 legacy 冲突停用都会真正停止/暂停队列（每回合正常结束不算关闭）。终态退出活动容量（有界历史保留），receipt 的 epoch 毫秒截止时间在单一边界换算到各自的队列时钟（DSH 侧该换算已实际接入 bridge→队列，不再被构造器丢弃），不会在到期后再发一次；Hermes 每次重试真正写入前重新核验最新许可，停用时暂停原冻结载荷、恢复只重放未过期的同一条 `complete`，不重新调用模型/工具/复盘，也不把已冻结结果改写成 cancelled；**后台结算与前台召回共用同一个写入边界**（后台有界等待，前台永不因后台丢注入），恢复回合的召回不会因为旧取消结算同时落库而被静默跳过；**最终有效性检查与实际写入在同一串行化边界内**——取得边界后重新核验最新宿主许可、Hooks/queue 生命周期、条目身份与存续、收据期限，等待期间被停用/关闭/卸载/到期的重试不再发出：暂停保留原冻结载荷以便合法恢复，关闭/卸载/过期按原契约终止（不记为 settled、不重复退休、不重新入队）；前台退避等待同样在每次重试前重读该边界。
+- 未验证的方法只保留为候选。泛化方法的可信宿主评测默认需要至少 12 对样本、4 个保留样本、2 类任务、5 次改善，配对符号检验通过，且没有回归、关键约束失败或无法解释的成本增加。门槛只能收紧；样本来源与独立性仍由宿主保证。
+- 内置三个登记方法：保留空值、复制来源日期、精确数值升序排序。固定回归证明有限数据契约内的转换正确，不代表模型一定遵循文字方法；报告分别标记 registered_algorithm 和 host_trial。
+- 实验只保存摘要、哈希、版本和判决，不保存原始样本。成本未知不能当零；基础设施错误不能直接证明经验有害。已证伪的同一假设在相同环境/作用域中受到阻止，环境变化后可重新评估。
+- 替代方法在验证通过后才停用前任。检查器确认回归时停用当前方法，并恢复符合条件的前任；并列候选不能误恢复别人的替代链。手动 resume 回到候选，重新验证后生效。
+- 导入导出只携带方法正文、适用条件、登记方法标识及校验和。目标宿主从候选开始，不复制项目身份、实时状态或成功信誉；校验和用于检测内容变化，不是作者签名。
+- 旧 schema 1 数据需要显式 migrate，先保存原始字节备份。历史 tested 降为候选，原计数保留；不伪造新的通过记录。迁移继续保留会话预算。
 
-- 从直接用户消息中学习明确的未来纠错，例如“以后导出金额前先转换为数值，再按金额排序”。经验内容开放，不需要为每一种问题增加代码枚举。
-- 在相关新任务开始前召回，并跨进程、跨会话保存。默认宿主独立存储；有权威项目标识时进一步隔离项目。
-- 完整经验优先，不截掉否定词或适用条件。无关任务零注入；每轮默认最多 **768 UTF-8 字节、2 条经验**，可设置 128–1536 字节。同一会话每个经验版本仅提供一次，累计提供最多 **1536 字节**，包括说明文字。字节上限不是模型 token 实测值。
-- 收据确认经验实际进入宿主消息或成功的模型请求。取消、重复事件、迟到版本和普通“完成”不产生验证通过记录。
-- 宿主可信检查器可以报告结果。方法在两个不同会话被采用且检查通过后标为 `tested`；任何失败会降回候选。这表示有通过记录，不能证明方法造成了改善。
-- 任务结束后的复盘使用独立短请求：最多 3 次/24 小时，间隔至少 30 分钟，最多输出 384 tokens；摘要最多 800 + 1200 字符。候选不会因为模型自评而升级。复盘不追加到主任务会话。
-- 保存经验、摘要哈希及有界计数，不保存完整聊天和工具输出。常见凭据、路径和指令越权模式会拒绝，但过滤不保证覆盖所有敏感信息。
-- 文件原子替换、私有权限、写锁、幂等事件。读写失败时跳过学习，保留 Agent 原有任务流程。
+## 上下文与费用
 
-## 构建与验证
+每轮默认最多 **768 UTF-8 字节、2 条完整经验**，配置范围 128–1536 字节；同一会话累计提供最多 **1536 字节**。同一经验版本只提供一次，跨进程保存账目；不相关任务不注入。适用/排除条件一起计入预算，放不下时整条跳过。状态查询（`/mse`、`recallStatus`、`diagnose`）是只读的，不注入上下文也不占预算。
 
-需要 Node.js >= 22.19；核心没有第三方运行时依赖。Hermes 适配器还需要宿主 Python。Node 可执行文件需在 Hermes 环境的 PATH 中，也可通过 `MSE_NODE_EXECUTABLE` 指定绝对路径。
+独立复盘最多 3 次/24 小时、至少间隔 30 分钟、最多输出 384 tokens；任务/结果摘要最多 800/1200 字符。新模型评测另有预算，默认 evaluationTokensPerDay=0（不启动额外模型评测），配置后 runEvaluation 每次预留整个任务额度、并发 1、60 秒超时、取消不退款。登记算法回归不调用模型。直接 evaluate 接收宿主已完成的试验，外部试验费用由运行它的宿主管理。
+
+字节上限不是实际 token 费用：已存在的历史可能随请求重复发送。主会话压缩后不会偷偷重新追加旧经验。DSH 可以取消复盘请求；Hermes 同步客户端不提供请求中断时取消票据并丢弃迟到结果，同步客户端请求超时设为 60 秒；DSH 复盘也设 60 秒总截止。输出和每日调用预算不变。
+
+## DSH
+
+npm Bundle 包名为 `@missher/dsh-mse-learning`，patch 仍注册同一个 mse-learning 服务，配置/数据标识不变。peer 保持 `@deepseek-ai/dsh-llm: "*"`，不使用版本豁免；本轮原生验收目标为 0.2.0-rc.2，具体结果以交付回执为准。
+
+状态目录为当前 profile 的 `dshHomePath('mse-learning')`。配置支持 enabled、reflectionEnabled、maxContextBytes、environmentId、evaluationTokensPerDay、evaluationCallsPerDay。`environmentId` 缺省不设置：记录与召回统一落在核心默认环境 `default`，与旧版本写入的方法保持同一身份；显式设置后才启用更窄的环境绑定，且不会扩大既有方法的验证范围。模型与推理级别沿用当前任务路由。检测到旧 missherEvolutionCore 时暂停新控制器。
+
+可见状态面：`/mse`（本轮条数/字节/原因与会话预算）、`/mse why`（来源与最近轮次）、`/mse now <任务>`（只读预演）。命令经公开 commands 服务注册，只写入可见命令行，不进入模型上下文；项目作用域来自会话可信 `header.cwd`，暂停时明确显示不会注入。插件另提供 `ctx.mseLearning.recallStatus(sessionId, projectKey)`、`ctx.mseLearning.lastRecall(sessionId)` 与 `ctx.mseLearning.diagnose({...})`。会话关闭只取消该会话的排队/在途复盘，迟到结果不落库。
+
+本版通过 llm/stream 检查本轮完整学习消息，并在成功 finish 后确认采用；该证据称为 llm_stream_success，不宣称拿到了 HTTP wire 回执。消息提交本身不再增加 adopted。可信集成可以使用 `ctx.mseLearning.verifyArtifact(...)` 或 `bridge.verification(...)` 绑定检查项、经验 ID 与版本；`ctx.mseLearning.guardedAction(input, action)` 为宿主提供执行前检查入口。
+
+## Hermes
+
+独立包解压根目录为 mse-learning，含 Python hooks 与同一 Node 核心。需要 Node >=22.19，可用 MSE_NODE_EXECUTABLE 指定；插件始终绑定加载时的 profile，并与旧 missher-evolution 库隔离。
+
+核对 pre_api_request 最终消息和 request ID，在成功 post_api_request 后确认采用。可信集成使用 `Hooks.verify_artifact(...)` / `verification(...)`。后台暂停、卸载或会话重置撤销旧代次的写回资格。
+
+MSE_REFLECTION_ENABLED=0 可停用复盘。MSE_EVALUATION_TOKENS_PER_DAY / MSE_EVALUATION_CALLS_PER_DAY 默认 0/2，只为宿主显式接入的评测运行器提供额度；插件不会因此自行更换模型或启动基准跑分。非法环境变量回落到默认值。
+
+## 通用 SDK / JSON CLI
+
+包根 `@missher/dsh-mse-learning` 同时是通用 SDK 与 DSH Bundle 入口：它重导出 `./core` 的全部符号，且只有在 DSH 宿主调用 `apply` 时才动态加载宿主适配器，因此没有任何 DSH 依赖的进程也能 `import '@missher/dsh-mse-learning'` 拿到 `LearningEngine`。DSH 侧同一 Bundle 还带浏览器端「学习详情」只读页（设置 → 插件 → MSE）。其他 Agent 通过可信生命周期接入，能力语义见 [Adapter 协议](docs/ADAPTER_PROTOCOL.md) 与 [召回说明](docs/RECALL_2026-09-30.md)。SDK 可导入 LearningEngine、reflect、runEvaluation、guardedAction、getMethod、listMethods、checkArtifact、applyMethod、assessEvaluation、RECALL_REASONS，以及 `@missher/dsh-mse-learning/status` 的状态格式化与命令实现。`LearningEngine#diagnose({ projectKey, sessionId, environmentId, prompt })` 给出只读库状态或在给定任务下的召回预演。
+
+```js
+import { LearningEngine } from '@missher/dsh-mse-learning/core'
+const engine = new LearningEngine({ stateRoot: '/absolute/private/state', adapterId: 'my-agent' })
+const lesson = engine.record({ eventId: 'source-date-method', source: 'host_proposal',
+  kind: 'method', methodId: 'copy-source-date-v1' })
+const assessment = engine.evaluateRegistered({ lessonId: lesson.id })
+const report = engine.checkArtifact({ lessonId: lesson.id,
+  source: [{ id: 'a', value: '2024-02-29' }], artifact: [{ id: 'a', value: '2024-03-01' }] })
+// report.status === 'fail'；检查本身不执行写入，也不增加线上成功记录。
+```
+
+`mse-learn --help` 显示协议。一条请求对应一条 JSON 输出：
+
+```json
+{"config":{"stateRoot":"/absolute/private/state","adapterId":"my-agent"},"op":"status","input":{}}
+```
+
+支持 prepare/record/accept/cancel/complete/status、diagnose、list/history、evaluate/evaluateRegistered、checkArtifact、suspend/resume/rollback、exportLesson/importLesson、migrate、reflectionRequest/reflectionResult/reflectionCancel、evaluationRequest/evaluationCancel。后台运行器和带 action 回调的执行检查属于 SDK 接口。
+
+这些是可信宿主接口。不要将采用、验证、迁移或评测接口直接注册成模型可以自授信用的工具。自动阻止写入需宿主实际使用 guardedAction，并提供可靠来源数据和明确任务语义；仅安装插件不会自动识别任意工具输出。
+
+## 生命周期细节
+
+偏好槽位、到期重学与结算重试的边界、状态与验收见 [生命周期说明](docs/LIFECYCLE_2026-10-01.md)；召回与纠错捕获规则见 [召回说明](docs/RECALL_2026-09-30.md)。
+
+## 数据升级与回退
+
+区分两种升级：
+
+- **schema 2 内的小版本升级**（0.9.0-alpha.N → alpha.M）：字段与校验未变，旧库直接可用，无需迁移。
+- **schema 1 → 2**（0.8.x 及更早写入的日常库）：必须显式迁移。先停用旧学习控制器/等待任务结束并备份完整 mse-learning 目录（含 sessions），再由同一宿主身份对该目录调用 `migrate({ fromSchema: 1 })`。返回 `before-schema2-rN.json` 为主状态原字节快照，迁移不改写会话预算文件；未迁移时 prepare 明确返回 `migration_required`。只迁移新 learning-product 的 schema 1，不读取旧 missher-evolution 产品库。
+
+旧版核心拒绝 schema 2。回退时先停用新版，恢复升级前完整目录及对应旧包；不要在两个控制器运行期间替换 JSON 或共用数据库。日常 DSH 安装由项目约定的唯一安装负责人执行。
+
+主状态最多 300 条经验、256 个活动收据、2048 个近期事件、256 条实验摘要和 2 MiB；经验 90 天到期。反证阻止受同一保留期限制。会话预算文件每个最多 4 KiB，会随会话数量增长，备份需包含它们。达到上限明确失败，不静默清库；损坏状态不自动重置。
+
+## 验证与交付
 
 ```sh
 npm test
 python3 -B -m unittest discover -s tests -p 'test_hermes.py' -v
-npm run pack:dsh
+npm run pack:local
+npm run verify:package
 ```
 
-本轮 `pack:dsh` 仅生成通用 SDK/CLI + DSH Bundle 的 npm 包及源码/产物 SHA-256 清单，不生成新的 Hermes 安装包。Hermes 适配器和既有 alpha.2 包保持原样。联合打包命令 `pack:local` 要求两种适配器的版本一致；版本独立时会拒绝打出名实不符的 Hermes 包。压缩包不包含宿主配置、凭据或学习记录。打包不会安装或发布。
+构建在隔离源码副本执行，输出 `dist/0.9.0-alpha.10/` 的 DSH npm 包、Hermes 包和 SHA256 清单；已有候选不覆盖。两包使用相同核心源码。单独 `pack:dsh` 仍可使用。
 
-## 接入
+`node scripts/pack-source.mjs` 生成源码归档并**从原始归档条目**验证可移植性（Python tarfile 读取，拒绝 `._*`/`.DS_Store`/`__MACOSX`/绝对路径/链接），同时校验运行包；`node scripts/verify-package.mjs` 复核 52 项来源清单与源码归档逐文件一致。`node scripts/verify-review-counters.mjs` 用独立检修报告中的原始反例做回归；`tests/fixtures/` 由 `scripts/make-legacy-fixtures.mjs` 用真实的 0.9.0-alpha.2 与 0.8.0-alpha.4 引擎生成。
 
-DSH：包内 `cordis.patch.yml` 注册 `@missher/dsh-mse-learning/adapters/dsh`。本版将 `@deepseek-ai/dsh-llm` 的宿主版本约束改为 `*`；其他版本应先验收。旧 alpha.2 的 0.1.7-rc.2 声明会被当前宿主拒绝，需使用新的 alpha.4 候选；不要用版本豁免绕过检查。状态位于当前 profile 的 `dshHomePath('mse-learning')`。配置 `reflectionEnabled: false` 可关闭复盘；检测到 `missherEvolutionCore` 时暂停新控制器，避免双重学习。
-
-本版只处理 DSH 兼容；先使用 0.2.0-rc.1 的真实 AgentLoop 和内存假模型核验持久召回、实际请求内容、工具失败、可信结果、独立复盘及卸载重载，并记录验证基线。未发现需要变更适配业务代码的接口差异。学习算法、数据格式和上下文预算保持不变，Hermes 未升级。安装/Loader 检查使用隔离 profile，不等于已经升级日常应用。已知的 DSH 暂停后排队复盘和请求准入失败归因问题仍见源码 `PROJECT_CONTEXT.md`，本版未修复。
-
-Hermes：独立压缩包的根目录为 `mse-learning`，内含 Python Hook 与 `runtime/src`；解压后可放到一个**隔离测试 profile** 的 `plugins/`，再按宿主机制启用。数据位于该 profile 的 `mse-learning/`。默认不接管 `missher-evolution`；旧插件仍启用时新控制器暂停。`MSE_REFLECTION_ENABLED=0` 关闭复盘。若任务模型和配置路由无法可靠对应，跳过复盘。不得把旧插件的数据复制成新格式。
-
-其他 Agent：导入 `LearningEngine`，或用 `mse-learn` / `node src/cli.mjs`，标准输入传一条 JSON，标准输出返回一条 JSON。需要宿主自动调用生命周期才能自动学习；当前没有 MCP Server。
-
-```js
-import { LearningEngine } from '@missher/dsh-mse-learning'
-const engine = new LearningEngine({
-  stateRoot: '/absolute/private/learning-state',
-  adapterId: 'my-agent',
-  maxContextBytes: 768,
-})
-const pending = engine.prepare({
-  sessionId: 'new-conversation', turnId: '1', origin: 'user',
-  projectKey: 'stable-project-id', prompt: '导出金额并排序',
-})
-// 只在宿主确认 pending.context 实际采用之后：
-if (pending.receipt) engine.accept({ receipt: pending.receipt, lessonIds: pending.lessons })
-engine.complete({ sessionId: 'new-conversation', turnId: '1', projectKey: 'stable-project-id', outcome: 'unknown' })
-```
-
-CLI 请求结构为 `{ "config": { ...构造参数 }, "op": "prepare", "input": { ...参数 } }`。支持 `record`、`prepare`、`accept`、`cancel`、`complete`、`status`、`reflectionRequest`、`reflectionResult`。
-
-这些是**可信宿主接口**；不要把 `record(source=direct_user)`、`accept`、`complete(outcome=verified)` 或复盘结算直接暴露成模型工具。宿主必须识别直接用户输入、确认真正采用，并用独立检查器调用 DSH `ctx.mseLearning.bridge.verification(...)` 或 Hermes `Hooks.verification(...)`。两种适配器均没有自动注册任何能自授验证等级的模型工具。
-
-## 当前限制与验收边界
-
-- 这是 0.8 alpha 的新学习路径，旧版的 UI、导入导出、备份、管理器和完整实验生命周期仍留在原产品中；没有做自动迁移。SDK/CLI 兼容不代表所有 Agent 都已原生接入。
-- 自动纠错识别目前要求“以后/下次/今后/from now on/next time”等明确起句，不覆盖所有自然纠错；召回使用本地词项匹配，可能漏掉同义改写。
-- 提供了带版本的显式 `record({ supersedes: lessonId, ... })` 替代接口；尚无通用语义冲突裁决。新经验不能覆盖当前用户要求。
-- 没有内置适用于任意任务的正确性检查器或执行阻断器。未接入可信检查器时，方法保持候选；正常完成和零退出不能被当作“再也不犯错”。
-- 每个主状态库最多 300 条经验、256 个活动收据、2048 个近期事件，最多 2 MiB；经验 90 天过期，收据 30 分钟过期。达到上限会明确返回 capacity，绝不静默清空。会话预算另存为只含哈希、字节数和经验版本的私有小文件，每会话最多 4 KiB，不受会话总数量限制；这些账目会随使用增长，需要与主状态库一起备份。
-- 上下文预算按提供内容保守扣费，取消也不返还。宿主压缩历史后，同一会话不会自动补注旧经验。复盘有少量独立模型调用开销，采用当前任务可核验的模型路由；不训练模型权重。
-- 原生加载、离线闭环、真实模型行为与长期重复错误率分别验收。测试通过不能代替正式宿主安装和持续效果评估。验证详情见工作区交付记录。
+原生 Loader、真实 AgentLoop 加假模型、受控真实模型调用、日常安装、长期效果分别报告。完成测试不能证明开放任务从此不犯错；长期验收应统计有检查依据的同类错误复发率。当前交付状态见 PROJECT_CONTEXT.md 和对应 dist 交付回执。

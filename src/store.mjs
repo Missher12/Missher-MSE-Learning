@@ -75,12 +75,12 @@ export class LessonStore {
     let text
     try { text = regular(this.path) }
     catch (error) {
-      if (error.code === 'ENOENT') return { schema: 1, owner: this.owner, revision: 0, lessons: [], receipts: [], events: [], sessions: [] }
+      if (error.code === 'ENOENT') return { schema: 2, owner: this.owner, revision: 0, lessons: [], receipts: [], events: [], sessions: [], experiments: [], jobs: [], spends: [] }
       throw new LearningError('state_unavailable')
     }
     let state
     try { state = JSON.parse(text) } catch { throw new LearningError('invalid_store') }
-    check(state?.schema === 1 && state.owner === this.owner, 'owner_or_schema_mismatch')
+    check([1, 2].includes(state?.schema) && state.owner === this.owner, 'owner_or_schema_mismatch')
     check(Number.isSafeInteger(state.revision) && state.revision >= 0
       && Array.isArray(state.lessons) && state.lessons.length <= 300
       && Array.isArray(state.receipts) && state.receipts.length <= 256
@@ -88,7 +88,7 @@ export class LessonStore {
     state.sessions ??= []
     return state
   }
-  update(fn) {
+  update(fn, { backup = false } = {}) {
     let fd
     try { fd = openSync(this.lock, 'wx', 0o600) }
     catch (error) {
@@ -112,6 +112,16 @@ export class LessonStore {
     try {
       writeFileSync(fd, JSON.stringify({ pid: process.pid, token })); fsyncSync(fd)
       const state = this.read()
+      if (backup && state.schema === 1 && existsSync(this.path)) {
+        const destination = join(this.root, `before-schema2-r${state.revision}.json`)
+        const original = regular(this.path)
+        // Never replace a prior rollback snapshot, even after an interrupted migration.
+        if (existsSync(destination)) check(regular(destination) === original, 'backup_conflict')
+        else {
+          const saved = openSync(destination, 'wx', 0o600)
+          try { writeFileSync(saved, original); fsyncSync(saved) } finally { closeSync(saved) }
+        }
+      }
       const result = fn(state)
       state.revision += 1
       const body = JSON.stringify(state)

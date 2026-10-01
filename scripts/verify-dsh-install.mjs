@@ -40,7 +40,7 @@ try {
     '--config.strict-peer-dependencies=true', `--config.store-dir=${join(root, 'store')}`], options)
   assert.equal(installed.exitCode, 0, installed.output)
   assert.equal(installed.incompatible, undefined)
-  const manifest = JSON.parse(readFileSync(join(dir, 'node_modules/@missher/mse-learning/package.json'), 'utf8'))
+  const manifest = JSON.parse(readFileSync(join(dir, 'node_modules/@missher/dsh-mse-learning/package.json'), 'utf8'))
   const expected = JSON.parse(execFileSync('tar', ['-xOf', archive, 'package/package.json'], { encoding: 'utf8' }))
   assert.equal(manifest.version, expected.version)
   assert.deepEqual(manifest.peerDependencies, expected.peerDependencies)
@@ -49,8 +49,8 @@ try {
   const profile = host.loadProfileDirectory('mse-test', dir, anchor)
   const entries = host.composeEntries(profile.layers.map(layer => layer.patches))
   assert.equal(entries.filter(row => row.id === 'mse-learning'
-    && row.name === '@missher/mse-learning/adapters/dsh').length, 1)
-  assert.ok(host.readProfileManifest('mse-test', dir).dsh.profile.bundles.includes('@missher/mse-learning'))
+    && row.name === '@missher/dsh-mse-learning').length, 1)
+  assert.ok(host.readProfileManifest('mse-test', dir).dsh.profile.bundles.includes('@missher/dsh-mse-learning'))
   console.log(JSON.stringify({ ok: true, layer: 'native DSH package operation and profile composition',
     runtimeVersion: host.getDshRuntimeVersion(), version: manifest.version, previousRejected,
     installed: true, compatibilityAccepted: true, bundleRegisteredOnce: true, exemptions: false, modelCalls: 0 }))

@@ -56,7 +56,7 @@ with tempfile.TemporaryDirectory(prefix="mse-hermes-native-") as root:
     from hermes_constants import get_hermes_home
     reflected = threading.Event()
     review_homes = []
-    def fake_review(request, model):
+    def fake_review(request, model, cancel_event=None):
         review_homes.append(str(get_hermes_home()))
         reflected.set()
         return json.dumps({"instruction": "处理金额排序时先核对数值类型，并复查金额导出顺序"})
