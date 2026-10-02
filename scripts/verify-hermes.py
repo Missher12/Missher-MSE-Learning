@@ -1,4 +1,5 @@
 """Load an extracted artifact via real Hermes PluginManager, only in a temporary profile."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -28,7 +29,7 @@ with tempfile.TemporaryDirectory(prefix="mse-hermes-native-") as root:
     manager = PluginManager(scope_key=root)
     manager._load_plugin(manifest)
     assert manager._plugins["mse-learning"].enabled, manager._plugins["mse-learning"].error
-    assert len(manager._plugins["mse-learning"].hooks_registered) == 9
+    assert len(manager._plugins["mse-learning"].hooks_registered) == 10
     manager.invoke_hook("pre_llm_call", session_id="first", turn_id="1", user_message="以后导出金额前先转换为数值，再按金额排序")
     manager.invoke_hook("on_session_end", session_id="first", turn_id="1", completed=True, failed=False, interrupted=False)
     manager.unload("mse-learning")
@@ -74,8 +75,36 @@ with tempfile.TemporaryDirectory(prefix="mse-hermes-native-") as root:
             break
         time.sleep(0.05)
     assert any(item["kind"] == "method" and item["status"] == "candidate" for item in state["lessons"])
+    # The CLI session boundary is the tenth hook, and it is the one shape that stops ONE session
+    # permanently: the old id announced by the CLI before it rotates. It must reach the core's own
+    # control transaction, leave no unconfirmed residue in the adapter, and never be confused with
+    # an ordinary shutdown (which stops this process only).
+    boundary = manager._hooks["on_session_finalize"][0].__self__
+    document = Path(root) / "mse-learning/lessons-v1.json"
+    def stop_tombstones():
+        return ((json.loads(document.read_text()).get("settlementControl") or {}).get("stops")) or []
+
+    manager.invoke_hook("on_session_finalize", session_id="rotated", platform="cli", reason="session_boundary")
+    # A writer holding the core lock answers `lock_busy`; the adapter retries this stop itself,
+    # bounded and without needing another turn, so the durable tombstone lands on its own.
+    deadline = time.monotonic() + 10
+    # Wait for BOTH facts: the core's committed tombstone and this adapter's own record leaving the
+    # active set. Reading only the document would race the confirmation's own bookkeeping.
+    while time.monotonic() < deadline and (not stop_tombstones() or boundary.pending_stops):
+        time.sleep(0.05)
+    stops = stop_tombstones()
+    assert stops and stops[-1]["reason"] == "session_reset", (stops, boundary.durable_status(), boundary.control_errors)
+    rotated = json.loads(document.read_text())
+    assert stops[-1]["sessionHash"] == hashlib.sha256(b"rotated").hexdigest(), stops[-1]
+    assert boundary.pending_stops == {} and not boundary.local_control_pending, "no unconfirmed stop kept"
+    revision = rotated["revision"]
+    status = boundary.durable_status()
+    assert status["core"]["ok"] is True and status["unconfirmedStops"] == [], status
+    assert json.loads(document.read_text())["revision"] == revision, "a read-only status wrote the document"
+    manager.invoke_hook("on_session_finalize", session_id="shutdown-session", platform="cli", reason="shutdown")
+    assert json.loads(document.read_text())["revision"] == revision, "a shutdown is not a session stop"
     manager.unload("mse-learning")
     assert not manager._hooks.get("pre_llm_call")
     print(json.dumps({"ok": True, "layer": "packed Hermes PluginManager lifecycle", "restartRecall": True,
                       "requestAdoption": True, "legacyConflictPaused": True, "profileIsolated": True,
-                      "backgroundProfileIsolated": True, "unloadedHooksRemoved": True, "modelCalls": 0}))
+                      "backgroundProfileIsolated": True, "unloadedHooksRemoved": True, "exactStopPersisted": True, "readOnlyStatus": True, "modelCalls": 0}))

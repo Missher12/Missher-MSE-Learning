@@ -198,17 +198,21 @@ try {
   const settlementLesson = settlementEngine.record({ eventId: 'seed', source: 'direct_user', kind: 'correction',
     instruction: '以后导出金额前先转换为数值，再按金额排序' })
   const attemptPayloads = []
-  const settlementOriginal = settlementEngine.complete.bind(settlementEngine)
+  const settlementOriginal = settlementEngine.settlementApply.bind(settlementEngine)
   let settlementFailures = 1
-  settlementEngine.complete = payload => {
-    attemptPayloads.push(JSON.stringify(payload))
+  // The harness settles through the durable apply now, so that is where a transient storage
+  // failure really happens.
+  settlementEngine.settlementApply = (...args) => {
+    attemptPayloads.push(JSON.stringify(args[0]))
     if (settlementFailures-- > 0) throw Object.assign(new Error('locked'), { code: 'lock_busy' })
-    return settlementOriginal(payload)
+    return settlementOriginal(...args)
   }
   const settlementBridge = packedHarness.createHarnessBridge({ engine: settlementEngine, now: settlementClock.now,
     settlement: { schedule: settlementClock.schedule, cancel: settlementClock.cancel },
     createMessage: text => ({ id: 'packed-message', role: 'user',
       source: { kind: 'plugin', plugin: 'mse-learning' }, content: [{ type: 'text', text }] }) })
+  // The core refuses to settle under unknown host permission; this script states it explicitly.
+  settlementBridge.setTrustedGuard(() => true)
   const settlementSession = { id: 'packed-settlement', header: {}, events: [] }
   const settlementPrompt = { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '导出金额并排序' }] }
   const packedDecision = await settlementBridge.preStep({ agent: { session: settlementSession }, step: 1, turn: 1,

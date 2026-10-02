@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { LearningEngine } from '../src/index.mjs'
 import { DEFAULT_EVALUATION_POLICY } from '../src/evaluation.mjs'
-import { CASE_REASONS, caseContentKey, normalizeCases, scoreOutput, strictJson } from '../src/cases.mjs'
+import { CASE_REASONS, caseContentKey, normalizeCases, scoreOutput, strictJson, caseTaskKey } from '../src/cases.mjs'
 import { JobQueue } from '../adapters/dsh/jobs.mjs'
 import { planIdentity } from '../adapters/dsh/plan-identity.mjs'
 import { latestRoute, readTurns, reviewability, outcomeOf } from '../adapters/dsh/session-digest.mjs'
@@ -60,12 +60,25 @@ test('re-labelling one question twelve times is not twelve independent cases', (
     family: index % 2 ? 'f1' : 'f2', split: index % 3 === 0 ? 'holdout' : 'development' }))
   const result = normalizeCases(cloned, DEFAULT_EVALUATION_POLICY)
   assert.equal(result.ok, false)
-  assert.equal(result.code, CASE_REASONS.duplicateCaseContent)
+  // Identity is the TASK, so re-labelling is caught by the task key before the full-content key
+  // is even consulted: a different oracle, a different forbidden list, a different family and a
+  // different split are all still the same measurement.
+  assert.equal(result.code, CASE_REASONS.duplicateCaseTask)
   assert.equal(result.index, 1)
   assert.equal(result.duplicateOf, 0)
+  for (const variant of [
+    { ...copy[0], caseId: 'case-v', family: 'f2', split: 'holdout', checker: checker('text-exact-v1', '1,2,3') },
+    { ...copy[0], caseId: 'case-w', family: 'f2', split: 'holdout', forbidden: ['升序'] },
+    { ...copy[0], caseId: 'case-x', family: 'f2', split: 'holdout', prompt: ' 把\u00a03,1,2  升序排列 ' },
+  ]) {
+    const mixed = normalizeCases([copy[0], variant, ...validCases()].slice(0, 13), DEFAULT_EVALUATION_POLICY)
+    assert.equal(mixed.ok, false, JSON.stringify(variant.caseId))
+    assert.equal(mixed.code, CASE_REASONS.duplicateCaseTask, JSON.stringify(variant.caseId))
+  }
   const distinct = validCases()
   assert.equal(normalizeCases(distinct, DEFAULT_EVALUATION_POLICY).ok, true)
   assert.notEqual(caseContentKey(distinct[0]), caseContentKey(distinct[1]))
+  assert.notEqual(caseTaskKey(distinct[0]), caseTaskKey(distinct[1]))
 })
 
 test('the JSON checker refuses an ambiguous answer instead of guessing which one it meant', () => {

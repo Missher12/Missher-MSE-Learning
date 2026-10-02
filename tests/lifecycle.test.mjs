@@ -17,7 +17,10 @@ let counter = 0
 const turn = (sessionId, prompt, extra = {}) => ({ sessionId, turnId: `t${++counter}`, origin: 'user', prompt, ...extra })
 const currency = (engine, project = projectKey) => engine.list({ projectKey: project, limit: 50 }).lessons
   .filter(row => row.topicKey === 'report.currency')
-  .map(row => ({ status: row.status, version: row.version, value: row.value, instruction: row.instruction }))
+  // `id` is included because evidence must name a real lesson: the stricter shared validator
+  // (alpha.15) refuses a binding array holding a non-string, which is what this projection used
+  // to produce. The assertions below never changed.
+  .map(row => ({ id: row.id, status: row.status, version: row.version, value: row.value, instruction: row.instruction }))
 
 test('an explicit correction replaces the earlier currency preference and only the current one is served', t => {
   const { engine } = setup(t)

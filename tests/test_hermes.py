@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,79 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("mse_learning_bridge_test", ROOT / "adapters/hermes/bridge.py")
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+
+
+def core_payload(payload):
+    """Exactly what the bridge submits to the core.
+
+    The adapter keeps its own bookkeeping inside the queue entry (`_key`, `_durable`); those keys
+    are stripped at the real transport boundary, so a fake core must see the frozen business
+    fields only — otherwise "the retry replays the identical payload" would compare the wrong
+    document.
+    """
+    return {name: value for name, value in payload.items() if not name.startswith("_")}
+
+
+def durable_core(call, wall=None, enqueue=None):
+    """Adapt a ``complete``-only fake core to the durable operations the bridge now uses.
+
+    This is a TEST-side shim, not a production fallback: the bridge really calls
+    ``settlementEnqueue`` then ``settlementApply``, and these fakes predate that boundary. It
+    models exactly the two facts the adapter depends on — an acknowledgement returns a handle and
+    a deadline, and the business write receives the same frozen payload without the adapter's
+    internal keys — plus an injectable ``enqueue`` answer so the never-acknowledged path stays
+    covered. Production never takes this path.
+    """
+    state = {"generation": 1, "pending": {}}
+    clock = wall or (lambda: time.time() * 1000.0)
+
+    def session_hash(session_id):
+        return hashlib.sha256(str(session_id).encode()).hexdigest()
+
+    def wrapped(op, value):
+        if op == "settlementStatus":
+            return {"ok": True, "control": {"generation": state["generation"], "userPaused": False,
+                                            "stops": 0},
+                    "pending": [{"key": key, "payloadHash": entry["payloadHash"],
+                                 "deadline": entry["deadline"], "sessionHash": entry["sessionHash"]}
+                                for key, entry in state["pending"].items()],
+                    "history": [], "counts": {"pending": len(state["pending"])}}
+        if op == "settlementEnqueue":
+            if enqueue is not None:
+                injected = enqueue(core_payload(value), state)
+                if injected is not None:
+                    return injected
+            key = str(value.get("_key") or value.get("turnId") or len(state["pending"]))
+            payload_hash = "hash-" + key
+            state["pending"][key] = {"payload": core_payload(value), "payloadHash": payload_hash,
+                                     "deadline": clock() + 300_000.0,
+                                     "sessionHash": session_hash(value.get("sessionId"))}
+            return {"ok": True, "durable": True, "key": key, "payloadHash": payload_hash,
+                    "generation": state["generation"], "deadline": state["pending"][key]["deadline"]}
+        if op == "settlementApply":
+            entry = state["pending"].get(value.get("key"))
+            if entry is None:
+                return {"ok": True, "duplicate": True, "outcome": None, "attributed": 0, "terminal": "settled"}
+            result = call("complete", dict(entry["payload"]))
+            if result.get("ok"):
+                state["pending"].pop(value.get("key"), None)
+            return result
+        if op == "settlementPause":
+            state["generation"] += 1
+            return {"ok": True, "generation": state["generation"], "userPaused": value.get("paused")}
+        if op == "settlementStop":
+            state["generation"] += 1
+            if isinstance(value.get("sessionId"), str):
+                return {"ok": True, "generation": state["generation"], "stopped": 0,
+                        "sessionHash": session_hash(value["sessionId"])}
+            entry = state["pending"].get(value.get("key"))
+            if entry is None:
+                return {"ok": False, "code": "settlement_unknown_key"}
+            return {"ok": True, "generation": state["generation"], "stopped": 0,
+                    "sessionHash": entry["sessionHash"]}
+        return call(op, value)
+
+    return wrapped
 
 
 class HermesTests(unittest.TestCase):
@@ -335,6 +409,7 @@ class SettlementRetryTests(unittest.TestCase):
                 return {"ok": False, "code": "state_unavailable"}
             return test.real_call(op, value)
 
+
         class ClockedHooks(module.Hooks):
             def __init__(inner_self, *args, **kwargs):
                 inner_self.monotonic = test.clock.now
@@ -343,12 +418,22 @@ class SettlementRetryTests(unittest.TestCase):
                 super().__init__(*args, **kwargs)
 
         self.ClockedHooks = ClockedHooks
-        self.call = call
+        # The bridge settles through the durable operations now; this test-side shim maps them
+        # onto the fake `complete` above, with the test clock as the core's deadline clock.
+        # Production never takes this path.
+        self.enqueue_hook = None
+        self.raw_call = call
+        self.call = self.new_core()
         self.learner = self.fresh_hooks()
         self.learner.pre_llm_call(session_id="learn", turn_id="1",
                                   user_message="以后导出金额前先转换为数值，再按金额排序")
         self.learner.on_session_end(session_id="learn", turn_id="1", completed=True, failed=False, interrupted=False)
         self.hooks = self.fresh_hooks()
+
+    def new_core(self):
+        """A fresh scripted core store: one scenario, one durable document."""
+        return durable_core(self.raw_call,
+                            enqueue=lambda payload, state: self.enqueue_hook() if self.enqueue_hook else None)
 
     def fresh_hooks(self):
         hooks = self.ClockedHooks(config=self.config, call=self.call)
@@ -423,8 +508,13 @@ class SettlementRetryTests(unittest.TestCase):
         status = self.hooks.call("status", {})
         self.assertEqual(status["verified"], 0, "a permanent failure never becomes success")
 
+        # The never-acknowledged path keeps its own local bound: the core never took ownership of
+        # this settlement, so repeated transient ENQUEUE failures exhaust it locally and it is
+        # reported as such. A `lock_busy` in front of the core's main lock is not a business
+        # attempt, so it can never be counted against the core's own attempt bound.
+        self.call = self.new_core()
         self.hooks = self.fresh_hooks()
-        self.complete_hook = lambda op, value: {"ok": False, "code": "lock_busy"}
+        self.enqueue_hook = lambda: {"ok": False, "code": "lock_busy"}
         self.run_turn(session="settle-two")
         for delay in (0.25, 1.0, 3.0):
             self.clock.advance(delay)
@@ -433,6 +523,21 @@ class SettlementRetryTests(unittest.TestCase):
         self.assertEqual(len(exhausted), 1)
         self.assertEqual(exhausted[-1]["attempts"], 4)
         self.assertEqual(exhausted[-1]["code"], "lock_busy")
+        self.assertEqual(self.complete_attempts(), [],
+                         "an unacknowledged settlement is never written to the core")
+
+        # A durable item is ended by the CORE, and its own terminal answer is reported as-is:
+        # the adapter stops there instead of retrying a decision the document already recorded.
+        self.call = self.new_core()
+        self.hooks = self.fresh_hooks()
+        self.enqueue_hook = None
+        self.complete_hook = lambda op, value: {"ok": False, "code": "settlement_attempts_exhausted"}
+        self.run_turn(session="settle-three")
+        self.clock.advance(30.0)
+        self.assertEqual(self.hooks.settlement_status(), [], "the core's terminal answer needs no retry")
+        self.assertEqual(self.hooks.settlement_history()[-1]["state"], "failed")
+        self.assertEqual(self.hooks.settlement_history()[-1]["lastError"], "settlement_attempts_exhausted")
+        self.assertEqual(len(self.complete_attempts()), 1, "a core terminal answer is submitted once")
 
     def test_pause_resume_close_and_dispose_bound_the_retries(self):
         self.complete_hook = lambda op, value: {"ok": False, "code": "state_unavailable"}
@@ -501,7 +606,7 @@ class HookLevelClock:
 class HookSettlementBoundaryTests(unittest.TestCase):
     """D2/D3/D4: the real Hermes hook entry points must govern the settlement queue."""
 
-    def build(self, receipt_remaining_ms=100, enabled=None):
+    def build(self, receipt_remaining_ms=100, enabled=None, enqueue=None, core=None):
         clock = HookLevelClock()
         calls = []
         window = {"permitted": True}
@@ -516,6 +621,8 @@ class HookSettlementBoundaryTests(unittest.TestCase):
                         "receipt": "receipt-fixture", "receiptExpiresAt": clock.wall_ms() + receipt_remaining_ms}
             if op == "complete":
                 calls.append({"at": clock.now(), "payload": dict(value)})
+                if core is not None:
+                    return core(value)
                 return {"ok": False, "code": "lock_busy"} if len(calls) == 1 else {
                     "ok": True, "outcome": value["outcome"], "attributed": 0}
             return {"ok": True}
@@ -529,7 +636,9 @@ class HookSettlementBoundaryTests(unittest.TestCase):
                 super().__init__(*args, **kwargs)
 
         hooks = HookLevelHooks(config={"stateRoot": "/tmp/unused-fake-engine", "adapterId": "hermes",
-                                       "maxContextBytes": 768}, call=call,
+                                       "maxContextBytes": 768},
+                               call=durable_core(call, wall=clock.wall_ms,
+                                                 enqueue=(lambda payload, state: enqueue()) if enqueue else None),
                                enabled=lambda: permitted["permitted"])
         return clock, calls, hooks, window
 
@@ -606,19 +715,91 @@ class HookSettlementBoundaryTests(unittest.TestCase):
         hooks.dispose()
 
     def test_a_paused_settlement_that_expires_is_retired_not_written(self):
-        clock, calls, hooks, window = self.build(receipt_remaining_ms=2000)
+        # NEVER ACKNOWLEDGED: the core never took ownership of this settlement, so the adapter's
+        # own deadline still ends it locally — and it is never written late. (Once the core HAS
+        # acknowledged an item, its deadline belongs to the core; see
+        # `test_a_durable_settlement_past_its_deadline_is_ended_by_the_core`.)
+        clock, calls, hooks, window = self.build(receipt_remaining_ms=2000,
+                                                 enqueue=lambda: {"ok": False, "code": "lock_busy"})
         self.run_turn(hooks)
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls, [], "an unacknowledged settlement is never written")
         window["permitted"] = False
         clock.advance(0.25)
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls, [])
         clock.advance(10)
         window["permitted"] = True
         hooks.pre_llm_call(session_id="another", turn_id="1", user_message="请导出金额并排序")
         clock.advance(0)
-        self.assertEqual(len(calls), 1, "an expired settlement is never written late")
+        self.assertEqual(calls, [], "an expired settlement is never written late")
         self.assertEqual(hooks.settlement_status(), [])
         self.assertEqual(hooks.settlement_history()[-1]["state"], "expired")
+        hooks.dispose()
+
+    def test_a_durable_item_whose_deadline_attempt_is_unconfirmed_stops_and_says_so(self):
+        # The deadline attempt itself cannot reach the core (a live writer holds the lock, or the
+        # runtime is unavailable). The adapter may not claim the core expired the item, and it may
+        # not retry for ever: the item stays visible as unconfirmed with its ORIGINAL deadline and
+        # no timer, and a later legitimate lifecycle re-reads the core instead.
+        def core(value):
+            return {"ok": False, "code": "lock_busy"}
+
+        clock, calls, hooks, _ = self.build(receipt_remaining_ms=200, core=core)
+        self.run_turn(hooks)
+        entry = hooks.settlement.entries[("old", "1")]
+        deadline = entry["deadline"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual([job[0] for job in clock.jobs.values()], [deadline],
+                         "the last automatic attempt sits on the deadline, not on the backoff")
+        clock.advance(0.1)
+        self.assertEqual(len(calls), 1, "nothing is attempted before the deadline")
+        clock.advance(0.1)                       # exactly the deadline
+        self.assertEqual(len(calls), 2, "the deadline attempt is issued once")
+        status = hooks.settlement_status()
+        self.assertEqual(len(status), 1, "an unconfirmed item is kept, never retired as a claim")
+        self.assertEqual(status[0]["state"], "unconfirmed")
+        self.assertEqual(status[0]["lastError"], "lock_busy")
+        self.assertEqual(status[0]["deadline"], deadline, "the original deadline is never refreshed")
+        self.assertEqual(clock.jobs, {}, "automatic scheduling stops after the deadline attempt")
+        clock.advance(300)
+        self.assertEqual(len(calls), 2, "an unconfirmed item is never retried unboundedly")
+        self.assertEqual(hooks.settlement_history(), [], "no local terminal state the core never wrote")
+        # A later legitimate lifecycle re-reads the core: one attempt per lifecycle moment, still
+        # with no successor scheduled and still on the same deadline.
+        hooks.pre_llm_call(session_id="later", turn_id="1", user_message="请导出金额并排序")
+        self.assertEqual(len(calls), 3, "the lifecycle re-read reaches the core once")
+        self.assertEqual(clock.jobs, {})
+        self.assertEqual(hooks.settlement.entries[("old", "1")]["deadline"], deadline)
+        hooks.dispose()
+
+    def test_a_durable_settlement_past_its_deadline_is_ended_by_the_core(self):
+        # ACKNOWLEDGED: the pending row and its deadline live in the core's own document, so the
+        # adapter may not retire it locally — and it may not retry for ever either. The last
+        # automatic attempt is placed ON the original deadline (never past it, never refreshed),
+        # and the core's own terminal answer is what ends it. Nothing is credited twice, and the
+        # local record carries the core's code rather than a locally invented expiry.
+        def core(value):
+            # The first attempt meets a busy store; once the queue is allowed to retry, the core
+            # answers with its own terminal row for the acknowledged, now-unusable settlement.
+            return {"ok": False, "code": "lock_busy"} if len(calls) == 1 else \
+                {"ok": False, "code": "settlement_expired"}
+
+        clock, calls, hooks, window = self.build(receipt_remaining_ms=3_600_000, core=core)
+        self.run_turn(hooks)
+        self.assertEqual(len(calls), 1)
+        entry = hooks.settlement.entries[("old", "1")]
+        self.assertEqual(entry["state"], "pending", "an acknowledged item is not retired locally")
+        window["permitted"] = False
+        clock.advance(0.25)
+        self.assertEqual(len(calls), 1, "a withdrawn permission still starts no attempt")
+        window["permitted"] = True
+        hooks.pre_llm_call(session_id="another", turn_id="1", user_message="请导出金额并排序")
+        clock.advance(0)
+        self.assertEqual(len(calls), 2, "the core gets its own chance to end the acknowledged item")
+        self.assertEqual(hooks.settlement_status(), [])
+        self.assertEqual(hooks.settlement_history()[-1]["state"], "expired")
+        self.assertEqual(hooks.settlement_history()[-1]["lastError"], "settlement_expired")
+        self.assertFalse(any(event["kind"] == "expired" for event in hooks.settlement_events),
+                         "the local queue never claims an expiry the core did not answer")
         hooks.dispose()
 
     def test_stopped_sessions_release_capacity_and_history_stays_bounded(self):
@@ -636,12 +817,23 @@ class HookSettlementBoundaryTests(unittest.TestCase):
         hooks.dispose()
 
     def test_receipt_deadline_units_are_converted_and_the_age_bound_still_applies(self):
+        # The core's epoch-millisecond receipt deadline is converted once, at the queue boundary,
+        # and it is what bounds the next automatic attempt: 100ms of receipt life must not become
+        # a 250ms retry. For an acknowledged item that bound is the deadline itself — the last
+        # automatic attempt is placed there so the core can retire it from its own clock, instead
+        # of the queue declaring a terminal state the document never heard about.
         clock, calls, hooks, _ = self.build(receipt_remaining_ms=100)
         self.run_turn(hooks)
-        self.assertEqual(hooks.settlement_status(), [], "an exhausted retry leaves the live set")
-        self.assertEqual(hooks.settlement_history()[-1]["state"], "exhausted")
-        clock.advance(0.25)
-        self.assertEqual(len(calls), 1, "a receipt with 100ms left must not be retried at 250ms")
+        entry = hooks.settlement.entries[("old", "1")]
+        self.assertAlmostEqual(entry["deadline"], 1000.0 + 0.1, places=6)
+        self.assertEqual(len(calls), 1, "the first attempt really happened")
+        self.assertEqual(entry["state"], "pending", "an acknowledged item is not retired locally")
+        self.assertEqual([job[0] for job in clock.jobs.values()], [1000.1],
+                         "the last automatic attempt sits on the receipt deadline, not on the backoff")
+        clock.advance(0.099)
+        self.assertEqual(len(calls), 1, "nothing is attempted before the deadline")
+        clock.advance(0.002)
+        self.assertEqual(len(calls), 2, "the deadline attempt is issued so the core can decide")
         hooks.dispose()
 
     def test_a_far_receipt_still_retries_within_the_five_minute_age_bound(self):
@@ -713,7 +905,7 @@ class ForegroundBackgroundInterlockTests(unittest.TestCase):
                 super().__init__(*args, **kwargs)
 
         hooks = InterlockHooks(config={"stateRoot": "/tmp/unused-fake-engine", "adapterId": "hermes",
-                                       "maxContextBytes": 768}, call=call)
+                                       "maxContextBytes": 768}, call=durable_core(call))
         return clock, calls, order, gates, state, hooks
 
     def start_turn(self, hooks, session="old", turn="1", settle=True):
@@ -764,7 +956,7 @@ class ForegroundBackgroundInterlockTests(unittest.TestCase):
         try:
             self.start_turn(hooks)
             self.assertEqual(len(calls), 1)
-            frozen = json.dumps(hooks.settlement.entries[("old", "1")]["payload"], sort_keys=True)
+            frozen = json.dumps(core_payload(hooks.settlement.entries[("old", "1")]["payload"]), sort_keys=True)
             finished, _ = self.background_attempt(hooks)
             self.assertTrue(gates["complete_started"].wait(5), "the retry started writing")
             resumed = hooks.pre_llm_call(session_id="resumed", turn_id="1", user_message="请导出金额并进行排序")
@@ -777,7 +969,7 @@ class ForegroundBackgroundInterlockTests(unittest.TestCase):
             self.assertIsNotNone(resumed, "the foreground turn still recalls")
             self.assertIn("核对数值类型", resumed["context"])
             self.assertEqual(state["max_active"], 1)
-            self.assertEqual(json.dumps(calls[-1]["payload"], sort_keys=True), frozen)
+            self.assertEqual(json.dumps(core_payload(calls[-1]["payload"]), sort_keys=True), frozen)
         finally:
             gates["release_complete"].set()
             hooks.dispose()
@@ -789,7 +981,7 @@ class ForegroundBackgroundInterlockTests(unittest.TestCase):
         try:
             self.start_turn(hooks)
             self.assertEqual(len(calls), 1)
-            frozen = json.dumps(hooks.settlement.entries[("old", "1")]["payload"], sort_keys=True)
+            frozen = json.dumps(core_payload(hooks.settlement.entries[("old", "1")]["payload"]), sort_keys=True)
             hooks.lock.acquire()                      # a foreground core call is in progress
             finished, _ = self.background_attempt(hooks)
             try:
@@ -802,7 +994,7 @@ class ForegroundBackgroundInterlockTests(unittest.TestCase):
             self.assertTrue(self.wait_until(lambda: hooks.settlement_status() == []))
             self.assertEqual(len(calls), 2, "the deferred replay is not lost")
             self.assertEqual(hooks.settlement_history()[-1]["state"], "settled")
-            self.assertEqual(json.dumps(calls[-1]["payload"], sort_keys=True), frozen)
+            self.assertEqual(json.dumps(core_payload(calls[-1]["payload"]), sort_keys=True), frozen)
             self.assertFalse(state["overlap"])
             self.assertEqual(state["max_active"], 1)
         finally:
@@ -883,8 +1075,10 @@ class ObservedLock:
     def __init__(self):
         self.raw = threading.RLock()
         self.waiting = threading.Event()
+        self.acquisitions = 0
 
     def acquire(self, *args, **kwargs):
+        self.acquisitions += 1
         if threading.current_thread().name == "mse-wait-boundary":
             self.waiting.set()
         return self.raw.acquire(*args, **kwargs)
@@ -908,7 +1102,7 @@ class WaitBoundaryRevalidationTests(unittest.TestCase):
     can never come from "the retry was refused before it started".
     """
 
-    def build(self, receipt_remaining_ms=3_600_000, fail_times=1):
+    def build(self, receipt_remaining_ms=3_600_000, fail_times=1, enqueue=None):
         clock = HookLevelClock()
         calls = []
         state = {"complete_calls": 0, "prepare_calls": 0}
@@ -939,7 +1133,9 @@ class WaitBoundaryRevalidationTests(unittest.TestCase):
                 super().__init__(*args, **kwargs)
 
         hooks = WaitHooks(config={"stateRoot": "/tmp/unused-fake-engine", "adapterId": "hermes",
-                                  "maxContextBytes": 768}, call=call,
+                                  "maxContextBytes": 768},
+                          call=durable_core(call, wall=clock.wall_ms,
+                                            enqueue=(lambda payload, state_: enqueue()) if enqueue else None),
                           enabled=lambda: window["permitted"])
         hooks.lock = ObservedLock()
         return clock, calls, state, window, hooks
@@ -974,13 +1170,13 @@ class WaitBoundaryRevalidationTests(unittest.TestCase):
         worker.start()
         return worker, failures
 
-    def wait_then_change(self, action, clock, window, hooks, calls):
+    def wait_then_change(self, action, clock, window, hooks, calls, written=1):
         """Drive one retry into the lock wait, change state, then release the boundary."""
-        frozen = json.dumps(hooks.settlement.entries[("old", "1")]["payload"], sort_keys=True)
+        frozen = json.dumps(core_payload(hooks.settlement.entries[("old", "1")]["payload"]), sort_keys=True)
         with hooks.lock:
             worker, failures = self.retry_in_background(clock)
             self.assertTrue(hooks.lock.waiting.wait(5), "the background reached the lock wait")
-            self.assertEqual(len(calls), 1, "nothing is written while the boundary is held")
+            self.assertEqual(len(calls), written, "nothing is written while the boundary is held")
             if action == "legacy_disable":
                 window["permitted"] = False
             elif action == "pause":
@@ -1005,14 +1201,18 @@ class WaitBoundaryRevalidationTests(unittest.TestCase):
             self.start_turn(hooks)
             frozen = self.wait_then_change("control", clock, window, hooks, calls)
             self.assertEqual(len(calls), 2, "an unchanged retry settles after the wait")
-            self.assertEqual(json.dumps(calls[-1]["payload"], sort_keys=True), frozen)
+            self.assertEqual(json.dumps(core_payload(calls[-1]["payload"]), sort_keys=True), frozen)
             self.assertEqual(hooks.settlement_status(), [])
             self.assertEqual(hooks.settlement_history()[-1]["state"], "settled")
         finally:
             hooks.dispose()
 
     def test_five_invalidations_during_the_wait_never_reach_the_core(self):
-        for action in ["legacy_disable", "pause", "close", "dispose", "expiry"]:
+        # Each of these is a PERMISSION change: the host withdrew permission, paused, closed the
+        # session or unloaded while the write was waiting for the boundary. The stale write must
+        # never be issued, whatever the item's durability. (A deadline is a different fact, and
+        # once the core acknowledged the item it belongs to the core — see the two tests below.)
+        for action in ["legacy_disable", "pause", "close", "dispose"]:
             clock, calls, state, window, hooks = self.build()
             try:
                 self.start_turn(hooks)
@@ -1025,7 +1225,7 @@ class WaitBoundaryRevalidationTests(unittest.TestCase):
                     self.assertIsNotNone(pending, f"{action}: the frozen payload is kept for a resume")
                     self.assertEqual(pending["state"], "pending")
                     self.assertEqual(pending["attempts"], 1, f"{action}: a refused write consumes no attempt")
-                    self.assertEqual(json.dumps(pending["payload"], sort_keys=True), frozen)
+                    self.assertEqual(json.dumps(core_payload(pending["payload"]), sort_keys=True), frozen)
                     self.assertTrue(hooks.settlement.paused)
                 elif action == "close":
                     self.assertIsNone(hooks.settlement.entries.get(("old", "1")))
@@ -1035,11 +1235,39 @@ class WaitBoundaryRevalidationTests(unittest.TestCase):
                     self.assertEqual(hooks.settlement.attempt(("old", "1"))["state"], "pending",
                                      f"{action}: a disposed queue never starts another attempt")
                     self.assertEqual(len(calls), 1)
-                elif action == "expiry":
-                    self.assertIsNone(hooks.settlement.entries.get(("old", "1")))
-                    self.assertEqual(states, ["expired"], f"{action}: the original deadline contract")
             finally:
                 hooks.dispose()
+
+    def test_the_deadline_during_the_wait_is_decided_by_the_core_not_locally(self):
+        # An acknowledged item's deadline lives in the core's document, so a deadline that passes
+        # while the write waits must NOT become a local terminal state: the write is issued and the
+        # core's own answer governs. The payload is still the originally frozen one.
+        clock, calls, state, window, hooks = self.build()
+        try:
+            self.start_turn(hooks)
+            frozen = self.wait_then_change("expiry", clock, window, hooks, calls)
+            self.assertEqual(len(calls), 2, "the core decides an acknowledged deadline")
+            self.assertEqual(json.dumps(core_payload(calls[-1]["payload"]), sort_keys=True), frozen)
+            self.assertEqual(hooks.settlement_status(), [])
+            self.assertEqual(hooks.settlement_history()[-1]["state"], "settled")
+            self.assertFalse(any(event["kind"] == "expired" for event in hooks.settlement_events),
+                             "the local queue never claims an expiry the core did not answer")
+        finally:
+            hooks.dispose()
+
+    def test_an_unacknowledged_deadline_during_the_wait_still_expires_locally(self):
+        # The same held-boundary deadline, but the core never acknowledged the item: the adapter
+        # still owns it, so it expires locally and is never written.
+        clock, calls, state, window, hooks = self.build(enqueue=lambda: {"ok": False, "code": "lock_busy"})
+        try:
+            self.start_turn(hooks)
+            self.wait_then_change("expiry", clock, window, hooks, calls, written=0)
+            self.assertEqual(calls, [], "an unacknowledged settlement is never written")
+            self.assertIsNone(hooks.settlement.entries.get(("old", "1")))
+            self.assertEqual([row["state"] for row in hooks.settlement_history()], ["expired"])
+            self.assertEqual([tuple(row["key"]) for row in hooks.settlement_history()], [("old", "1")])
+        finally:
+            hooks.dispose()
 
     def test_a_pause_during_the_wait_still_replays_after_a_legitimate_resume(self):
         clock, calls, state, window, hooks = self.build()
@@ -1052,7 +1280,7 @@ class WaitBoundaryRevalidationTests(unittest.TestCase):
             self.assertIsNone(hooks.pre_llm_call(session_id="warm", turn_id="1", user_message=""))
             clock.advance(0)
             self.assertEqual(len(calls), 2, "the unexpired frozen payload is replayed exactly once")
-            self.assertEqual(json.dumps(calls[-1]["payload"], sort_keys=True), frozen,
+            self.assertEqual(json.dumps(core_payload(calls[-1]["payload"]), sort_keys=True), frozen,
                              "the replay uses the original frozen payload")
             self.assertEqual(hooks.settlement_status(), [])
             self.assertEqual(hooks.settlement_history()[-1]["state"], "settled")
@@ -1060,14 +1288,16 @@ class WaitBoundaryRevalidationTests(unittest.TestCase):
             hooks.dispose()
 
     def test_a_pause_during_the_wait_that_expires_is_retired_not_written(self):
-        clock, calls, state, window, hooks = self.build()
+        # Never acknowledged, so the pause and the deadline are both the adapter's: the pause stops
+        # the retry, the passed deadline ends it locally, and nothing is ever written late.
+        clock, calls, state, window, hooks = self.build(enqueue=lambda: {"ok": False, "code": "lock_busy"})
         try:
             self.start_turn(hooks)
-            self.wait_then_change("pause_then_expire", clock, window, hooks, calls)
-            self.assertEqual(len(calls), 1)
+            self.wait_then_change("pause_then_expire", clock, window, hooks, calls, written=0)
+            self.assertEqual(calls, [])
             hooks.set_enabled(True)          # the explicit pause is lifted the explicit way
             clock.advance(0)
-            self.assertEqual(len(calls), 1, "an expired settlement is never written late")
+            self.assertEqual(calls, [], "an expired settlement is never written late")
             self.assertEqual(hooks.settlement_status(), [])
             self.assertEqual(hooks.settlement_history()[-1]["state"], "expired")
         finally:
@@ -1097,3 +1327,337 @@ class WaitBoundaryRevalidationTests(unittest.TestCase):
                              "the backoff re-reads the lifecycle boundary instead of issuing another call")
         finally:
             hooks.dispose()
+
+
+class StopControlTests(unittest.TestCase):
+    """The exact-stop control plane: intent before any wait, real bounds, per-session scope.
+
+    Every case drives the product's real entry points (`request_stop`, `pre_llm_call`,
+    `on_session_finalize`) against a scripted transport, so it can never pass because a helper was
+    called in the test's own order.
+    """
+
+    WALL = 1800000000000.0
+
+    def build(self, stop=None, pending=None, apply_ok=False):
+        clock = HookLevelClock(wall_ms=self.WALL)
+        state = {"stop_calls": 0, "writes": [], "enqueued": {}, "seq": 0}
+        # A recovered row was acknowledged by an EARLIER process, so the core already knows its
+        # handle: the fixture has to know it too, or the apply would look like an unknown key.
+        for row in pending or []:
+            state["enqueued"][row["key"]] = {"payloadHash": row["payloadHash"],
+                                             "sessionHash": row.get("sessionHash")}
+
+        def call(op, value):
+            if op == "settlementStop":
+                state["stop_calls"] += 1
+                if stop is not None:
+                    return stop(value, state)
+                return {"ok": True, "generation": 2, "stopped": 0,
+                        "sessionHash": module.session_identity(value.get("sessionId"))}
+            if op == "settlementEnqueue":
+                state["seq"] += 1
+                key = str(value.get("_key") or value.get("turnId") or state["seq"])
+                payload = core_payload(value)
+                state["enqueued"][key] = {"payloadHash": "hash-" + key,
+                                          "sessionHash": module.session_identity(payload.get("sessionId"))}
+                return {"ok": True, "durable": True, "key": key, "payloadHash": "hash-" + key,
+                        "deadline": self.WALL + 300_000.0}
+            if op == "settlementApply":
+                row = state["enqueued"].get(value.get("key"))
+                if row is None:
+                    return {"ok": True, "duplicate": True, "outcome": None, "attributed": 0}
+                # Every business write is recorded with the session identity it belongs to, so a
+                # test can prove a stopped session's write never happened while another one's did.
+                state["writes"].append(row.get("sessionHash"))
+                if not apply_ok:
+                    return {"ok": False, "code": "lock_busy"}
+                state["enqueued"].pop(value.get("key"), None)
+                return {"ok": True, "outcome": "verified", "attributed": 0}
+            if op == "settlementStatus":
+                rows = pending if pending is not None else []
+                return {"ok": True, "control": {"generation": 1, "userPaused": False, "stops": 0},
+                        "pending": [dict(row) for row in rows], "counts": {"pending": len(rows)}}
+            if op == "prepare":
+                return {"ok": True, "context": "", "lessons": [], "receipt": None}
+            return {"ok": False, "code": "lock_busy"}
+
+        class StopHooks(module.Hooks):
+            def __init__(inner_self, *args, **kwargs):
+                inner_self.monotonic = clock.now
+                inner_self.schedule = clock.schedule
+                inner_self.cancel = clock.cancel
+                inner_self.wall_ms = clock.wall_ms
+                super().__init__(*args, **kwargs)
+
+        hooks = StopHooks(config={"stateRoot": "/tmp/unused-fake-engine", "adapterId": "hermes",
+                                  "maxContextBytes": 768}, call=call)
+        return clock, state, hooks
+
+    @staticmethod
+    def entry(session):
+        return {"key": (session, "1"), "sessionId": session, "sessionKey": None}
+
+    def restored(self, digit, hash_digit, session):
+        """One acknowledged row as the core's own status reports it, hash included."""
+        return {"key": digit * 64, "payloadHash": hash_digit * 64, "deadline": self.WALL + 300_000.0,
+                "sessionHash": module.session_identity(session)}
+
+    def sessions(self, hooks):
+        return {row["sessionKey"]: key for key, row in hooks.settlement.entries.items()}
+
+    def test_the_stop_intent_is_published_before_any_waiting_lock(self):
+        gate, release = threading.Event(), threading.Event()
+
+        def stop(value, state):
+            gate.set()
+            release.wait(5)
+            return {"ok": True, "generation": 2, "stopped": 0,
+                    "sessionHash": module.session_identity(value.get("sessionId"))}
+
+        clock, state, hooks = self.build(stop=stop)
+        hooks.lock = ObservedLock()
+        results, errors = [], []
+
+        def worker():
+            try:
+                results.append(hooks.request_stop("old", "session_reset"))
+            except Exception as error:  # noqa: BLE001 - surfaced as a failed check
+                errors.append(repr(error))
+
+        hooks.lock.raw.acquire()          # a foreground core call is inside the write boundary
+        try:
+            thread = threading.Thread(target=worker)
+            thread.start()
+            self.assertTrue(gate.wait(5), "the durable confirmation really started")
+            self.assertEqual(sorted(hooks.local_control_pending), ["session:old"],
+                             "the barrier is up while the confirmation is still in flight")
+            self.assertEqual(hooks._permitted(self.entry("old")), module.SESSION_SCOPED_REFUSAL,
+                             "this session may not write")
+            self.assertIsNone(hooks._permitted(self.entry("other")), "another session is untouched")
+            self.assertEqual(hooks.lock.acquisitions, 0,
+                             "the stop path never waits on the boundary it must not wait on")
+            self.assertEqual(state["stop_calls"], 1)
+        finally:
+            release.set()
+            hooks.lock.raw.release()
+            thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(results[0]["confirmed"], "the core's own transaction is the confirmation")
+        self.assertEqual(hooks.pending_stops, {}, "a confirmed stop leaves the active set")
+        self.assertEqual(hooks.local_control_pending, set())
+        self.assertEqual([row["state"] for row in hooks.stop_history], ["confirmed"])
+
+    def test_a_repeated_stop_never_resets_attempts_or_the_original_deadline(self):
+        clock, state, hooks = self.build(stop=lambda value, state: {"ok": False, "code": "lock_busy"})
+        first = hooks.request_stop("old", "session_reset")
+        deadline = first["deadline"]
+        for _ in range(4):
+            again = hooks.request_stop("old", "session_reset")
+            self.assertEqual(again["deadline"], deadline, "a repeated event never extends the window")
+        self.assertEqual(first["attempts"], 3, "three real submissions, then honest exhaustion")
+        self.assertEqual(state["stop_calls"], 3, "no submission is attempted past the bound")
+        self.assertEqual(hooks.pending_stops[("session", "old")]["state"], "exhausted")
+        self.assertEqual(sorted(hooks.local_control_pending), ["session:old"],
+                         "an unconfirmed stop keeps its barrier")
+        self.assertEqual(hooks._permitted(self.entry("old")), module.SESSION_SCOPED_REFUSAL)
+        # Later lifecycle moments do not keep calling the core for an exhausted stop.
+        for turn in range(1, 4):
+            hooks.pre_llm_call(session_id="other", turn_id=str(turn), user_message="请导出金额并排序")
+        self.assertEqual(state["stop_calls"], 3)
+        self.assertEqual(hooks.pending_stops[("session", "old")]["attempts"], 3)
+
+    def test_a_confirmed_stop_leaves_the_active_set_and_history_is_bounded(self):
+        clock, state, hooks = self.build()
+        for index in range(65):
+            record = hooks.request_stop("closed-%d" % index, "session_reset")
+            self.assertTrue(record["confirmed"])
+        self.assertEqual(hooks.pending_stops, {}, "65 confirmed stops hold no capacity")
+        self.assertEqual(hooks.local_control_pending, set())
+        self.assertLessEqual(len(hooks.stop_history), 32, "diagnostic history is bounded")
+        self.assertEqual(state["stop_calls"], 65)
+
+    def test_unconfirmed_stop_capacity_is_explicit_and_bounded(self):
+        clock, state, hooks = self.build(stop=lambda value, state: {"ok": False, "code": "lock_busy"})
+        for index in range(64):
+            self.assertFalse(hooks.request_stop("busy-%d" % index, "session_reset")["confirmed"])
+        self.assertEqual(len(hooks.pending_stops), 64)
+        refused = hooks.request_stop("busy-overflow", "session_reset")
+        self.assertEqual(refused["state"], "capacity")
+        self.assertEqual(refused["code"], "stop_capacity")
+        self.assertEqual(hooks.stop_capacity_refusals, 1)
+        self.assertEqual(len(hooks.pending_stops), 64, "a refusal never silently drops a tracked stop")
+        self.assertEqual(state["stop_calls"], 64, "a refused stop is never submitted")
+        self.assertTrue(any(row["code"] == "stop_capacity" for row in hooks.control_errors))
+        hooks.dispose()
+
+    def test_an_unconfirmed_raw_id_stop_blocks_that_session_only(self):
+        # The original defect: a raw-id stop whose confirmation failed left the restored entries
+        # unblocked, so a recovered timer could still apply and credit A — or, when the barrier was
+        # global, it froze B as well. Now the intent blocks exactly A, computed with the core's own
+        # published identity rule, and B keeps its own timer.
+        pending = [self.restored("a", "c", "blocked-session"), self.restored("b", "d", "other-session")]
+        clock, state, hooks = self.build(stop=lambda value, state: {"ok": False, "code": "lock_busy"},
+                                         pending=pending)
+        hooks.pre_llm_call(session_id="current", turn_id="1", user_message="请导出金额并排序")
+        keys = self.sessions(hooks)
+        blocked_key = keys[module.session_identity("blocked-session")]
+        other_key = keys[module.session_identity("other-session")]
+        self.assertEqual(sorted(state["writes"]),
+                         sorted([module.session_identity("blocked-session"), module.session_identity("other-session")]),
+                         "both acknowledged rows were really re-driven once")
+        record = hooks.request_stop("blocked-session", "session_reset")
+        self.assertFalse(record["confirmed"], "the core never confirmed this stop")
+        self.assertEqual(record["sessionHash"], module.session_identity("blocked-session"),
+                         "the intent carries the identity the core itself would derive")
+        blocked, other = hooks.settlement.entries[blocked_key], hooks.settlement.entries[other_key]
+        self.assertEqual(hooks._permitted(blocked), module.SESSION_SCOPED_REFUSAL,
+                         "the stopped session may not write before the confirmation lands")
+        self.assertIsNone(hooks._permitted(other), "the other session keeps working")
+        self.assertFalse(hooks.settlement.paused, "one session's failed stop never pauses the queue")
+        self.assertIn(blocked_key, hooks.settlement.entries, "the entry stays visible, not retired")
+        writes = len(state["writes"])
+        self.assertEqual(hooks.settlement.attempt(blocked_key)["state"], "blocked")
+        self.assertEqual(len(state["writes"]), writes, "no write may land for the stopped session")
+        # The other session's own registered retry is what lands next.
+        self.assertTrue(clock.jobs, "the other session keeps its scheduled retry")
+        for due, callback in list(clock.jobs.values()):
+            callback()
+        self.assertEqual(state["writes"][-1], module.session_identity("other-session"),
+                         "the other session still settles")
+        self.assertEqual(state["writes"].count(module.session_identity("blocked-session")), 1,
+                         "the stopped session's only write was the one before the stop")
+        self.assertIn(blocked_key, hooks.settlement.entries)
+        hooks.dispose()
+
+    def test_a_confirmed_raw_id_stop_retires_exactly_the_matching_restored_entry(self):
+        pending = [self.restored("a", "c", "blocked-session"), self.restored("b", "d", "other-session")]
+
+        def stop(value, state):
+            if isinstance(value.get("sessionId"), str):
+                return {"ok": True, "generation": 2, "stopped": 1,
+                        "sessionHash": module.session_identity(value["sessionId"])}
+            entry = [row for row in pending if row["key"] == value.get("key")][0]
+            return {"ok": True, "generation": 2, "stopped": 1, "sessionHash": entry["sessionHash"]}
+
+        clock, state, hooks = self.build(stop=stop, pending=pending)
+        hooks.pre_llm_call(session_id="current", turn_id="1", user_message="请导出金额并排序")
+        self.assertEqual(len(hooks.settlement.entries), 2)
+        record = hooks.request_stop("blocked-session", "session_reset")
+        self.assertTrue(record["confirmed"])
+        self.assertEqual([row["sessionKey"] for row in hooks.settlement.entries.values()],
+                         [module.session_identity("other-session")],
+                         "only the session the core named is retired; the other keeps retrying")
+        self.assertEqual(sorted(hooks.local_control_pending), [])
+        self.assertIsNone(hooks._permitted(list(hooks.settlement.entries.values())[0]))
+        hooks.dispose()
+
+    def test_a_handle_addressed_stop_is_precise_and_no_identity_stops_nothing(self):
+        pending = [self.restored("a", "c", "synthetic-old"), self.restored("b", "d", "synthetic-other")]
+
+        def stop(value, state):
+            if isinstance(value.get("sessionId"), str):
+                return {"ok": True, "generation": 2, "stopped": 0,
+                        "sessionHash": module.session_identity(value["sessionId"])}
+            entry = [row for row in pending if row["key"] == value.get("key")][0]
+            return {"ok": True, "generation": 2, "stopped": 1, "sessionHash": entry["sessionHash"]}
+
+        clock, state, hooks = self.build(stop=stop, pending=pending)
+        hooks.pre_llm_call(session_id="current", turn_id="1", user_message="请导出金额并排序")
+        keys = self.sessions(hooks)
+        blocked_key = keys[module.session_identity("synthetic-old")]
+        other_key = keys[module.session_identity("synthetic-other")]
+        handle = {"key": blocked_key, "payloadHash": pending[0]["payloadHash"]}
+        record = hooks.request_stop(None, "session_reset", handle=handle)
+        self.assertTrue(record["confirmed"])
+        self.assertEqual(list(hooks.settlement.entries), [other_key],
+                         "the named entry is retired at once, the other keeps its place")
+        # No identity at all names nothing: it must never be read as "every restored entry".
+        self.assertEqual(hooks.settlement.stop_session(), [])
+        self.assertEqual(hooks.settlement.hold_session(), [])
+        self.assertEqual(list(hooks.settlement.entries), [other_key])
+        hooks.dispose()
+
+    def test_a_bounded_background_retry_confirms_without_a_new_turn(self):
+        clock, state, hooks = self.build(
+            stop=lambda value, state: {"ok": False, "code": "lock_busy"} if state["stop_calls"] == 1
+            else {"ok": True, "generation": 2, "stopped": 0,
+                  "sessionHash": module.session_identity(value.get("sessionId"))})
+        record = hooks.request_stop("old", "session_reset")
+        self.assertFalse(record["confirmed"])
+        self.assertEqual(state["stop_calls"], 1)
+        self.assertTrue(clock.jobs, "a bounded retry is scheduled without needing another turn")
+        clock.advance(0.25)
+        self.assertEqual(state["stop_calls"], 2)
+        self.assertEqual(hooks.pending_stops, {}, "the retry's own confirmation clears the stop")
+        self.assertEqual(hooks.local_control_pending, set())
+        self.assertEqual([row["state"] for row in hooks.stop_history], ["confirmed"])
+        hooks.dispose()
+
+
+class IdentityMappingTests(unittest.TestCase):
+    """The shared cross-language identity rule, checked against hashes the REAL core produced.
+
+    `sessionHash` is the core's own public value: `src/index.mjs` hashes the UTF-8 bytes of the
+    validated session id. The adapter must not guess it, so this test compares the adapter's rule
+    with the value the real core actually wrote for the same id.
+    """
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(prefix="mse-hermes-identity-")
+        self.addCleanup(self.directory.cleanup)
+        self.environment = patch.dict(os.environ, {"MSE_LEARN_CLI": str(ROOT / "src/cli.mjs"),
+                                    "MSE_NODE_EXECUTABLE": shutil.which("node"), "MSE_REFLECTION_ENABLED": "0"})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+        self.config = {"stateRoot": self.directory.name, "adapterId": "hermes", "maxContextBytes": 768}
+        learner = module.Hooks(config=self.config)
+        learner.pre_llm_call(session_id="seed", turn_id="1",
+                             user_message="以后导出金额前先转换为数值，再按金额排序")
+        learner.on_session_end(session_id="seed", turn_id="1", completed=True, failed=False, interrupted=False)
+
+    def real_session_hash(self, session):
+        """Run one real turn through the real CLI and read the core's own sessionHash back."""
+        hooks = module.Hooks(config=self.config)
+        prompt = "导出金额并排序"
+        prepared = hooks.pre_llm_call(session_id=session, turn_id="1", user_message=prompt)
+        self.assertIsNotNone(prepared, "the fixture turn must recall the seeded rule")
+        hooks.pre_api_request(session_id=session, turn_id="1", api_request_id="req-1",
+                              request_messages=[{"role": "user", "content": prompt + "\n\n" + prepared["context"]}])
+        hooks.post_api_request(session_id=session, turn_id="1", api_request_id="req-1")
+        row = hooks.turns[(session, "1")]
+        lesson_id = row["lessons"][0]
+        version = next(item["version"] for item in row["lesson_versions"] if item["id"] == lesson_id)
+        self.assertTrue(hooks.verification(session, "1", "numeric-check", True, [lesson_id], version))
+        hooks.post_llm_call(session_id=session, turn_id="1", completed=True, failed=False, interrupted=False,
+                            assistant_response="金额排序完成，数值类型检查通过")
+        status = hooks.durable_status()["core"]
+        hooks.dispose()
+        rows = list(status.get("pending") or []) + list(status.get("history") or [])
+        hashes = [item.get("sessionHash") for item in rows]
+        self.assertTrue(hashes, f"the core recorded no sessionHash for {session!r}: {status}")
+        return set(hashes)
+
+    def test_the_adapter_rule_reproduces_real_core_hashes(self):
+        # A plain id, a CJK id with an astral character, and a decomposed accent. The core does not
+        # normalise, so the composed and decomposed forms must stay different identities.
+        composed = "caf\u00e9-session"
+        decomposed = "cafe\u0301-session"
+        for session in ("plain-session-1", "会话-📊-１", decomposed):
+            hashes = self.real_session_hash(session)
+            self.assertIn(module.session_identity(session), hashes,
+                          f"adapter rule disagrees with the real core for {session!r}")
+        self.assertNotEqual(module.session_identity(composed), module.session_identity(decomposed),
+                            "the rule must not normalise what the core does not normalise")
+
+    def test_a_non_identity_never_produces_a_hash(self):
+        # The core's `identity()` refuses these before any hash exists, so the adapter must refuse
+        # them too instead of inventing a mapping that could stop the wrong session.
+        self.assertIsNone(module.session_identity(""))
+        self.assertIsNone(module.session_identity(None))
+        self.assertIsNone(module.session_identity(7))
+        self.assertIsNone(module.session_identity("a" * 513))
+        self.assertIsNone(module.session_identity("line\nbreak"))
+        self.assertIsNone(module.session_identity("\u0000nul"))
+        self.assertIsNotNone(module.session_identity("a" * 512))

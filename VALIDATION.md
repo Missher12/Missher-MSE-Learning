@@ -1,5 +1,3 @@
-> 历史记录：本文保留 2026-09-26、0.8.0-alpha.1 的验证结果。当前源码为 0.9.0-alpha.13，版本与升级入口见 [README](README.md)，后续候选记录见 [PROJECT_CONTEXT](PROJECT_CONTEXT.md)。旧版结果不代表本版已重复完成真实模型或跨平台验收。
-
 # MSE Learning 0.8.0-alpha.1 验证记录
 
 日期：2026-09-26。候选源码位于本工作树的 `learning-product/`；原 MSE 源码、已安装插件、实际学习库与模型设置均未替换。

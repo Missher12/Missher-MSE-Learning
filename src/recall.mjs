@@ -18,6 +18,8 @@
  *    filler nouns whose match alone must never trigger a recall.
  */
 
+import { getMethod } from './checks.mjs'
+
 const segmenter = new Intl.Segmenter('zh', { granularity: 'word' })
 
 /** Functional words that carry no topic. */
@@ -142,6 +144,84 @@ export function normalizeText(text) {
     .trim()
 }
 
+/**
+ * Words that flip the meaning of the term they precede. A condition that says
+ * "不适用于 JSON" excludes JSON; a task that says "不用 CSV" is not a CSV task. Both are the
+ * same local decision, so both sides go through this one list — otherwise a negation in the
+ * sentence would silently produce the opposite rule.
+ */
+const NEGATION_BEFORE = /(?:不适用|不适于|不用于|不用到|不使用|不采用|不涉及|不用|不要用|不要|不能|不应|不算|没有|无|非|排除|除了|除外|不含|not\s|no\s|never\s|without\s|except\s|exclude[sd]?\s|excluding\s|non-)/giu
+/** How far back a negation may sit and still govern the term. */
+const NEGATION_WINDOW_CJK = 6
+const NEGATION_WINDOW_ASCII = 24
+
+/**
+ * Every format named in one text, with the polarity of each mention.
+ *
+ * Format identity is exact — `csv` and `json` are different technologies, never synonyms — so
+ * this is the one part of a free-text condition that can be decided without approximating
+ * meaning. A mention is `negated` when a negation marker governs it.
+ * @param text - raw text.
+ * @returns `[{ id, negated }]`, first mention per format, in text order.
+ */
+export function formatMentions(text) {
+  const normalized = typeof text === 'string' ? normalizeText(text) : ''
+  if (normalized === '') return []
+  const found = new Map()
+  for (const group of ALIAS_GROUPS) {
+    if (group.format !== true) continue
+    // Per group, every alias is scanned and every occurrence is judged on its own. Facts are
+    // kept SEPARATELY — a group can be positively named in one clause and negated in another,
+    // and collapsing that into a single flag is what let a negated mention erase a positive one
+    // (and so slip past an exclusion). Every valid occurrence of every alias is collected
+    // before the group is recorded, so one alias whose hits are all boundary-invalid can no
+    // longer stand in for the group.
+    let hasPositive = false
+    let hasNegative = false
+    for (const form of group.forms) {
+      const ascii = !/[\u3400-\u9fff]/u.test(form)
+      for (const index of occurrencesOf(normalized, form, ascii)) {
+        if (isNegatedAt(normalized, index, form)) hasNegative = true
+        else hasPositive = true
+      }
+    }
+    if (hasPositive || hasNegative) {
+      found.set(group.id, { id: group.id, hasPositive, hasNegative,
+        // Conflicting instructions about one format are not resolved in either direction; the
+        // caller refuses instead. A purely negative mention is simply not an assertion.
+        negated: !hasPositive && hasNegative, ambiguous: hasPositive && hasNegative })
+    }
+  }
+  return [...found.values()]
+}
+
+/**
+ * Every occurrence of one alias with a valid word boundary on both sides.
+ *
+ * The boundary test decides whether a hit EXISTS at all: `json` inside `jsonl` and `csv` inside
+ * `abccsvdef` are not the format being named, so they must not create one.
+ */
+function occurrencesOf(normalized, form, ascii) {
+  const indexes = []
+  let index = normalized.indexOf(form)
+  while (index !== -1) {
+    const before = normalized[index - 1] ?? ' '
+    const after = normalized[index + form.length] ?? ' '
+    if (!ascii || (!/[a-z0-9]/u.test(before) && !/[a-z0-9]/u.test(after))) indexes.push(index)
+    index = normalized.indexOf(form, index + 1)
+  }
+  return indexes
+}
+
+/** Whether a negation marker governs the mention at `index`, within its own clause. */
+function isNegatedAt(normalized, index, form) {
+  const window = /[\u3400-\u9fff]/u.test(form) ? NEGATION_WINDOW_CJK : NEGATION_WINDOW_ASCII
+  const clauseStart = Math.max(0, ...[...']，。；、！？,.;!?\n'].map(delimiter => normalized.lastIndexOf(delimiter, index - 1) + 1))
+  const head = normalized.slice(Math.max(clauseStart, index - window), index)
+  NEGATION_BEFORE.lastIndex = 0
+  return NEGATION_BEFORE.test(head)
+}
+
 function cjkRuns(text) {
   return text.match(/[\u3400-\u9fff]{2,}/gu) ?? []
 }
@@ -189,10 +269,18 @@ export function analyze(text) {
     }
     if (bigrams.length >= MAX_BIGRAMS) break
   }
+  const mentions = formatMentions(text)
   const view = {
     semantic: [...aliases, ...semantic],
     weak: new Set(weak),
-    formats: aliases.filter(id => groupById.get(id)?.format === true),
+    // Only a format the text actually ASSERTS counts as the task's format: "不用 CSV" must not
+    // make this a CSV task. A format named both ways is neither asserted nor dismissed, so it
+    // lands in `ambiguousFormats` and the condition gate refuses rather than choosing a side.
+    formats: aliases.filter(id => groupById.get(id)?.format === true)
+      .filter(id => mentions.find(item => item.id === id)?.hasPositive === true
+        && mentions.find(item => item.id === id)?.hasNegative !== true),
+    ambiguousFormats: mentions.filter(item => item.ambiguous === true).map(item => item.id),
+    formatMentions: mentions,
     bigrams,
     keys: [...aliases.map(id => `@${id}`), ...semantic, ...bigrams.map(bigram => `\u00a7${bigram}`)].slice(0, TOKEN_LIMIT),
   }
@@ -270,6 +358,222 @@ export function admits(evidence) {
   if (evidence.lessonCoverage < GATES.minLessonCoverage) return { ok: false, gate: 'lesson_coverage' }
   return { ok: true, gate: null }
 }
+
+/**
+ * The condition forms this module will act on.
+ *
+ * Every other condition — free prose, a number, an arbitrary identifier — is `unsupported`,
+ * and an unsupported condition makes the lesson **not recallable**. Refusing is the honest
+ * answer: this module cannot read the condition, and offering the lesson anyway would mean
+ * injecting a rule whose stated scope nobody checked. It is not a claim that the condition is
+ * wrong; it is a statement that the plugin will not guess.
+ *
+ *   - `empty`       — no condition stated.
+ *   - `universal`   — the condition says it always applies.
+ *   - `format`      — one of the curated format groups (csv, json, …).
+ *   - `registered`  — the canonical condition pair of a registered checker method, compared
+ *                     against the registry entry so an arbitrary identifier is NOT accepted.
+ *   - `unsupported` — everything else.
+ */
+export const CONDITION_KINDS = Object.freeze(['empty', 'universal', 'format', 'registered', 'unsupported'])
+
+/**
+ * Universal wording, matched against the WHOLE condition.
+ *
+ * A substring test was wrong in both directions: "仅适用于所有 CSV 报表导出" is a CSV
+ * condition, not an unconditional one, and in an exclusion field "任何…不排除" says nothing is
+ * excluded while "不适用于所有报表导出" excludes everything. Polarity belongs to the field, so
+ * each field has its own complete-match form and anything else is not universal.
+ */
+const UNIVERSAL_APPLY = /^(?:任何|所有|全部)(?:任务|情况|场景|任务场景)?(?:都|均|一律)?(?:完全)?适用[。.!！]?$/u
+const UNIVERSAL_EXCLUDE_NONE = /^(?:任何|所有|全部)(?:情况|场景|任务)?(?:都|均|一律)?(?:完全)?不排除[。.!！]?$/u
+
+/**
+ * The condition grammar.
+ *
+ * A condition is understood only when one of these templates matches it **in full**. That is the
+ * whole point: a keyword list that is merely deleted before inspection cannot tell
+ * "仅适用于 CSV 报表" from "仅当 CSV 报表包含字段时" — the second one names a predicate
+ * (`包含字段`) that no deletion should be able to hide. Only the format wrapper, an explicit
+ * quantifier, a short tail of report/export words and a trailing full stop are allowed.
+ *
+ * The vocabulary is deliberately closed. Extending it is a deliberate act with a test, never a
+ * side effect of reusing the topic tokenizer's word tables.
+ */
+const FORMAT_FORM_ALTERNATION = (() => {
+  const forms = ALIAS_GROUPS.filter(group => group.format === true)
+    .flatMap(group => group.forms.map(form => ({ form, id: group.id })))
+  // Longest first so `jsonl` is not read as `json` followed by a stray `l`.
+  return forms.sort((left, right) => right.form.length - left.form.length)
+})()
+const FORMAT_ATOM = `(?:${FORMAT_FORM_ALTERNATION.map(entry => entry.form).join('|')})`
+const FORMAT_LIST = `${FORMAT_ATOM}(?:\\s*(?:、|,|，|/|和|与|或|及|以及)\\s*${FORMAT_ATOM})*`
+const FORMAT_TAIL = '(?:\\s*格式)?(?:\\s*的)?(?:\\s*(?:报表|数据|文件|内容|文本))?(?:\\s*(?:导出|导入|转换|处理))?(?:\\s*(?:任务|场景|情况))?'
+const OPTIONAL_QUANTIFIER = '(?:\\s*(?:所有|任何|全部))?'
+const STOP = '[。.!！]?'
+// The short `仅`/`只` prefix is part of the same wrapper family as `仅适用于`: "仅 CSV 导出" is
+// an explicit format template, not an unknown predicate. It stays a FULL-match alternative, so
+// "仅当 CSV 报表包含字段时。" still fails the template and is refused.
+const ALLOW_MARK = '(?:仅适用于|只适用于|适用于|仅用于|只用于|用于|仅|只)'
+const EXCLUDE_MARK = '(?:并不适用于|不适用于|不用于|不能用于|不可用于|排除掉|排除)'
+
+/** Field-specific complete templates. Each one consumes the entire condition. */
+const CONDITION_TEMPLATES = Object.freeze([
+  // "仅适用于 CSV 格式的报表导出" / "适用于 CSV、TSV 的导出"
+  { re: new RegExp(`^${ALLOW_MARK}${OPTIONAL_QUANTIFIER}\\s*(${FORMAT_LIST})${FORMAT_TAIL}${STOP}$`, 'iu'),
+    verdict: 'allow' },
+  // "CSV 导出场景" / "CSV 格式的任务"
+  { re: new RegExp(`^(${FORMAT_LIST})${FORMAT_TAIL}${STOP}$`, 'iu'), verdict: 'allow' },
+  // "不适用于 JSON 格式的报表导出" written in the applicability field is the exclusion it is.
+  { re: new RegExp(`^${EXCLUDE_MARK}${OPTIONAL_QUANTIFIER}\\s*(${FORMAT_LIST})${FORMAT_TAIL}${STOP}$`, 'iu'),
+    verdict: 'exclude' },
+])
+
+/** Templates that only make sense in the exclusions field. */
+const EXCLUSION_TEMPLATES = Object.freeze([
+  { re: new RegExp(`^${EXCLUDE_MARK}${OPTIONAL_QUANTIFIER}\\s*(${FORMAT_LIST})${FORMAT_TAIL}${STOP}$`, 'iu'),
+    verdict: 'exclude' },
+  // "CSV 除外"
+  { re: new RegExp(`^(${FORMAT_LIST})\\s*(?:除外)${STOP}$`, 'iu'), verdict: 'exclude' },
+  // A bare format template in THIS field. The same words mean "limited to" in the applicability
+  // field and "not for" here, because the field is what states the polarity — that is a reading
+  // of the field's own semantics, not a guess about arbitrary prose.
+  { re: new RegExp(`^(${FORMAT_LIST})${FORMAT_TAIL}${STOP}$`, 'iu'), verdict: 'exclude' },
+])
+
+/** Exact form -> group id, for mapping an already-matched atom back to its format. */
+const formatIdByForm = new Map(FORMAT_FORM_ALTERNATION.map(entry => [entry.form, entry.id]))
+const FORMAT_SEPARATOR = /\s*(?:、|,|，|\/|和|与|或|及|以及)\s*/u
+
+/**
+ * Map one matched format list back to the format ids it names.
+ *
+ * The list has already been matched by the grammar, so each atom is looked up EXACTLY. A
+ * substring scan would read `jsonl` as `json` and `xlsx` as `xls`, which would let a JSONL-only
+ * rule answer a plain JSON task — a different technology, and exactly the confusion the format
+ * groups exist to prevent.
+ */
+function formatIdsOf(phrase) {
+  const ids = []
+  for (const atom of String(phrase).split(FORMAT_SEPARATOR)) {
+    const id = formatIdByForm.get(atom.trim().toLowerCase())
+    if (id !== undefined && !ids.includes(id)) ids.push(id)
+  }
+  return ids
+}
+
+/**
+ * Clause-scoped view of one applicability or exclusion sentence.
+ *
+ * @param text - raw condition text.
+ * @param field - `'applicability'` or `'exclusions'`; the field decides which templates apply
+ *   and what a universal phrasing means.
+ * @returns `{ kind, allow, exclude }`; `allow`/`exclude` are format ids.
+ */
+export function parseCondition(text, field = 'applicability') {
+  const raw = typeof text === 'string' ? text.trim() : ''
+  const empty = { text: '', kind: 'empty', allow: [], exclude: [] }
+  if (raw === '') return empty
+  if (field === 'exclusions') {
+    if (UNIVERSAL_EXCLUDE_NONE.test(raw)) return { text: raw, kind: 'universal', allow: [], exclude: [] }
+    for (const template of EXCLUSION_TEMPLATES) {
+      const match = template.re.exec(raw)
+      if (match === null) continue
+      const ids = formatIdsOf(match[1] ?? '')
+      if (ids.length > 0) return { text: raw, kind: 'format', allow: [], exclude: ids }
+    }
+    // "不适用于所有报表导出" names no format, so it is not a format exclusion this module can
+    // act on — it is a sentence it does not understand, and it is refused as one.
+    return { text: raw, kind: 'unsupported', allow: [], exclude: [] }
+  }
+  if (UNIVERSAL_APPLY.test(raw)) return { text: raw, kind: 'universal', allow: [], exclude: [] }
+  for (const template of CONDITION_TEMPLATES) {
+    const match = template.re.exec(raw)
+    if (match === null) continue
+    const ids = formatIdsOf(match[1] ?? '')
+    if (ids.length === 0) continue
+    return template.verdict === 'exclude'
+      ? { text: raw, kind: 'format', allow: [], exclude: ids }
+      : { text: raw, kind: 'format', allow: ids, exclude: [] }
+  }
+  return { text: raw, kind: 'unsupported', allow: [], exclude: [] }
+}
+
+/**
+ * The registered condition pair for a lesson, or `null` when it is not an exact match.
+ *
+ * Compatibility is deliberately limited to rows that carry a registered `methodId` **and**
+ * whose applicability and exclusions are exactly the registry's. Any other identifier is
+ * ordinary text: accepting arbitrary snake_case would let a caller mint a "registered" look
+ * for conditions nothing has ever validated.
+ * @param lesson - stored row.
+ * @returns `{ applicability, exclusions }` for an exact match, else `null`.
+ */
+export function registeredConditions(lesson) {
+  if (typeof lesson?.methodId !== 'string' || lesson.methodId === '') return null
+  // An unknown id is simply not a registration; it must not throw here, because the caller is
+  // deciding whether a stored row recalls and an unknown method is a reason to refuse, not to fail.
+  let method
+  try { method = getMethod(lesson.methodId) } catch { return null }
+  const applicability = lesson.applicability ?? ''
+  const exclusions = lesson.exclusions ?? ''
+  return applicability === (method.applicability ?? '') && exclusions === (method.exclusions ?? '')
+    ? { applicability, exclusions } : null
+}
+
+/**
+ * Decide whether a lesson's own conditions admit one query.
+ *
+ * Exclusions are evaluated first: a stated reason not to apply beats any reason to apply.
+ * Only conditions written in a supported form are acted on; a condition this module cannot
+ * read refuses the lesson rather than being handed to the model as a guess.
+ *
+ * @param lesson - stored row with `applicability` and `exclusions`.
+ * @param query - `analyze(prompt)` view.
+ * @returns `{ ok, gate, detail, verified, kind }` with `gate` from {@link CONDITION_GATES}.
+ */
+export function conditionVerdict(lesson, query) {
+  const registered = registeredConditions(lesson)
+  if (registered !== null) {
+    // The checker owns these preconditions and validates them when it runs; they are not
+    // prose for this module to interpret, so they neither gate nor count as unverified.
+    return { ok: true, gate: null, detail: [], verified: true, kind: 'registered' }
+  }
+  const applicability = parseCondition(lesson?.applicability ?? '', 'applicability')
+  const exclusions = parseCondition(lesson?.exclusions ?? '', 'exclusions')
+  if (applicability.kind === 'unsupported' || exclusions.kind === 'unsupported') {
+    return { ok: false, gate: CONDITION_GATES.unclear, detail: [], verified: false, kind: 'unsupported' }
+  }
+  const positive = new Set((query.formatMentions ?? []).filter(item => item.hasPositive === true).map(item => item.id))
+  // A format the task names BOTH ways is not decided here. The lesson's condition refers to that
+  // format, so the honest answer is that the task's format is unknown — refusing, rather than
+  // letting the positive mention satisfy the lesson or the negative one dismiss it.
+  const referenced = [...applicability.allow, ...applicability.exclude, ...exclusions.exclude]
+  const ambiguous = (query.ambiguousFormats ?? []).filter(id => referenced.includes(id))
+  if (ambiguous.length > 0) {
+    return { ok: false, gate: CONDITION_GATES.unclear, detail: ambiguous, verified: false, kind: 'ambiguous' }
+  }
+  // 1. A format the lesson excludes. Exclusions are decided first: a stated reason not to apply
+  //    beats any reason to apply, and the applicability field can state one too.
+  const excludedFormats = [...exclusions.exclude, ...applicability.exclude].filter(id => positive.has(id))
+  if (excludedFormats.length > 0) {
+    return { ok: false, gate: CONDITION_GATES.excluded, detail: excludedFormats, verified: true, kind: 'format' }
+  }
+  // 2. A format the lesson is limited to: a positive mention admits, none refuses.
+  const required = applicability.allow
+  if (required.length > 0 && !required.some(id => positive.has(id))) {
+    return { ok: false, gate: CONDITION_GATES.notApplicable, detail: required, verified: true, kind: 'format' }
+  }
+  return { ok: true, gate: null, detail: [], verified: true,
+    kind: applicability.kind === 'format' || exclusions.kind === 'format' ? 'format' : 'empty' }
+}
+
+/** Gate names reported by {@link conditionVerdict}. */
+export const CONDITION_GATES = Object.freeze({
+  excluded: 'condition_excluded',
+  notApplicable: 'condition_not_applicable',
+  unclear: 'condition_unclear',
+})
 
 /** Human-readable topic keys for diagnostics; never contains the raw prompt. */
 export function topicLabels(view, limit = 6) {

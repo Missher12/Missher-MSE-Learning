@@ -62,6 +62,7 @@ export function deadlineFromReceipt({ receiptExpiresAt, wallNow, now, maxAgeMs, 
 export class SettlementQueue {
   constructor({ complete, now = Date.now, schedule = (fn, ms) => setTimeout(fn, ms),
     cancel = handle => clearTimeout(handle), isTransient: classifier = error => isTransient(error?.code),
+    deadlineForEntry,
     maxItems = 64, maxAttempts = 4, baseDelayMs = BACKOFF_MS, maxAgeMs = 5 * 60_000, onEvent = () => {},
     maxHistory = 32, deadlineForReceipt }) {
     this.complete = complete
@@ -78,6 +79,8 @@ export class SettlementQueue {
     // The receipt bound only exists if the caller supplies the cross-clock conversion.
     // Dropping it here silently ignored every receipt deadline the bridge passed in.
     this.deadlineForReceipt = typeof deadlineForReceipt === 'function' ? deadlineForReceipt : undefined
+    // The same boundary, in the other direction: a durable deadline returns to this clock.
+    this.deadlineForEntry = typeof deadlineForEntry === 'function' ? deadlineForEntry : undefined
     this.entries = new Map()
     this.retired = []
     this.timers = new Map()
@@ -122,7 +125,7 @@ export class SettlementQueue {
    * Track one frozen settlement. Repeating the same payload is a no-op; a different
    * payload for the same turn is reported as a conflict instead of replacing the frozen one.
    */
-  enqueue({ key, payload, sessionId, deadline, receiptExpiresAt }) {
+  enqueue({ key, payload, sessionId, deadline, receiptExpiresAt, maxAttempts, durable }) {
     if (this.disposed) return { state: 'disposed' }
     const existing = this.entries.get(key)
     if (existing) {
@@ -138,12 +141,25 @@ export class SettlementQueue {
     // as-is. Both are then clamped by the total age bound. A conversion that cannot be
     // completed leaves the age bound in place instead of failing the settlement.
     let converted = deadline
-    if (this.deadlineForReceipt !== undefined) {
+    if (receiptExpiresAt !== undefined && this.deadlineForReceipt !== undefined) {
       try { converted = this.deadlineForReceipt({ receiptExpiresAt, now: this.now() }) }
+      catch { converted = undefined }
+    } else if (deadline !== undefined && this.deadlineForEntry !== undefined) {
+      // A deadline that came back from the durable document is in the store's clock; it is
+      // converted here so a restart continues the ORIGINAL window instead of a fresh one.
+      try { converted = this.deadlineForEntry({ deadline, now: this.now() }) }
       catch { converted = undefined }
     }
     const entry = { key, sessionId, turnId: payload.turnId, payload, attempts: 0, state: 'pending',
-      lastError: null, queuedAt: this.now(), deadline: this.deadlineFor({ deadline: converted }), delivery: 'pending' }
+      lastError: null, queuedAt: this.now(), deadline: this.deadlineFor({ deadline: converted }), delivery: 'pending',
+      // A durable entry's expiry belongs to the CORE, which records it in the same document that
+      // holds the pending item. Marking it here is what lets `attempt` and `resume` hand the
+      // decision to the store instead of retiring it locally, where nothing would be written.
+      ...(durable === true ? { durable: true } : {}),
+      // An entry may bound itself by its deadline alone. A settlement waiting behind a temporary
+      // gate (paused, host state unknown) is not failing — it must be allowed to wait for the
+      // explicit resume, and the absolute deadline is what ends it.
+      ...(Number.isSafeInteger(maxAttempts) && maxAttempts > 0 ? { maxAttempts } : {}) }
     this.entries.set(key, entry)
     return { state: 'queued', entry }
   }
@@ -156,13 +172,16 @@ export class SettlementQueue {
     if (!entry) return { state: 'missing' }
     if (this.disposed || this.paused) return { state: entry.state }
     const now = this.now()
-    if (now > entry.deadline) {
+    if (now > entry.deadline && entry.durable !== true) {
       entry.lastError = entry.lastError ?? 'deadline_exceeded'
       const record = this.retire(entry, 'expired')
       this.onEvent({ kind: 'expired', key, sessionId: entry.sessionId, turnId: entry.turnId, attempts: entry.attempts,
         code: 'deadline_exceeded' })
       return { state: 'expired', entry, record }
     }
+    // A lifecycle-driven re-read may give an `unconfirmed` entry one more attempt; an automatic
+    // retry never reaches here, because the deadline attempt schedules no successor.
+    if (entry.state === 'unconfirmed') entry.state = 'pending'
     entry.attempts += 1
     try {
       const result = this.complete(entry.payload)
@@ -174,18 +193,40 @@ export class SettlementQueue {
       const code = error?.code ?? 'learning_unavailable'
       entry.lastError = code
       if (!this.isTransient(error)) {
-        const record = this.retire(entry, 'failed')
+        // A durable item the core itself retired as expired is recorded as expired, not as a
+        // local failure: the terminal row already exists in the document with that state.
+        const terminal = code === 'settlement_expired' ? 'expired' : 'failed'
+        const record = this.retire(entry, terminal)
         this.onEvent({ kind: 'failed', key, sessionId: entry.sessionId, turnId: entry.turnId,
           attempts: entry.attempts, code, record })
-        return { state: 'failed', entry, code, record }
+        return { state: terminal, entry, code, record }
       }
-      if (entry.attempts >= this.maxAttempts || now + this.delays[Math.min(entry.attempts - 1, this.delays.length - 1)] > entry.deadline) {
+      const delay = this.delays[Math.min(entry.attempts - 1, this.delays.length - 1)]
+      if (entry.durable === true) {
+        // A durable item's terminal state belongs to the CORE, which records it in the same
+        // document as the pending row — so it is never retired locally. It is not retried for
+        // ever either: the last automatic attempt is placed exactly ON the original deadline, so
+        // the store gets its one chance to record `expired` from its own clock. If that attempt
+        // still cannot be confirmed, automatic scheduling stops here with an explicit, honest
+        // `unconfirmed` state: the core keeps the record and the original deadline, and the next
+        // legitimate lifecycle (or a restart) re-reads it. The deadline is never refreshed.
+        if (now >= entry.deadline) {
+          entry.state = 'unconfirmed'
+          this.onEvent({ kind: 'unconfirmed', key, sessionId: entry.sessionId, turnId: entry.turnId,
+            attempts: entry.attempts, code, deadline: entry.deadline })
+          return { state: 'unconfirmed', entry, code }
+        }
+        this.scheduleNext(entry, now + delay > entry.deadline ? entry.deadline - now : delay)
+        return { state: 'retrying', entry, code }
+      }
+      const attemptBound = entry.maxAttempts ?? this.maxAttempts
+      if (entry.attempts >= attemptBound || now + delay > entry.deadline) {
         const record = this.retire(entry, 'exhausted')
         this.onEvent({ kind: 'exhausted', key, sessionId: entry.sessionId, turnId: entry.turnId,
           attempts: entry.attempts, code, record })
         return { state: 'exhausted', entry, code, record }
       }
-      this.scheduleNext(entry, this.delays[Math.min(entry.attempts - 1, this.delays.length - 1)])
+      this.scheduleNext(entry, delay)
       return { state: 'retrying', entry, code }
     }
   }
@@ -206,14 +247,20 @@ export class SettlementQueue {
     for (const [key, handle] of this.timers) { this.cancel(handle); this.timers.delete(key) }
     return this.status()
   }
-  /** Resume only unexpired local retries; nothing else is restarted. */
+  /**
+   * Resume after an explicit pause. A pending entry is re-driven; a durable `unconfirmed` entry
+   * gets one more read of the core (which is what retires it if its deadline has passed), and
+   * scheduling stays bounded because a failing deadline attempt schedules no successor.
+   */
   resume() {
     if (this.disposed || !this.paused) return this.status()
     this.paused = false
     const now = this.now()
     for (const entry of [...this.entries.values()]) {
-      if (entry.state !== 'pending') continue
-      if (now > entry.deadline) {
+      if (entry.state !== 'pending' && entry.state !== 'unconfirmed') continue
+      // Same rule as `attempt`: a durable entry is retried so the core can retire it, never
+      // expired locally into a state the document never heard about.
+      if (now > entry.deadline && entry.durable !== true) {
         const record = this.retire(entry, 'expired')
         this.onEvent({ kind: 'expired', key: entry.key, sessionId: entry.sessionId, turnId: entry.turnId, attempts: entry.attempts,
           code: 'deadline_exceeded', record })

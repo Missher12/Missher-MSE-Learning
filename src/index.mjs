@@ -2,7 +2,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { LessonStore, LearningError, check } from './store.mjs'
 import { getMethod, listMethods, checkArtifact as inspectArtifact, applyMethod, registeredTrials } from './checks.mjs'
 import { assessEvaluation } from './evaluation.mjs'
-import { analyze, relevance, admits, topicLabels } from './recall.mjs'
+import { analyze, relevance, admits, topicLabels, conditionVerdict, CONDITION_GATES } from './recall.mjs'
+import { taskIndependence } from './cases.mjs'
 
 export { LearningError }
 export const DEFAULT_CONTEXT_BYTES = 768
@@ -27,11 +28,44 @@ export const RECALL_REASONS = Object.freeze({
   conflictUnresolved: 'conflict_unresolved',
   turnClosed: 'turn_closed',
   filteredOrigin: 'filtered_origin',
+  conditionBlocked: 'condition_blocked',
 })
 const empty = (reason, diagnostics, extra = {}) => ({ ok: true, reason, context: '', receipt: null, lessons: [],
   lessonVersions: [], bytes: 0, diagnostics, ...extra })
 
+/** Local structural check; the settlement fields are read from JSON and never trusted by shape. */
+const isPlainObject = value => value !== null && typeof value === 'object'
+  && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
+
 const DAY = 86_400_000
+/**
+ * Bounded durable outbox and its control record.
+ *
+ * The numbers are deliberate and small: a settlement item is a few hundred bytes of frozen
+ * facts, never lesson text, and a queue that cannot drain is a bug to surface rather than a
+ * buffer to grow. The whole store keeps its own 2 MiB ceiling.
+ */
+const OUTBOX_FORMAT = 1
+const OUTBOX_LIMIT = 64
+const OUTBOX_HISTORY_LIMIT = 32
+const OUTBOX_ITEM_BYTES = 4096
+const OUTBOX_TOTAL_BYTES = 256 * 1024
+const OUTBOX_MAX_AGE_MS = 5 * 60_000
+const OUTBOX_MAX_ATTEMPTS = 4
+const CONTROL_STOP_LIMIT = 64
+const TERMINAL_STATES = ['settled', 'stopped', 'expired', 'failed', 'conflict']
+const OUTBOX_FIELDS = ['format', 'key', 'payloadHash', 'owner', 'scope', 'environment', 'sessionHash', 'turnHash',
+  'receipts', 'outcome', 'evidence', 'fingerprint', 'evidenceHash', 'queuedAt', 'deadline', 'attempts',
+  'nextAttemptAt', 'lastError']
+/**
+ * The terminal row is its own shape, not "a pending row plus extras".
+ *
+ * Sharing the pending whitelist would let a history row carry `evidence`, `receipts` or any
+ * other frozen payload, and `settlementStatus` returns these rows verbatim — so the closed set
+ * is what keeps a terminal record from becoming a side channel for private data.
+ */
+const OUTBOX_TERMINAL_FIELDS = ['key', 'payloadHash', 'owner', 'scope', 'sessionHash', 'turnHash',
+  'outcome', 'queuedAt', 'deadline', 'attempts', 'state', 'at', 'attributed', 'reason']
 /** Hard cap on stored lessons; `put()` never grows the library past this. */
 const MAX_LESSONS_PER_STORE = 300
 const RECEIPT_TTL = 30 * 60_000
@@ -129,6 +163,297 @@ function pruneState(state, now) {
   state.jobs = state.jobs.filter(x => x.expiresAt > now)
   state.spends = state.spends.filter(x => x.at > now - DAY)
   return state
+}
+
+/**
+ * The evidence rules one settlement must satisfy, shared by the direct `complete` and by
+ * `settlementEnqueue`.
+ *
+ * Sharing them is the point: an enqueue that accepted a verdict `complete` would refuse — or
+ * quietly normalized it into a different fact by coercing `passed` to a boolean — would let the
+ * durable path store a settlement nobody ever authorised.
+ */
+function validateCompleteEvidence(outcome, evidence) {
+  const trusted = evidence?.source === 'host_verifier' && typeof evidence.checkId === 'string' && evidence.checkId.length > 0
+  if (evidence?.checks !== undefined) check(trusted && Array.isArray(evidence.checks) && evidence.checks.length <= 2
+    && evidence.checks.every(x => isPlainObject(x) && typeof x.lessonId === 'string' && typeof x.passed === 'boolean'
+      && (x.version === undefined || (Number.isSafeInteger(x.version) && x.version > 0))
+      && (x.checkId === undefined || typeof x.checkId === 'string'))
+    && new Set(evidence.checks.map(x => x.lessonId)).size === evidence.checks.length, 'invalid_evidence')
+  if (evidence?.lessonIds !== undefined) check(trusted && Array.isArray(evidence.lessonIds)
+    && evidence.lessonIds.length <= 2 && evidence.lessonIds.every(x => typeof x === 'string'), 'invalid_evidence')
+  if (outcome === 'verified') check(trusted, 'verification_required')
+}
+
+/**
+ * Everything one `complete` decides, validated once and shared by the direct call and the
+ * durable outbox.
+ *
+ * The two paths must agree by construction: the same event id, the same fingerprint, the same
+ * evidence rules. Extracting them is what lets `settlementApply` settle inside a single
+ * transaction without calling the public method and taking the file lock a second time.
+ *
+ * @param engine - owning engine (its adapter/instance decide the scope).
+ * @param input - the public `complete` input.
+ * @returns the canonical, hash-bearing input the state function consumes.
+ */
+function canonicalCompleteInput(engine, input) {
+  const turn = turnKey(input), scope = scopeFor(input.projectKey, engine.adapter, engine.instance)
+  check(['verified', 'failed', 'unknown', 'cancelled'].includes(input.outcome))
+  if (input.outcome === 'verified') check(input.evidence?.source === 'host_verifier'
+    && typeof input.evidence.checkId === 'string' && input.evidence.checkId.length > 0, 'verification_required')
+  validateCompleteEvidence(input.outcome, input.evidence)
+  const event = hash(`complete:${turn}`)
+  const fingerprint = hash(JSON.stringify([scope, input.outcome, input.evidence ?? null]))
+  return { turn, scope, outcome: input.outcome, evidence: input.evidence ?? null,
+    sessionId: input.sessionId, event, fingerprint }
+}
+
+/**
+ * Apply one settlement to a state the caller already holds the write lock for.
+ *
+ * Pure over `state`: no file access, no nested transaction, no second lock. The caller commits
+ * the completion and the outbox retirement in the same atomic write, so a crash can never leave
+ * credit granted but the item still pending, or the reverse.
+ *
+ * @returns `{ ok, attributed, outcome, duplicate? }`; a replay of an already-recorded event
+ *   returns the recorded result rather than a fresh zero.
+ */
+function completeInState(engine, state, now, canonical) {
+  const { turn, scope, outcome, evidence, event, fingerprint } = canonical
+  const previous = state.events.find(x => x.id === event)
+  if (previous) {
+    // A retry after a response failure must see what was actually recorded, not a fresh zero:
+    // the receipt is gone, but the settlement already happened.
+    check(previous.fingerprint === fingerprint, 'event_conflict')
+    return { ok: true, duplicate: true, outcome: previous.outcome ?? null, attributed: previous.attributed ?? 0 }
+  }
+  let receipts
+  if (canonical.boundReceipts !== undefined) {
+    // A durable replay consumes EXACTLY what was frozen. Re-deriving the turn's receipts would
+    // let a different receipt — one produced after the freeze — authorise a settlement that was
+    // acknowledged against another, and would credit it while deleting the newer evidence.
+    receipts = []
+    for (const reference of canonical.boundReceipts) {
+      const row = state.receipts.find(x => x.id === reference.id && x.turn === turn && x.scope === scope)
+      check(row, 'settlement_receipt_changed')
+      check(JSON.stringify(row.accepted) === JSON.stringify(reference.accepted), 'settlement_receipt_changed')
+      receipts.push(row)
+    }
+  } else {
+    receipts = state.receipts.filter(x => x.turn === turn && x.scope === scope)
+  }
+  const acceptedIds = receipts.flatMap(r => r.accepted)
+  const trusted = evidence?.source === 'host_verifier' && typeof evidence.checkId === 'string' && evidence.checkId.length > 0
+  validateCompleteEvidence(outcome, evidence)
+  const bindings = trusted ? evidence.checks ?? (evidence.lessonIds ?? (acceptedIds.length === 1 ? acceptedIds : []))
+    .map(lessonId => ({ lessonId, passed: outcome === 'verified' })) : []
+  check(bindings.every(x => acceptedIds.includes(x.lessonId)), 'evidence_not_adopted')
+  let attributed = 0
+  if (outcome !== 'cancelled') for (const row of receipts) for (const selected of row.selected) {
+    if (!row.accepted.includes(selected.id)) continue
+    const lesson = state.lessons.find(x => x.id === selected.id && x.version === selected.version && x.scope === scope
+      && x.expiresAt > now && x.status !== 'suspended')
+    if (!lesson) continue
+    attributed += 1
+    const checked = bindings.find(x => x.lessonId === lesson.id
+      && (x.version === selected.version || (x.version === undefined && lesson.kind === 'correction'))
+      && (!lesson.methodId || x.checkId === getMethod(lesson.methodId).checkId))
+    if (checked?.passed === true) {
+      lesson.verified += 1
+      const sessionHash = canonical.sessionHash ?? hash(canonical.sessionId)
+      lesson.verifiedSessions = [...new Set([...lesson.verifiedSessions, sessionHash])].slice(-8)
+    } else if (checked?.passed === false) {
+      lesson.failed += 1
+      if (lesson.kind === 'method') engine.withdraw(state, lesson, now, 'regression')
+    } else lesson.inconclusive += 1
+  }
+  state.receipts = state.receipts.filter(x => x.turn !== turn)
+  state.events.push({ id: event, fingerprint, at: now, outcome,
+    evidenceHash: evidence ? hash(JSON.stringify(evidence)) : null, attributed })
+  return { ok: true, attributed, outcome }
+}
+
+/**
+ * Bounded, optional durable-settlement state.
+ *
+ * These accessors never create a field: a read-only status call on an old schema-2 document must
+ * not write to disk just to look at it. `ensureX` is only used inside a write transaction.
+ */
+const outboxOf = state => state.settlementOutbox ?? { format: OUTBOX_FORMAT, pending: [], history: [] }
+const controlOf = state => state.settlementControl ?? { generation: 1, userPaused: false, stops: [] }
+function ensureOutbox(state) {
+  state.settlementOutbox ??= { format: OUTBOX_FORMAT, pending: [], history: [] }
+  return state.settlementOutbox
+}
+function ensureControl(state) {
+  state.settlementControl ??= { generation: 1, userPaused: false, stops: [] }
+  return state.settlementControl
+}
+
+/** One terminal fact, bounded and free of lesson text. */
+function outboxTerminal(entry, terminal, at, details = {}) {
+  check(TERMINAL_STATES.includes(terminal), 'invalid_settlement_outbox')
+  return { key: entry.key, payloadHash: entry.payloadHash, owner: entry.owner, scope: entry.scope,
+    sessionHash: entry.sessionHash, turnHash: entry.turnHash, outcome: details.outcome ?? entry.outcome,
+    queuedAt: entry.queuedAt, deadline: entry.deadline, attempts: entry.attempts,
+    state: terminal, at, attributed: details.attributed ?? 0, reason: details.reason ?? null }
+}
+
+/**
+ * The only part of a host verdict that is ever persisted.
+ *
+ * The entry has to keep enough to attribute the settlement again after a restart, and nothing
+ * more: at most two lesson bindings, the checker identity, and the source flag. The raw verdict
+ * (with whatever else the host attached to it) is represented by its hash alone, so an arbitrary
+ * attached object can never become part of the durable record.
+ */
+function boundEvidence(evidence) {
+  if (!isPlainObject(evidence)) return null
+  const checks = Array.isArray(evidence.checks)
+    ? evidence.checks.slice(0, 2).map(row => ({ lessonId: String(row.lessonId),
+      version: Number.isSafeInteger(row.version) ? row.version : null,
+      checkId: typeof row.checkId === 'string' ? row.checkId.slice(0, 128) : null,
+      passed: row.passed === true })) : null
+  const lessonIds = Array.isArray(evidence.lessonIds) ? evidence.lessonIds.slice(0, 2).map(String) : null
+  return { source: evidence.source === 'host_verifier' ? 'host_verifier' : null,
+    checkId: typeof evidence.checkId === 'string' ? evidence.checkId.slice(0, 128) : null, checks, lessonIds }
+}
+
+/** Rebuild the attribution view from the stored projection; never the original object. */
+function evidenceFromBound(entry) {
+  const bound = entry.evidence
+  if (bound === null || bound === undefined) return null
+  const out = {}
+  if (bound.source === 'host_verifier') out.source = 'host_verifier'
+  if (typeof bound.checkId === 'string') out.checkId = bound.checkId
+  if (Array.isArray(bound.checks)) out.checks = bound.checks.map(row => ({ lessonId: row.lessonId,
+    ...(row.version === null ? {} : { version: row.version }),
+    ...(row.checkId === null ? {} : { checkId: row.checkId }), passed: row.passed }))
+  if (Array.isArray(bound.lessonIds)) out.lessonIds = bound.lessonIds
+  return out
+}
+
+/** Owner identity of this engine: adapter and instance, never a path. */
+const ownerOf = engine => hash(JSON.stringify([engine.adapter, engine.instance ?? null]))
+
+/**
+ * Validate the optional settlement fields; an unknown or corrupt shape is refused, not reset.
+ *
+ * Pending and terminal rows are different shapes and are validated as such: a pending entry must
+ * carry the frozen facts a replay needs, while a terminal row is only a record of what happened.
+ * Every condition is parenthesised — an unparenthesised `||` tail previously let a crafted
+ * `evidence` satisfy the end of the chain and skip the identity checks entirely.
+ */
+function validateSettlement(state) {
+  const hex = value => typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value)
+  const checkCommon = entry => {
+    check(isPlainObject(entry), 'invalid_settlement_outbox')
+    check(hex(entry.key) && hex(entry.payloadHash) && hex(entry.owner) && hex(entry.scope)
+      && hex(entry.sessionHash) && hex(entry.turnHash), 'invalid_settlement_outbox')
+    check(['verified', 'failed', 'unknown', 'cancelled'].includes(entry.outcome), 'invalid_settlement_outbox')
+    check(Number.isFinite(entry.queuedAt) && Number.isFinite(entry.deadline), 'invalid_settlement_outbox')
+    check(Number.isSafeInteger(entry.attempts) && entry.attempts >= 0 && entry.attempts <= OUTBOX_MAX_ATTEMPTS,
+      'invalid_settlement_outbox')
+  }
+  const checkPending = entry => {
+    check(Object.keys(entry).every(key => OUTBOX_FIELDS.includes(key)), 'invalid_settlement_outbox')
+    // The ceiling is a property of the stored item, so it is enforced wherever the item is read,
+    // not only where it is written: a document that arrived oversized is refused, never loaded.
+    check(Buffer.byteLength(JSON.stringify(entry)) <= OUTBOX_ITEM_BYTES, 'settlement_item_too_large')
+    check(entry.format === OUTBOX_FORMAT && hex(entry.environment) && hex(entry.fingerprint),
+      'invalid_settlement_outbox')
+    check(Number.isFinite(entry.nextAttemptAt), 'invalid_settlement_outbox')
+    check(entry.lastError === null || (typeof entry.lastError === 'string' && entry.lastError.length <= 64),
+      'invalid_settlement_outbox')
+    check(entry.evidenceHash === null || hex(entry.evidenceHash), 'invalid_settlement_outbox')
+    check(Array.isArray(entry.receipts) && entry.receipts.length <= 8
+      && entry.receipts.every(row => isPlainObject(row)
+        && Object.keys(row).every(key => ['id', 'expiresAt', 'accepted'].includes(key))
+        && typeof row.id === 'string' && /^[\w-]{1,64}$/u.test(row.id) && Number.isFinite(row.expiresAt)
+        && Array.isArray(row.accepted) && row.accepted.length <= 2
+        && row.accepted.every(x => typeof x === 'string')), 'invalid_settlement_outbox')
+    check(entry.evidence === null
+      || (isPlainObject(entry.evidence) && Object.keys(entry.evidence).every(key =>
+        ['source', 'checkId', 'checks', 'lessonIds'].includes(key))
+        // A minimal trusted verdict is `{ source, checkId }` with no bindings at all: the
+        // adapter's own checker decides, and `complete` accepts it. Requiring an array here
+        // would make a perfectly ordinary settlement impossible to freeze.
+        && (entry.evidence.checks === null
+          || (Array.isArray(entry.evidence.checks) && entry.evidence.checks.length <= 2
+        && (entry.evidence.source === null || entry.evidence.source === 'host_verifier')
+        && (entry.evidence.checkId === null || typeof entry.evidence.checkId === 'string')
+        && (entry.evidence.lessonIds === null || (Array.isArray(entry.evidence.lessonIds)
+          && entry.evidence.lessonIds.length <= 2 && entry.evidence.lessonIds.every(x => typeof x === 'string')))
+        && entry.evidence.checks.every(row => isPlainObject(row) && typeof row.lessonId === 'string'
+          && typeof row.passed === 'boolean'
+          && (row.version === null || (Number.isSafeInteger(row.version) && row.version > 0))
+          && (row.checkId === null || typeof row.checkId === 'string'))))),
+    'invalid_settlement_outbox')
+  }
+  const checkTerminal = entry => {
+    check(Object.keys(entry).every(key => OUTBOX_TERMINAL_FIELDS.includes(key)), 'invalid_settlement_outbox')
+    check(Buffer.byteLength(JSON.stringify(entry)) <= OUTBOX_ITEM_BYTES, 'settlement_item_too_large')
+    check(TERMINAL_STATES.includes(entry.state) && Number.isFinite(entry.at)
+      && Number.isSafeInteger(entry.attributed) && entry.attributed >= 0
+      && (entry.reason === null || (typeof entry.reason === 'string' && entry.reason.length <= 64)),
+    'invalid_settlement_outbox')
+  }
+  if (state.settlementOutbox !== undefined) {
+    const outbox = state.settlementOutbox
+    check(isPlainObject(outbox) && outbox.format === OUTBOX_FORMAT
+      && Object.keys(outbox).every(key => ['format', 'pending', 'history'].includes(key))
+      && Array.isArray(outbox.pending) && outbox.pending.length <= OUTBOX_LIMIT
+      && Array.isArray(outbox.history) && outbox.history.length <= OUTBOX_HISTORY_LIMIT, 'invalid_settlement_outbox')
+    for (const entry of outbox.pending) { checkCommon(entry); checkPending(entry) }
+    for (const entry of outbox.history) { checkCommon(entry); checkTerminal(entry) }
+    check(new Set([...outbox.pending, ...outbox.history].map(row => row.key)).size
+      === outbox.pending.length + outbox.history.length, 'invalid_settlement_outbox')
+    check(Buffer.byteLength(JSON.stringify(outbox)) <= OUTBOX_TOTAL_BYTES, 'settlement_outbox_too_large')
+  }
+  if (state.settlementControl !== undefined) {
+    const control = state.settlementControl
+    check(isPlainObject(control) && Object.keys(control).every(key => ['generation', 'userPaused', 'stops'].includes(key))
+      && Number.isSafeInteger(control.generation) && control.generation > 0
+      && typeof control.userPaused === 'boolean'
+      && Array.isArray(control.stops) && control.stops.length <= CONTROL_STOP_LIMIT
+      && control.stops.every(row => isPlainObject(row)
+        && Object.keys(row).every(key => ['sessionHash', 'at', 'reason'].includes(key))
+        && hex(row.sessionHash) && Number.isFinite(row.at)
+        && typeof row.reason === 'string' && row.reason.length <= 64), 'invalid_settlement_control')
+  }
+}
+
+/**
+ * A working copy of everything one settlement may change.
+ *
+ * `completeInState` awards credit, withdraws a regressed method and consumes receipts. Running it
+ * on a copy means a throw leaves the committed state untouched, so the attempt count and the
+ * error can be recorded without ever carrying a half-applied change with them.
+ */
+function cloneForSettlement(state) {
+  return { ...state,
+    lessons: state.lessons.map(row => ({ ...row, verifiedSessions: [...(row.verifiedSessions ?? [])] })),
+    receipts: state.receipts.map(row => ({ ...row, selected: row.selected.map(x => ({ ...x })), accepted: [...row.accepted] })),
+    events: [...state.events],
+    experiments: state.experiments ? [...state.experiments] : undefined }
+}
+
+/** Publish a successful working copy back onto the state the transaction will commit. */
+function adoptSettlement(state, working) {
+  state.lessons = working.lessons
+  state.receipts = working.receipts
+  state.events = working.events
+  if (working.experiments !== undefined) state.experiments = working.experiments
+}
+
+/** Retire one pending entry into the bounded terminal history. */
+function retire(entry, state, at, terminal, details = {}) {
+  const outbox = ensureOutbox(state)
+  outbox.pending = outbox.pending.filter(row => row.key !== entry.key)
+  // The second argument is the terminal NAME. Passing the store here made the history row point
+  // at the document that contains it, which no serialization can express.
+  outbox.history = [...outbox.history, outboxTerminal(entry, terminal, at, details)].slice(-OUTBOX_HISTORY_LIMIT)
 }
 
 function reflectionGate(state, input, now) {
@@ -365,6 +690,7 @@ const TOPIC_KEY_PATTERN = /^[a-z][A-Za-z0-9._-]{0,63}$/u
 const PREFERENCE_VALUE_PATTERN = /^[\w.\u4e00-\u9fff-]{1,64}$/u
 
 function validateState(state) {
+  validateSettlement(state)
   check(Array.isArray(state.sessions) && state.sessions.length <= 256 && state.sessions.every(s =>
     /^[a-f0-9]{64}$/u.test(s.id) && Number.isSafeInteger(s.bytes) && s.bytes >= 0 && s.bytes <= 1536
       && Array.isArray(s.offered) && s.offered.length <= 32), 'invalid_store')
@@ -667,8 +993,17 @@ export class LearningEngine {
     }
     if (!lesson) {
       if (state.lessons.length >= MAX_LESSONS_PER_STORE) {
-        const oldest = state.lessons.filter(x => x.expiresAt <= now || x.status === 'suspended').sort((a, b) => a.createdAt - b.createdAt)[0]
-        check(oldest, 'capacity'); state.lessons = state.lessons.filter(x => x.id !== oldest.id)
+        const eviction = this.selectEviction(state, { now, scope, incomingKind: kind })
+        // A full library whose every row here is still earning its place refuses the write and
+        // says why. Reporting success while storing nothing would be the one unacceptable
+        // outcome: the person would believe their correction had been kept.
+        check(eviction, 'capacity')
+        state.lessons = state.lessons.filter(row => row.id !== eviction.row.id)
+        // Audit without a copy of the lesson: ids, versions and the reason only, so the
+        // bounded ring never becomes a second, unmanaged store of what was learned.
+        state.evictions = [...(state.evictions ?? []), { at: now, id: eviction.row.id,
+          version: eviction.row.version, kind: eviction.row.kind, status: eviction.row.status,
+          reason: eviction.reason, scope: eviction.row.scope, byLessonId: lessonId }].slice(-64)
       }
       lesson = { id: lessonId, scope, kind, instruction, terms: topicTerms, version: 1, generation: 1,
         status: kind === 'correction' ? 'reminder' : 'candidate', createdAt: now, expiresAt: now + 90 * DAY,
@@ -706,6 +1041,75 @@ export class LearningEngine {
     return { ok: true, id: lessonId, status: lesson.status, duplicate: false }
   }
   /**
+   * Choose one row the library may retire to make room for `incoming`.
+   *
+   * The rules are deliberately narrow, because a library that silently forgets is worse than
+   * one that says it is full:
+   *   - only rows **in the same scope** are candidates; another project's lessons are never
+   *     deleted to make room here, and the refusal says so instead;
+   *   - expired or suspended rows go first, oldest first;
+   *   - only then, and only for an incoming *user correction*, may the weakest unverified
+   *     method candidate be displaced. A correction is an explicit instruction; an unverified
+   *     proposal is not, and the two must not compete for the last slot.
+   * Protected rows are never displaced: validated methods, user corrections, the refuted
+   * hypotheses an open regression window still depends on, rows referenced by a live receipt,
+   * open job or experiment, and rows another stored row points at through `replacedBy`.
+   *
+   * @returns the row to retire, or `null` when everything here is protected.
+   */
+  selectEviction(state, { now, scope, incomingKind }) {
+    const protectedIds = this.protectedLessonIds(state, now)
+    const candidates = state.lessons.filter(row => row.scope === scope && !protectedIds.has(row.id))
+    const oldest = candidates.filter(row => row.expiresAt <= now || row.status === 'suspended')
+      .sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1))
+    if (oldest.length > 0) {
+      return { row: oldest[0], reason: oldest[0].expiresAt <= now ? 'expired' : 'suspended' }
+    }
+    if (incomingKind !== 'correction') return null
+    // Weakest first: nothing verified, never adopted, then the least conclusive evidence, then
+    // the oldest. The id breaks every remaining tie so the same state always retires the same
+    // row, whichever order the rows happen to be in.
+    const weakest = candidates.filter(row => row.kind === 'method' && row.status === 'candidate' && row.verified === 0)
+      .sort((a, b) => a.adopted - b.adopted || a.inconclusive - b.inconclusive
+        || a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1))
+    return weakest.length > 0 ? { row: weakest[0], reason: 'weak_unverified_candidate' } : null
+  }
+  /**
+   * Rows the library must not forget, however full it is.
+   * @returns the protected lesson ids.
+   */
+  protectedLessonIds(state, now) {
+    const ids = new Set()
+    for (const row of state.lessons) {
+      if (row.kind === 'correction' || row.status === 'validated') ids.add(row.id)
+      // An open regression window is load-bearing evidence: `put()` refuses to relearn a
+      // hypothesis while this row is alive. Retiring it would silently reopen what was refuted.
+      if (row.suspensionReason === 'regression' && row.expiresAt > now) ids.add(row.id)
+      // A rollback chain runs both ways. `replacedBy` names the successor a predecessor points
+      // at; `replaces` names the predecessor a successor still resolves through. Breaking
+      // either end would leave a replacement pair that no longer adds up.
+      if (typeof row.replacedBy === 'string') ids.add(row.replacedBy)
+      if (typeof row.replaces === 'string') ids.add(row.replaces)
+    }
+    // A live receipt holds the exact rows it offered (`selected[].id`) and the rows the Host
+    // reported as adopted (`accepted[]`, ids). Both are in flight and neither may be retired
+    // out from under a settlement that is still going to write back to them.
+    for (const receipt of state.receipts ?? []) {
+      if (Number.isSafeInteger(receipt.expiresAt) && receipt.expiresAt <= now) continue
+      for (const selected of receipt.selected ?? []) {
+        if (typeof selected?.id === 'string') ids.add(selected.id)
+      }
+      for (const accepted of receipt.accepted ?? []) {
+        if (typeof accepted === 'string') ids.add(accepted)
+      }
+    }
+    for (const job of state.jobs ?? []) if (typeof job.lessonId === 'string') ids.add(job.lessonId)
+    for (const experiment of state.experiments ?? []) {
+      if (typeof experiment.lessonId === 'string' && experiment.at > now - 30 * DAY) ids.add(experiment.lessonId)
+    }
+    return ids
+  }
+  /**
    * Classify every stored lesson against one query without writing anything.
    * The result is the single source of both the recall decision and the reason
    * reported to the user, so a status can never disagree with the decision.
@@ -714,7 +1118,11 @@ export class LearningEngine {
     const offered = new Set(session?.offered ?? [])
     const diagnostics = { libraryLessons: state.lessons.length, scopeLessons: 0, otherScope: 0, expired: 0,
       suspended: 0, methodUnvalidated: 0, otherEnvironment: 0, alreadyOffered: 0, sameTurn: 0,
-      eligible: 0, candidates: 0, matched: 0 }
+      eligible: 0, candidates: 0, matched: 0,
+      // Every way this lesson's own conditions can refuse it, counted apart from a match that
+      // was merely too thin: "not applicable here" and "not similar enough" are different
+      // answers and the operator is told which one they got.
+      conditionExcluded: 0, conditionNotApplicable: 0, conditionUnclear: 0 }
     const matched = [], offeredMatches = []
     let nearest = null
     for (const lesson of state.lessons) {
@@ -728,6 +1136,21 @@ export class LearningEngine {
       if (lesson.kind === 'method' && lesson.status !== 'validated') { diagnostics.methodUnvalidated += 1; continue }
       if (turn !== undefined && lesson.sourceTurn === turn) { diagnostics.sameTurn += 1; continue }
       diagnostics.eligible += 1
+      // A lesson's own conditions are part of admission, not part of the text handed to the
+      // model: a rule written for CSV must not be offered for a JSON task and then left to the
+      // model to reject. Exclusions are decided first, and a condition that cannot be decided
+      // locally refuses the lesson instead of being guessed at.
+      const condition = conditionVerdict(lesson, view)
+      if (!condition.ok) {
+        if (condition.gate === CONDITION_GATES.excluded) diagnostics.conditionExcluded += 1
+        else if (condition.gate === CONDITION_GATES.notApplicable) diagnostics.conditionNotApplicable += 1
+        else diagnostics.conditionUnclear += 1
+        if (!nearest || condition.gate === CONDITION_GATES.excluded) {
+          nearest = { lessonId: lesson.id, gate: condition.gate, weight: 0, matched: 0, matchedStrong: 0,
+            condition: condition.detail }
+        }
+        continue
+      }
       const evidence = relevance(view, analyze(lesson.instruction))
       if (evidence.matched === 0) continue
       const verdict = admits(evidence)
@@ -775,6 +1198,12 @@ export class LearningEngine {
     if (plan.matched.length > 0) return RECALL_REASONS.budgetExhausted
     if (plan.offeredMatches.length > 0) return RECALL_REASONS.alreadyOffered
     if (budgetBlocked && plan.diagnostics.candidates > 0) return RECALL_REASONS.budgetExhausted
+    // Everything that could have been offered was refused by its own conditions. That is a
+    // different answer from "nothing was similar enough", and the operator is told which.
+    const blocked = plan.diagnostics.conditionExcluded + plan.diagnostics.conditionNotApplicable
+      + plan.diagnostics.conditionUnclear
+    if (plan.matched.length === 0 && plan.offeredMatches.length === 0 && blocked > 0
+      && blocked >= plan.diagnostics.candidates) return RECALL_REASONS.conditionBlocked
     // Something recallable existed in this scope and simply did not match the task.
     if (plan.diagnostics.eligible > 0 || plan.nearest) return RECALL_REASONS.matchInsufficient
     if (plan.diagnostics.methodUnvalidated > 0) return RECALL_REASONS.methodUnvalidated
@@ -831,7 +1260,11 @@ export class LearningEngine {
       session.offered.push(...selected.map(x => `${x.id}:${x.version}`))
       this.store.reserveSession(session)
       state.sessions = state.sessions.filter(x => x.id !== sessionId)
-      const receipt = { id: randomUUID(), turn, scope, environment, queryHash, context, selected, accepted: [], expiresAt: now + RECEIPT_TTL }
+      const receipt = { id: randomUUID(), turn, scope, environment, queryHash, context, selected, accepted: [],
+        // The session is noted so a precise stop can cover the receipts that are still able to
+        // authorise a settlement for it — a stop that only looked at the queue would let an
+        // un-enqueued receipt be settled afterwards.
+        sessionHash: hash(identity(input.sessionId)), expiresAt: now + RECEIPT_TTL }
       state.receipts.push(receipt)
       return { ...this.present(receipt), diagnostics: { ...diagnostics, selectedBytes: Buffer.byteLength(context) }, learned }
     })
@@ -860,52 +1293,309 @@ export class LearningEngine {
     return this.transaction(state => { state.receipts = state.receipts.filter(x => x.id !== receipt); return { ok: true } })
   }
   complete(input) {
-    const turn = turnKey(input), scope = scopeFor(input.projectKey, this.adapter, this.instance)
-    check(['verified', 'failed', 'unknown', 'cancelled'].includes(input.outcome))
-    if (input.outcome === 'verified') check(input.evidence?.source === 'host_verifier'
-      && typeof input.evidence.checkId === 'string' && input.evidence.checkId.length > 0, 'verification_required')
-    const event = hash(`complete:${turn}`), fingerprint = hash(JSON.stringify([scope, input.outcome, input.evidence ?? null]))
+    const canonical = canonicalCompleteInput(this, input)
+    return this.transaction((state, now) => completeInState(this, state, now, canonical))
+  }
+  /**
+   * Freeze one settlement durably, before the in-memory retry queue is relied on.
+   *
+   * A durable acknowledgement means the first transaction committed — nothing earlier counts.
+   * The entry keeps only the facts a replay needs (identity hashes, the original receipt ids and
+   * their expiry, the bound version/check decisions, the outcome) and never lesson text, the
+   * context that was injected, the project path or any credential.
+   *
+   * @param input - the same identity `complete` takes: projectKey, sessionId, turnId, outcome, evidence.
+   * @returns `{ ok, durable: true, key, deadline }`, a duplicate, or a refusal.
+   */
+  settlementEnqueue(input) {
+    const canonical = canonicalCompleteInput(this, input)
+    const payloadHash = hash(JSON.stringify([canonical.turn, canonical.scope, canonical.outcome,
+      canonical.evidence, canonical.sessionId]))
+    const environment = environmentFor(input)
     return this.transaction((state, now) => {
-      const previous = state.events.find(x => x.id === event)
-      if (previous) {
-        // A retry after a response failure must see what was actually recorded, not a
-        // fresh zero: the receipt is gone, but the settlement already happened.
-        check(previous.fingerprint === fingerprint, 'event_conflict')
-        return { ok: true, duplicate: true, outcome: previous.outcome ?? null, attributed: previous.attributed ?? 0 }
+      const outbox = ensureOutbox(state)
+      // A settlement that already happened is a FACT and answers first, even if a queue entry for
+      // it is still lying around: returning "duplicate, pending" for work already recorded would
+      // hide the outcome the caller asked about. It must also be the same settlement — returning
+      // success for a key whose recorded fingerprint differs is how a caller could report a
+      // `failed` outcome for something already recorded as `verified`.
+      const recorded = state.events.find(row => row.id === canonical.event)
+      if (recorded) {
+        check(recorded.fingerprint === canonical.fingerprint, 'event_conflict')
+        return { ok: true, durable: true, duplicate: true, settled: true, key: canonical.event,
+          outcome: recorded.outcome ?? null, attributed: recorded.attributed ?? 0, deadline: null,
+          generation: controlOf(state).generation }
       }
-      const receipts = state.receipts.filter(x => x.turn === turn && x.scope === scope)
-      const acceptedIds = receipts.flatMap(r => r.accepted)
-      const evidence = input.evidence
-      const trusted = evidence?.source === 'host_verifier' && typeof evidence.checkId === 'string' && evidence.checkId.length > 0
-      if (evidence?.checks !== undefined) check(trusted && Array.isArray(evidence.checks) && evidence.checks.length <= 2
-        && evidence.checks.every(x => typeof x.lessonId === 'string' && typeof x.passed === 'boolean')
-        && new Set(evidence.checks.map(x => x.lessonId)).size === evidence.checks.length, 'invalid_evidence')
-      const bindings = trusted ? evidence.checks ?? (evidence.lessonIds ?? (acceptedIds.length === 1 ? acceptedIds : []))
-        .map(lessonId => ({ lessonId, passed: input.outcome === 'verified' })) : []
-      check(bindings.every(x => acceptedIds.includes(x.lessonId)), 'evidence_not_adopted')
-      let attributed = 0
-      if (input.outcome !== 'cancelled') for (const row of receipts) for (const selected of row.selected) {
-        if (!row.accepted.includes(selected.id)) continue
-        const lesson = state.lessons.find(x => x.id === selected.id && x.version === selected.version && x.scope === scope
-          && x.expiresAt > now && x.status !== 'suspended')
-        if (!lesson) continue
-        attributed += 1
-        const checked = bindings.find(x => x.lessonId === lesson.id
-          && (x.version === selected.version || (x.version === undefined && lesson.kind === 'correction'))
-          && (!lesson.methodId || x.checkId === getMethod(lesson.methodId).checkId))
-        if (checked?.passed === true) {
-          lesson.verified += 1
-          lesson.verifiedSessions = [...new Set([...lesson.verifiedSessions, hash(input.sessionId)])].slice(-8)
-        } else if (checked?.passed === false) {
-          lesson.failed += 1
-          if (lesson.kind === 'method') this.withdraw(state, lesson, now, 'regression')
+      const seen = [...outbox.pending, ...outbox.history].find(row => row.key === canonical.event)
+      if (seen) {
+        // Same key and same frozen payload is a duplicate; anything else must never overwrite
+        // the facts that were already acknowledged.
+        check(seen.payloadHash === payloadHash, 'settlement_conflict')
+        return { ok: true, durable: true, duplicate: true, key: seen.key, payloadHash: seen.payloadHash,
+          deadline: seen.deadline, generation: controlOf(state).generation,
+          state: outbox.pending.some(row => row.key === seen.key) ? 'pending' : 'terminal' }
+      }
+      const sessionHash = hash(identity(canonical.sessionId))
+      // Acknowledging a durable item for a session the user has already stopped would promise a
+      // settlement that can never execute.
+      check(!controlOf(state).stops.some(row => row.sessionHash === sessionHash), 'settlement_stopped')
+      const receipts = state.receipts.filter(row => row.turn === canonical.turn && row.scope === canonical.scope)
+      check(receipts.length > 0, 'settlement_no_receipt')
+      const receiptExpiry = Math.max(...receipts.map(row => row.expiresAt))
+      // An already-expired receipt must not become a creditable queue entry: the outbox may never
+      // mint the credit a deleted receipt can no longer authorise.
+      check(receiptExpiry > now, 'settlement_receipt_expired')
+      check(outbox.pending.length < OUTBOX_LIMIT, 'settlement_outbox_full')
+      const entry = { format: OUTBOX_FORMAT, key: canonical.event, payloadHash, owner: ownerOf(this),
+        scope: canonical.scope, environment, sessionHash,
+        turnHash: canonical.turn,
+        // The receipt ids alone are not enough: a replay must consume the SAME acceptance facts
+        // it froze, so the adopted binding is stored beside them.
+        receipts: receipts.map(row => ({ id: row.id, expiresAt: row.expiresAt, accepted: [...row.accepted] })),
+        outcome: canonical.outcome, evidence: boundEvidence(canonical.evidence),
+        // The fingerprint and the verdict hash are frozen at enqueue: a replay compares against
+        // what was acknowledged, so a host verdict carrying extra fields can never make its own
+        // retry look like a different settlement.
+        fingerprint: canonical.fingerprint,
+        evidenceHash: canonical.evidence === null ? null : hash(JSON.stringify(canonical.evidence)),
+        queuedAt: now, deadline: Math.min(now + OUTBOX_MAX_AGE_MS, receiptExpiry),
+        attempts: 0, nextAttemptAt: now, lastError: null }
+      check(Buffer.byteLength(JSON.stringify(entry)) <= OUTBOX_ITEM_BYTES, 'settlement_item_too_large')
+      outbox.pending = [...outbox.pending, entry]
+      check(Buffer.byteLength(JSON.stringify(outbox)) <= OUTBOX_TOTAL_BYTES, 'settlement_outbox_too_large')
+    // `payloadHash` and the current control generation are part of the acknowledgement: a
+    // restarted adapter that only has a public CLI must be able to form a valid apply request
+    // without reading the store or recomputing anything.
+      return { ok: true, durable: true, duplicate: false, key: entry.key, payloadHash: entry.payloadHash,
+        deadline: entry.deadline, queuedAt: entry.queuedAt, attempts: 0,
+        generation: controlOf(state).generation }
+    })
+  }
+  /**
+   * Bounded, read-only view of the durable queue and its control record.
+   *
+   * It never writes: an old document without these fields stays without them, and a status call
+   * never becomes the thing that creates them.
+   */
+  settlementStatus() {
+    const state = this.store.read(); validateState(state)
+    const outbox = outboxOf(state), control = controlOf(state), now = this.now()
+    const view = entry => ({ key: entry.key, payloadHash: entry.payloadHash, outcome: entry.outcome, queuedAt: entry.queuedAt,
+      deadline: entry.deadline, attempts: entry.attempts, sessionHash: entry.sessionHash,
+      scope: entry.scope, lastError: entry.lastError ?? null,
+      state: entry.deadline <= now ? 'expired' : 'pending' })
+    const counted = (rows, name) => rows.filter(row => row.state === name).length
+    const pending = outbox.pending.map(view)
+    return { ok: true, durable: true, control: { generation: control.generation,
+      userPaused: control.userPaused, stops: control.stops.length },
+    // Both lists carry the same immutable handle, so a caller never has to read the document.
+    pending, history: outbox.history.map(row => ({ ...row })),
+    counts: { pending: counted(pending, 'pending'), expired: counted(pending, 'expired'),
+      terminal: outbox.history.length,
+      settled: outbox.history.filter(row => row.state === 'settled').length,
+      stopped: outbox.history.filter(row => row.state === 'stopped').length } }
+  }
+  /**
+   * Settle exactly one durable item inside a single write transaction.
+   *
+   * Completion and retirement commit together, so no crash can leave credit granted while the
+   * item is still pending, or the reverse. The public `complete` is never called from here: it
+   * would take the file lock a second time and deadlock.
+   *
+   * @param input - `{ key, payloadHash, generation? }`.
+   * @param trustedGuard - synchronous host-local permission check, run INSIDE the locked
+   *   transaction. It reads live host truth (pause, legacy, archive), never a value captured
+   *   before the lock was taken.
+   */
+  settlementApply(input, trustedGuard) {
+    check(isPlainObject(input) && typeof input.key === 'string' && typeof input.payloadHash === 'string')
+    // The control generation IS the execution permit, so it is required: an apply that omits it
+    // would be an apply with no permission to compare against the committed control state.
+    check(Number.isSafeInteger(input.generation), 'settlement_generation_required')
+    // A key nobody queued cannot be settled; checked before the transaction so a stray call does
+    // not bump the document revision for nothing. The authoritative check runs under the lock.
+    const peek = outboxOf(this.store.read())
+    if (![...peek.pending, ...peek.history].some(row => row.key === input.key)) {
+      return { ok: false, code: 'settlement_unknown_key' }
+    }
+    return this.transaction((state, now) => {
+      const outbox = ensureOutbox(state)
+      const control = ensureControl(state)
+      const index = outbox.pending.findIndex(row => row.key === input.key)
+      // (3) A TERMINAL record answers first. Once the settlement is committed, its result is a
+      // fact: a later pause, stop, deadline or generation change must not turn a lost response
+      // into a refusal, and nothing here grants credit a second time.
+      if (index === -1) {
+        const terminal = outbox.history.find(row => row.key === input.key)
+        check(terminal, 'settlement_unknown_key')
+        check(terminal.payloadHash === input.payloadHash, 'settlement_conflict')
+        return { ok: true, duplicate: true, terminal: terminal.state, outcome: terminal.outcome,
+          attributed: terminal.attributed ?? 0, reason: terminal.reason ?? null }
+      }
+      const entry = outbox.pending[index]
+      check(entry.payloadHash === input.payloadHash, 'settlement_conflict')
+      // A completion that is already in the event ledger is re-read before any permission is
+      // consulted, for the same reason.
+      const recorded = state.events.find(row => row.id === entry.key)
+      if (recorded) {
+        // A recorded completion answers — but only if it IS this settlement. A different
+        // fingerprint under the same key is a different result, and reporting it as a successful
+        // duplicate would rewrite history into a success it never was.
+        if (recorded.fingerprint !== entry.fingerprint) {
+          // Terminal, not retryable: the acknowledged settlement and the recorded one are
+          // different results, and no amount of retrying will make them the same.
+          retire(entry, state, now, 'conflict', { reason: 'event_conflict' })
+          return { ok: false, code: 'event_conflict' }
         }
-        else lesson.inconclusive += 1
+        retire(entry, state, now, 'settled', { attributed: recorded.attributed ?? 0, reason: 'duplicate',
+          outcome: recorded.outcome ?? entry.outcome })
+        return { ok: true, duplicate: true, outcome: recorded.outcome ?? null, attributed: recorded.attributed ?? 0 }
       }
-      state.receipts = state.receipts.filter(x => x.turn !== turn)
-      state.events.push({ id: event, fingerprint, at: now, outcome: input.outcome,
-        evidenceHash: input.evidence ? hash(JSON.stringify(input.evidence)) : null, attributed })
-      return { ok: true, attributed, outcome: input.outcome }
+      // Only a genuinely unsettled item consults the current permission state.
+      check(input.generation === control.generation, 'settlement_stale_control')
+      if (control.userPaused) return { ok: false, code: 'settlement_paused' }
+      if (control.stops.some(row => row.sessionHash === entry.sessionHash)) {
+        retire(entry, state, now, 'stopped', { reason: 'session_stopped' })
+        return { ok: false, code: 'settlement_stopped' }
+      }
+      if (entry.owner !== ownerOf(this)) return { ok: false, code: 'settlement_foreign_owner' }
+      if (now >= entry.deadline) {
+        // Past its absolute deadline the item retires without credit, and the deadline is never
+        // extended to make recovery possible.
+        retire(entry, state, now, 'expired', { reason: 'deadline' })
+        return { ok: false, code: 'settlement_expired' }
+      }
+      if (entry.attempts >= OUTBOX_MAX_ATTEMPTS) {
+        retire(entry, state, now, 'failed', { reason: 'attempts' })
+        return { ok: false, code: 'settlement_attempts_exhausted' }
+      }
+      if (typeof trustedGuard === 'function') {
+        // Run inside the lock, against live host truth: never a value captured before it.
+        const verdict = trustedGuard({ entry, state, now })
+        if (!(verdict === true || verdict?.ok === true)) {
+          const reason = typeof verdict?.reason === 'string' ? verdict.reason.slice(0, 64) : 'host_state_unknown'
+          entry.lastError = reason
+          return { ok: false, code: 'settlement_guard_refused', reason }
+        }
+      }
+      // (2) The attempt is counted HERE, and the settlement is computed on a working copy. If it
+      // throws, `state` was never touched, so the count and the error commit alone — there is no
+      // window in which a half-applied withdraw or version bump could survive, and no second
+      // transaction in which the count could be lost.
+      entry.attempts += 1
+      const working = cloneForSettlement(state)
+      const canonical = { turn: entry.turnHash, scope: entry.scope, outcome: entry.outcome,
+        evidence: evidenceFromBound(entry), sessionId: null, sessionHash: entry.sessionHash,
+        event: entry.key, fingerprint: entry.fingerprint, boundReceipts: entry.receipts }
+      let result
+      try {
+        result = completeInState(this, working, now, canonical)
+      } catch (error) {
+        const reason = String(error?.code ?? error?.message ?? 'unknown').slice(0, 64)
+        entry.lastError = reason
+        // The frozen world moved: the acknowledgement can never be honoured as written, so the
+        // item retires as an explicit conflict instead of being retried against new facts.
+        if (reason === 'settlement_receipt_changed' || reason === 'event_conflict') {
+          retire(entry, state, now, 'conflict', { reason })
+          return { ok: false, code: reason }
+        }
+        if (entry.attempts >= OUTBOX_MAX_ATTEMPTS) retire(entry, state, now, 'failed', { reason })
+        return { ok: false, code: 'settlement_failed', reason, attempts: entry.attempts }
+      }
+      adoptSettlement(state, working)
+      retire(entry, state, now, 'settled', { attributed: result.attributed ?? 0,
+        reason: result.duplicate ? 'duplicate' : 'applied' })
+      return { ok: true, duplicate: result.duplicate === true, outcome: result.outcome,
+        attributed: result.attributed ?? 0, attempts: entry.attempts }
+    })
+  }
+  /** Persist a control change (pause/resume or a precise session stop) under the same lock. */
+  settlementControl(mutate) {
+    return this.transaction((state, now) => {
+      const control = ensureControl(state)
+      const result = mutate(control, state, now)
+      control.generation += 1
+      return { ok: true, generation: control.generation, ...result }
+    })
+  }
+  /** Exact, owner-scoped stop of one session. Other sessions and other owners are untouched. */
+  settlementStop(input = {}) {
+    // The addressing form is decided by FIELD PRESENCE, before any read or transaction, and the
+    // two forms are mutually exclusive. Accepting a mixture let a caller pass a valid `key` beside
+    // an unrelated `sessionId` and stop the key's session; accepting a malformed one let a
+    // non-string `key` fall through to the raw path. Neither may write anything.
+    check(isPlainObject(input), 'invalid_input')
+    check(Object.keys(input).every(name => ['sessionId', 'key', 'payloadHash', 'reason'].includes(name)), 'invalid_input')
+    const hasSession = Object.hasOwn(input, 'sessionId')
+    const hasKey = Object.hasOwn(input, 'key')
+    const hasHash = Object.hasOwn(input, 'payloadHash')
+    check(hasSession !== hasKey, 'invalid_input')
+    if (hasSession) {
+      check(!hasHash && typeof input.sessionId === 'string' && input.sessionId.length > 0
+        && input.sessionId.length <= 512 && !/[\u0000-\u001f\u007f]/u.test(input.sessionId), 'invalid_input')
+    } else {
+      check(hasHash && typeof input.key === 'string' && /^[a-f0-9]{64}$/u.test(input.key)
+        && typeof input.payloadHash === 'string' && /^[a-f0-9]{64}$/u.test(input.payloadHash), 'invalid_input')
+    }
+    if (Object.hasOwn(input, 'reason')) check(typeof input.reason === 'string' && input.reason.length <= 64, 'invalid_input')
+    const { sessionId, key, payloadHash, reason } = input
+    const code = typeof reason === 'string' && reason.length > 0 ? reason.slice(0, 64) : 'session_closed'
+    // A stop may be addressed by the raw session id, or by an entry this owner already
+    // acknowledged. The second form exists because a session that a directory scan reports as
+    // deleted may no longer have a raw id to name — and the outbox only ever held its hash. The
+    // entry locates the session INSIDE the lock, so the caller never supplies an owner, a scope
+    // hash or a session hash of its own.
+    const addressedByEntry = hasKey
+    const derive = state => {
+      if (!addressedByEntry) return hash(identity(sessionId))
+      const entry = (state.settlementOutbox?.pending ?? [])
+        .find(row => row.key === key && row.payloadHash === payloadHash && row.owner === ownerOf(this))
+      check(entry, 'settlement_unknown_key')
+      return entry.sessionHash
+    }
+    const initial = derive(this.store.read())
+    return this.settlementControl((control, state, now) => {
+      const sessionHash = derive(state)
+      void initial
+      const outbox = ensureOutbox(state)
+      const bound = outbox.pending.filter(row => row.sessionHash === sessionHash)
+      if (!control.stops.some(row => row.sessionHash === sessionHash)) {
+        // A tombstone outlives everything that could still act on the session: a live receipt is
+        // as binding as a pending entry, because a receipt that has not been enqueued yet can
+        // still authorise a settlement. Only when both are gone may it be trimmed — and if
+        // nothing is trimmable, the control write is refused rather than silently dropping a
+        // stop that is still doing work.
+        // A receipt written before this version carries no `sessionHash`, so it cannot be shown
+        // to belong to another session — and it can still authorise a settlement. "Cannot prove
+        // it is not theirs" is therefore treated as "bind it": the tombstone is kept for the
+        // remainder of that receipt's own life (never extended), and a control that has nothing
+        // safe to trim is refused instead of quietly reviving a stopped session.
+        const unattributable = state.receipts.some(row => row.expiresAt > now
+          && !/^[a-f0-9]{64}$/u.test(row.sessionHash))
+        const stillBound = hash => unattributable
+          || outbox.pending.some(entry => entry.sessionHash === hash)
+          || state.receipts.some(row => row.sessionHash === hash && row.expiresAt > now)
+        const prunable = control.stops.filter(row => !stillBound(row.sessionHash))
+        if (control.stops.length >= CONTROL_STOP_LIMIT) {
+          check(prunable.length > 0, 'settlement_stop_capacity')
+          control.stops = control.stops.filter(row => row !== prunable[0])
+        }
+        control.stops = [...control.stops, { sessionHash, at: now, reason: code }]
+      }
+      let stopped = 0
+      for (const entry of bound) {
+        retire(entry, state, now, 'stopped', { reason: code })
+        stopped += 1
+      }
+      return { stopped, sessionHash, reason: code }
+    })
+  }
+  /** Explicit user pause. It stops scheduling and keeps every deadline exactly as it was. */
+  settlementPause({ paused }) {
+    check(typeof paused === 'boolean')
+    return this.settlementControl(control => {
+      control.userPaused = paused
+      return { userPaused: paused }
     })
   }
   status() {
@@ -1156,6 +1846,12 @@ export class LearningEngine {
     const manifest = jobManifest(input.cases)
     check(new Set(manifest.map(x => x.caseId)).size === manifest.length
       && manifest.every(x => typeof x.caseId === 'string' && typeof x.family === 'string' && ['development', 'holdout'].includes(x.split)), 'invalid_evaluation')
+    // Independence is a property of the *task set*, and it is enforced here — in the shared
+    // core, before the transaction that mints a ticket and debits the budget — so no adapter
+    // can hand the runner a sample built by repeating one question. A list where no row carries
+    // a prompt is the legacy trusted-runner protocol and keeps working; see `taskIndependence`.
+    const independence = taskIndependence(input.cases)
+    check(independence.ok, independence.ok ? 'invalid_evaluation' : independence.code)
     return this.transaction((state, now) => {
       const lesson = this.findLesson(state, input)
       check(lesson.kind === 'method' && lesson.status !== 'suspended' && input.expectedVersion === lesson.version, 'method_not_evaluable')

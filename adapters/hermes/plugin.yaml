@@ -1,5 +1,5 @@
 name: mse-learning
-version: "0.9.0-alpha.11"
+version: "0.9.0-alpha.15"
 description: "Persistent scoped correction learning with bounded context. Requires the packaged Node runtime entry."
 author: Missher
 hooks:
@@ -10,5 +10,19 @@ hooks:
   - post_tool_call
   - on_session_end
   - on_session_reset
+  - on_session_finalize
+  - subagent_start
+  - subagent_stop
+# `provides_hooks` is the key this host's manifest parser reads (and the one `hermes plugin
+# doctor` compares the real registration against). `hooks` stays for older readers.
+provides_hooks:
+  - pre_llm_call
+  - pre_api_request
+  - post_api_request
+  - post_llm_call
+  - post_tool_call
+  - on_session_end
+  - on_session_reset
+  - on_session_finalize
   - subagent_start
   - subagent_stop

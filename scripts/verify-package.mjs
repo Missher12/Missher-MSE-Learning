@@ -3,14 +3,18 @@ import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, relative } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const filesUnder = directory => readdirSync(directory, { withFileTypes: true })
   .flatMap(entry => entry.isDirectory() ? filesUnder(join(directory, entry.name)) : [join(directory, entry.name)])
 
 const root = fileURLToPath(new URL('..', import.meta.url))
-const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')), dist = join(root, 'dist', pkg.version)
+const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+// `--dist <dir>` checks a delivery directory built with `pack.mjs --dist`, so one release can be
+// verified in place without copying it into `dist/<version>` first.
+const distFlag = process.argv.indexOf('--dist')
+const dist = distFlag === -1 ? join(root, 'dist', pkg.version) : resolve(root, process.argv[distFlag + 1] ?? '')
 const manifest = JSON.parse(readFileSync(join(dist, 'candidate-manifest.json'), 'utf8'))
 const dshOnly = manifest.targets?.length === 1 && manifest.targets[0] === 'dsh'
 assert.equal(manifest.artifacts.length, dshOnly ? 1 : 2)

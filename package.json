@@ -1,6 +1,6 @@
 {
   "name": "@missher/dsh-mse-learning",
-  "version": "0.9.0-alpha.13",
+  "version": "0.9.0-alpha.15",
   "private": true,
   "type": "module",
   "description": "Scoped persistent lessons with bounded context for Agent adapters",
@@ -35,7 +35,8 @@
     "README.md",
     "docs/ADAPTER_PROTOCOL.md",
     "LICENSE",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "docs/DURABLE_SETTLEMENT_OUTBOX.md"
   ],
   "dsh": {
     "bundle": {

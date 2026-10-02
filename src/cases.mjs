@@ -40,6 +40,7 @@ export const CASE_REASONS = Object.freeze({
   tooFewCases: 'too_few_cases',
   tooManyCases: 'too_many_cases',
   duplicateCaseId: 'duplicate_case_id',
+  duplicateCaseTask: 'duplicate_case_task',
   duplicateCaseContent: 'duplicate_case_content',
   invalidPrompt: 'invalid_case_prompt',
   invalidExpected: 'invalid_expected_value',
@@ -70,6 +71,24 @@ const CASE_AUTHORITY = /忽略.{0,12}(?:指令|规则|用户|权限)|绕过.{0,1
 
 const printable = (value, max) => typeof value === 'string' && value.length > 0 && value.length <= max
   && value.isWellFormed() && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)
+
+/**
+ * Strict validation of a RAW task prompt, before any normalization.
+ *
+ * The raw text is what a runner would eventually be asked, so its own length, characters and
+ * Unicode validity are checked as written — a prompt that only becomes acceptable after
+ * whitespace collapsing, control-character stripping or length folding is not acceptable.
+ * The adapter and the shared core both call this, so neither path can be the lenient one.
+ * @returns `{ ok: true }` or `{ ok: false, code }`.
+ */
+export function checkTaskPrompt(raw) {
+  if (typeof raw !== 'string') return { ok: false, code: CASE_REASONS.invalidPrompt }
+  if (raw.length === 0 || raw.length > MAX_CASE_PROMPT_CHARS) return { ok: false, code: CASE_REASONS.invalidPrompt }
+  if (!raw.isWellFormed()) return { ok: false, code: CASE_REASONS.invalidPrompt }
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(raw)) return { ok: false, code: CASE_REASONS.invalidPrompt }
+  if (CASE_AUTHORITY.test(raw)) return { ok: false, code: CASE_REASONS.invalidPrompt }
+  return { ok: true }
+}
 
 /** Bounded structural JSON value: plain objects/arrays/primitives, depth and size capped. */
 function boundedValue(value, depth = 0) {
@@ -277,7 +296,7 @@ function normalizeOne(raw, index) {
   if (!LABEL.test(typeof caseId === 'string' ? caseId : '')) return fail(CASE_REASONS.invalidCases)
   if (!LABEL.test(typeof family === 'string' ? family : '')) return fail(CASE_REASONS.invalidFamily)
   if (!SPLITS.includes(raw.split)) return fail(CASE_REASONS.invalidSplit)
-  if (!printable(raw.prompt, MAX_CASE_PROMPT_CHARS) || CASE_AUTHORITY.test(raw.prompt)) return fail(CASE_REASONS.invalidPrompt)
+  if (!checkTaskPrompt(raw.prompt).ok) return fail(CASE_REASONS.invalidPrompt)
   const forbidden = raw.forbidden === undefined ? [] : raw.forbidden
   if (!Array.isArray(forbidden) || forbidden.length > MAX_FORBIDDEN) return fail(CASE_REASONS.invalidCases)
   if (!forbidden.every(value => printable(value, MAX_FORBIDDEN_CHARS))) return fail(CASE_REASONS.invalidExpected)
@@ -315,16 +334,23 @@ export function normalizeCases(raw, policy) {
   if (!Array.isArray(raw)) return { ok: false, code: CASE_REASONS.invalidCases, cases: [] }
   if (raw.length < MIN_CASES) return { ok: false, code: CASE_REASONS.tooFewCases, cases: [] }
   if (raw.length > MAX_CASES) return { ok: false, code: CASE_REASONS.tooManyCases, cases: [] }
-  const cases = [], seen = new Set(), content = new Map()
+  const cases = [], seen = new Set(), tasks = new Map(), content = new Map()
   for (const [index, item] of raw.entries()) {
     const row = normalizeOne(item, index)
     if (!row.ok) return { ok: false, code: row.code, index, cases: [] }
     if (seen.has(row.value.caseId)) return { ok: false, code: CASE_REASONS.duplicateCaseId, index, cases: [] }
     seen.add(row.value.caseId)
-    // Identity is the *task and its oracle*, not the labels around it. Copying one case and
-    // renaming its id, family and split would otherwise manufacture twelve independent-looking
-    // cases out of one question, and a holdout made of re-labelled development rows is not a
-    // holdout at all. Anything that merely re-labels the same content is refused here.
+    // One measurement per task. Identity here is the normalized prompt ALONE: varying the
+    // oracle, the forbidden list, the id, the family or the split changes what a case looks
+    // like, not what it asks. Counting those variants as independent pairs would inflate the
+    // sample and — worse — let a holdout be built out of re-labelled development rows, which
+    // is not a held-out set at all. Both failures come from the same missing check.
+    const task = caseTaskKey(row.value)
+    if (tasks.has(task)) {
+      return { ok: false, code: CASE_REASONS.duplicateCaseTask, index, duplicateOf: tasks.get(task), cases: [] }
+    }
+    tasks.set(task, index)
+    // The full-content key still refuses an exact duplicate, and it is what the plan binds to.
     const key = caseContentKey(row.value)
     if (content.has(key)) {
       return { ok: false, code: CASE_REASONS.duplicateCaseContent, index, duplicateOf: content.get(key), cases: [] }
@@ -348,12 +374,89 @@ export function normalizeCases(raw, policy) {
   return { ok: true, code: null, cases, families: families.size, holdout: holdout.length, holdoutFamilies: holdoutFamilies.size }
 }
 
-/** Stable identity of a case's *content*: the task, its oracle, and its exclusions. */
+/**
+ * Presentation-only normalization of a task prompt.
+ *
+ * It removes differences that cannot change what is being asked — compatibility forms (NFKC),
+ * zero-width joiners a paste can smuggle in, and runs of whitespace — and nothing else. Case,
+ * punctuation and word order are left exactly as written, because for a coding task they can be
+ * the difference between `JSON.parse` and `json.parse`, or between a requirement and its
+ * negation.
+ */
+export function normalizeTaskPrompt(value) {
+  return typeof value === 'string'
+    ? value.normalize('NFKC').replace(/[\u200b-\u200d\u2060\ufeff]/gu, '').replace(/\s+/gu, ' ').trim()
+    : ''
+}
+
+/**
+ * Identity of the *task*: the normalized prompt alone.
+ *
+ * This is deliberately narrower than {@link caseContentKey}. The same question asked twice is
+ * the same measurement no matter what oracle, forbidden list, label or split surrounds it, so
+ * a caller cannot manufacture twelve independent cases — or a fake holdout — out of one prompt
+ * by varying the parts that are not the task.
+ */
+export function caseTaskKey(testCase) {
+  return normalizeTaskPrompt(testCase.prompt)
+}
+
+/**
+ * Stable identity of a case's *full content*: the task, its oracle, and its exclusions.
+ *
+ * This is the identity a plan binds to (`planIdentity`), because a preview and the run it
+ * authorises must describe byte-identical work. It is not the identity used to count
+ * independent cases — that is {@link caseTaskKey}.
+ */
 export function caseContentKey(testCase) {
-  return JSON.stringify([normalizeText(testCase.prompt), testCase.checker.kind,
+  return JSON.stringify([normalizeTaskPrompt(testCase.prompt), testCase.checker.kind,
     testCase.checker.kind === 'json-deep-equal-v1' ? testCase.checker.expected : normalizeText(
       Array.isArray(testCase.checker.expected) ? testCase.checker.expected.join('\n') : testCase.checker.expected),
     (testCase.forbidden ?? []).map(value => value.toLowerCase()).sort()])
+}
+
+/**
+ * Task independence over a raw case list, shared by the package validator and the core.
+ *
+ * A validation run's evidence is only as wide as the number of *distinct tasks* it asked. A
+ * caller that repeats one question behind twelve labels, oracles or forbidden lists produces a
+ * sample of one dressed as twelve, so the shared core refuses it before any ticket, debit or
+ * runner call — not only the DSH adapter.
+ *
+ * Two protocols are supported and they are not mixed:
+ *   - **prompted**: every row carries a `prompt`. All of them must be valid and pairwise
+ *     distinct after presentation normalization. A row that merely omits its prompt cannot
+ *     opt out of the check.
+ *   - **trusted runner**: no row carries a prompt. This is the legacy shape, where the Host
+ *     runs its own trusted comparisons and the prompt never reaches the plugin; it stays
+ *     accepted, and its independence remains the Host's guarantee rather than something a
+ *     score could prove. See `docs`/README for that boundary.
+ *
+ * @param rows - raw case rows; only `prompt` is read.
+ * @returns `{ ok, mode, tasks }` or `{ ok: false, code, index, duplicateOf }`.
+ */
+export function taskIndependence(rows) {
+  const list = Array.isArray(rows) ? rows : []
+  // The protocol is chosen by the PRESENCE of the field, never by its value. A row that carries
+  // `prompt: ''`, `null`, a number or an own `undefined` has opted into the prompted protocol
+  // and must satisfy it; deciding on truthiness is what let those rows fall back to the
+  // prompt-less path and still receive a ticket and a debit.
+  const carriers = list.filter(row => row !== null && typeof row === 'object' && Object.hasOwn(row, 'prompt'))
+  if (carriers.length === 0) return { ok: true, mode: 'trusted_runner', tasks: 0 }
+  // One prompted row makes the whole list prompted: mixing is how a malformed row slips past.
+  if (carriers.length !== list.length) return { ok: false, code: CASE_REASONS.invalidPrompt, mode: 'mixed' }
+  const seen = new Map()
+  for (const [index, row] of list.entries()) {
+    const strict = checkTaskPrompt(row.prompt)
+    if (!strict.ok) return { ok: false, code: strict.code, index, mode: 'prompted' }
+    const key = normalizeTaskPrompt(row.prompt)
+    if (key.length === 0) return { ok: false, code: CASE_REASONS.invalidPrompt, index, mode: 'prompted' }
+    if (seen.has(key)) {
+      return { ok: false, code: CASE_REASONS.duplicateCaseTask, index, duplicateOf: seen.get(key), mode: 'prompted' }
+    }
+    seen.set(key, index)
+  }
+  return { ok: true, mode: 'prompted', tasks: seen.size }
 }
 
 /** Wire manifest for `evaluationRequest`, in the exact shape the core validates. */

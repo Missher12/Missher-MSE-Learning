@@ -1,5 +1,5 @@
 import { RECALL_REASONS } from '../src/index.mjs'
-import { SettlementQueue, deadlineFromReceipt } from '../src/settlement.mjs'
+import { SettlementQueue, deadlineFromReceipt, isTransient } from '../src/settlement.mjs'
 
 const key = (session, turn) => JSON.stringify([session, String(turn)])
 /** Sessions arrive either as an object or as a bare id; both must behave identically. */
@@ -88,12 +88,21 @@ export function createHarnessBridge({ engine, createMessage, review, warn = () =
       last.settleState = event.result?.duplicate ? 'duplicate' : 'settled'
       delete last.settleError
     } else if (event.kind === 'failed' || event.kind === 'exhausted') {
-      last.settleState = event.kind
+      // A durable item that the CORE retired as expired is reported as expired, not as a local
+      // failure: the store already recorded the terminal row.
+      last.settleState = event.code === 'settlement_expired' ? 'expired' : event.kind
       last.settleError = event.code
       last.settleAttempts = event.attempts
     } else if (event.kind === 'expired') {
       last.settleState = 'expired'
       last.settleError = 'deadline_exceeded'
+    } else if (event.kind === 'unconfirmed') {
+      // The deadline attempt could not be confirmed (a live writer held the lock, or the runtime
+      // was unavailable). The core still holds the record and its original deadline; this says so
+      // instead of claiming a terminal state nobody committed.
+      last.settleState = 'unconfirmed'
+      last.settleError = event.code
+      last.settleAttempts = event.attempts
     } else if (event.kind === 'capacity') {
       last.settleState = 'capacity'
       last.settleError = 'settlement_capacity'
@@ -104,13 +113,52 @@ export function createHarnessBridge({ engine, createMessage, review, warn = () =
   // `now` is the queue's clock in its own unit; receipt deadlines arrive as epoch
   // milliseconds and are converted here, at the single boundary between the two scales.
   const wallNow = settlementOptions.wallNow ?? Date.now
-  const settlementQueue = new SettlementQueue({ complete: payload => engine.complete(payload), now,
+  // A settlement the core has NOT acknowledged yet is retried as `enqueue → apply`, never as a
+  // direct `complete`: bypassing the outbox would sidestep the core's own refusals (stopped,
+  // paused, conflicting, changed receipt) and would leave the work permanently non-durable.
+  //
+  // `settlementApply` reports refusals as values, so they are translated here: a temporary gate
+  // becomes a retryable error that keeps the original deadline and waits for an explicit resume,
+  // while a terminal answer the core has already recorded stops immediately and is reported.
+  const RETRYABLE_SETTLEMENT = new Set(['settlement_paused', 'settlement_guard_refused', 'settlement_stale_control'])
+  const applyDurably = handle => {
+    const status = engine.settlementStatus()
+    const result = engine.settlementApply({ key: handle.key, payloadHash: handle.payloadHash,
+      generation: status.control.generation }, trustedGuard)
+    if (result?.ok === true) return { ...result, settlement: handle }
+    throw Object.assign(new Error(result?.code ?? 'settlement_failed'), { code: result?.code ?? 'settlement_failed',
+      terminal: !RETRYABLE_SETTLEMENT.has(result?.code) })
+  }
+  const settleThrough = payload => {
+    // A turn that recalled nothing has no receipt to bind, and the core refuses to freeze such an
+    // item — there is no durable settlement and no control to bypass. Its turn-end outcome is
+    // recorded through the ordinary path and reported as durability-not-required, which is a
+    // narrower fact than "durable".
+    if (payload?.settlementRequired === false) return engine.complete(payload)
+    const handle = payload?.settlement
+    if (handle) return applyDurably(handle)
+    const ack = engine.settlementEnqueue(payload)
+    return applyDurably({ key: ack.key, payloadHash: ack.payloadHash })
+  }
+  const settlementQueue = new SettlementQueue({ complete: settleThrough, now,
     onEvent: settlementEvent,
     ...settlementOptions,
+    // The queue's own transient set plus the core's temporary gates, each bounded by the same
+    // absolute deadline the core enforces.
+    isTransient: settlementOptions.isTransient ?? (error => isTransient(error?.code)
+      || RETRYABLE_SETTLEMENT.has(error?.code)),
     ...(settlementOptions.deadlineForReceipt === undefined
       ? { deadlineForReceipt: ({ receiptExpiresAt, now: current }) => deadlineFromReceipt({ receiptExpiresAt,
         wallNow: wallNow(), now: current, maxAgeMs: settlementOptions.maxAgeMs ?? 5 * 60_000,
         clockUnit: settlementOptions.clockUnit ?? 'ms' }) }
+      : {}),
+    // The inverse conversion: a deadline restored from the durable document is in the store's
+    // epoch milliseconds, and it keeps its original window in this process's clock unit.
+    ...(settlementOptions.deadlineForEntry === undefined
+      ? { deadlineForEntry: ({ deadline, now: current }) => {
+        const remaining = deadline - wallNow()
+        return current + ((settlementOptions.clockUnit ?? 'ms') === 'ms' ? remaining : remaining / 1000)
+      } }
       : {}) })
   const close = (session, turn, cancelled = false) => {
     const sessionId = idOf(session), k = key(sessionId, turn), state = turns.get(k)
@@ -121,21 +169,42 @@ export function createHarnessBridge({ engine, createMessage, review, warn = () =
     const payload = { ...state.input, outcome,
       ...(checks.length && !cancelled ? { evidence: { source: 'host_verifier', checkId: state.checkId,
         lessonIds: checks.map(x => x.lessonId), checks } } : {}) }
-    const queued = settlementQueue.enqueue({ key: k, payload, sessionId, receiptExpiresAt: state.receiptExpiresAt })
+    // Durability is for a settlement that can carry credit, which means a turn that actually
+    // recalled something. A turn with no receipt has nothing to bind and the core refuses to
+    // freeze it; its outcome is still recorded through the ordinary path, and reported as
+    // durability-not-required rather than as a saved settlement.
+    const needsDurable = state.receiptExpiresAt !== undefined
+    let durable = null
+    if (needsDurable) {
+      try { durable = engine.settlementEnqueue(payload) } catch (error) { durable = { ok: false, code: error?.code ?? 'store_failure' } }
+    }
+    const handle = durable?.durable === true ? { key: durable.key, payloadHash: durable.payloadHash } : null
+    // One slot per frozen settlement: when the core acknowledged it, its durable key IS the slot
+    // key, so a restored entry and a fresh one can never occupy two different slots.
+    const queueKey = handle?.key ?? k
+    const queued = settlementQueue.enqueue({ key: queueKey,
+      payload: handle !== null ? { ...payload, settlement: handle }
+        : { ...payload, settlementRequired: needsDurable },
+      sessionId, receiptExpiresAt: state.receiptExpiresAt, durable: handle !== null })
     if (queued.state === 'capacity' || queued.state === 'conflict') {
       settle(sessionId, turn, { outcome: 'pending', attributed: 0,
-        settleState: queued.state === 'capacity' ? 'capacity' : 'conflict',
-        settleError: queued.state === 'capacity' ? 'settlement_capacity' : 'event_conflict' })
+        durable: needsDurable ? handle !== null : 'not_required',
+        settleState: handle === null ? 'not_durable' : queued.state === 'capacity' ? 'capacity' : 'conflict',
+        settleError: handle === null ? durable?.code ?? 'store_failure'
+          : queued.state === 'capacity' ? 'settlement_capacity' : 'event_conflict' })
     } else {
-      const attempt = settlementQueue.attempt(k)
+      const attempt = settlementQueue.attempt(queueKey)
       if (attempt.state === 'settled') {
         settle(sessionId, turn, { outcome: attempt.result?.outcome ?? outcome,
-          attributed: attempt.result?.attributed ?? 0, settleState: attempt.result?.duplicate ? 'duplicate' : 'settled' })
+          attributed: attempt.result?.attributed ?? 0, durable: needsDurable ? handle !== null : 'not_required',
+          settleState: attempt.result?.duplicate ? 'duplicate' : 'settled' })
       } else {
         // A failed write is pending — never a settled success — and only transient
         // storage failures are retried.
         if (attempt.state === 'failed' || attempt.state === 'exhausted') warn(attempt.code ?? 'learning_unavailable')
-        settle(sessionId, turn, { outcome: 'pending', attributed: 0, settleState: attempt.state,
+        settle(sessionId, turn, { outcome: 'pending', attributed: 0,
+          durable: needsDurable ? handle !== null : 'not_required',
+          settleState: handle === null && attempt.state === 'retrying' ? 'not_durable' : attempt.state,
           settleError: attempt.code ?? 'learning_unavailable', settleAttempts: attempt.entry?.attempts ?? 1 })
       }
     }
@@ -151,6 +220,50 @@ export function createHarnessBridge({ engine, createMessage, review, warn = () =
         state.route, controller.signal)
       }).catch(() => { if (!controller.signal.aborted) warn('reflection_unavailable') }).finally(() => reviews.delete(job))
     }
+  }
+  /**
+   * Host-local permission, read inside the core's write lock.
+   *
+   * It is a closure over live host truth — never a value captured before the lock — so a pause,
+   * a legacy takeover or an archive that happened while the queue waited is seen. It is
+   * installed by the adapter; until then the guard refuses, which is the conservative default.
+   */
+  let trustedGuard = () => ({ ok: false, reason: 'host_state_unknown' })
+  const setTrustedGuard = fn => { trustedGuard = typeof fn === 'function' ? fn : () => ({ ok: false, reason: 'host_state_unknown' }) }
+  /**
+   * Re-drive durable items that this process did not acknowledge.
+   *
+   * It is never called from the constructor: an adapter must first establish its configuration
+   * and its legacy truth, because recovering before those are known would settle work the user
+   * has already paused or another plugin has taken over.
+   */
+  const restoreSettlements = () => {
+    let status
+    try { status = engine.settlementStatus() } catch (error) { return { ok: false, code: error?.code ?? 'store_failure', restored: 0 } }
+    let restored = 0, expired = 0, failed = 0, waiting = 0
+    for (const entry of status.pending) {
+      // An entry past its deadline is still driven through the core so it is RETIRED with an
+      // explicit `expired` history row. Skipping it would leave it holding a queue slot forever
+      // and would let the next restart try it again.
+      const payload = { settlement: { key: entry.key, payloadHash: entry.payloadHash } }
+      const queued = settlementQueue.enqueue({ key: entry.key, payload, sessionId: null,
+        // Durable: the core owns the deadline decision, including for an entry that is already
+        // past it when this process starts.
+        durable: true,
+        // The original bounds travel with the entry: a restart must not hand the settlement a
+        // fresh five minutes, and its attempt count is the core's, not a new one.
+        queuedAt: entry.queuedAt, deadline: entry.deadline, maxAttempts: 4 })
+      if (queued.state === 'capacity' || queued.state === 'conflict') continue
+      const attempt = settlementQueue.attempt(entry.key)
+      if (attempt.state === 'settled') restored += 1
+      // A durable item past its deadline is retired BY THE CORE, so the local attempt reports a
+      // terminal failure whose code is the core's own answer. Counting it as "expired" is what
+      // actually happened in the document.
+      else if (attempt.code === 'settlement_expired' || attempt.state === 'expired') expired += 1
+      else if (attempt.state === 'failed' || attempt.state === 'exhausted') failed += 1
+      else if (attempt.entry?.state === 'pending' || attempt.entry?.state === 'unconfirmed') waiting += 1
+    }
+    return { ok: true, restored, expired, failed, waiting, pending: status.counts.pending }
   }
   const bridge = {
     capabilities: Object.freeze({ requestAdoption: 'llm_stream_success', providerWireEvidence: false,
@@ -335,6 +448,29 @@ export function createHarnessBridge({ engine, createMessage, review, warn = () =
     },
     /** Frozen settlements still awaiting an idempotent replay, with their bounds. */
     settlementStatus() { return settlementQueue.status() },
+    /**
+     * The durable queue as the core sees it: pending/terminal counts, control generation and
+     * pause state. Read-only, and it never writes to the document.
+     */
+    durableStatus() { return engine.settlementStatus() },
+    /** Install the host-local permission the core reads inside its write lock. */
+    setTrustedGuard,
+    /** Explicit recovery entry point; the adapter decides when the host truth is ready. */
+    restoreSettlements,
+    /** Exact, owner-scoped stop of one session's durable settlements. */
+    stopSettlements(sessionId, reason) { return engine.settlementStop({ sessionId, reason }) },
+    /**
+     * The same stop, addressed by an entry this engine already acknowledged.
+     *
+     * It exists for a session whose raw id is no longer available — a directory scan can report
+     * that a session is gone without naming it again. The core derives the session from the
+     * entry inside its lock, so no caller-supplied owner, scope or session hash is involved.
+     */
+    stopSettlementsByKey(key, payloadHash, reason) {
+      return engine.settlementStop({ key, payloadHash, reason })
+    },
+    /** Explicit user pause over the durable queue. */
+    pauseSettlements(paused) { return engine.settlementPause({ paused }) },
     /** Bounded terminal settlement history, newest last, with session/turn identity. */
     settlementHistory() { return settlementQueue.history() },
     closeSession(sessionId) {
@@ -359,10 +495,23 @@ export function createHarnessBridge({ engine, createMessage, review, warn = () =
     isReflecting() { return enabled && !disposed && typeof review === 'function' },
     /** Sessions with an in-process status row; used for an honest "no runs yet" display. */
     trackedSessions() { return statuses.size },
-    setEnabled(value) {
+    /**
+     * Apply the current enablement.
+     *
+     * `resume` is what separates a READ from a LIFECYCLE MOMENT. Recomputing enablement while
+     * answering a read-only status question must report the current configuration without
+     * scheduling a single attempt — otherwise looking at the settings page would itself settle
+     * work. Only an explicit lifecycle caller may pass `resume: true`.
+     */
+    setEnabled(value, { resume = true } = {}) {
       const next = value === true && !disposed
       if (next !== enabled) generation += 1
       enabled = next
+      if (enabled && resume !== true) {
+        // Read-only: the fact is recorded, nothing is scheduled. It is also NOT memoised as
+        // "already resumed", so the explicit lifecycle moment still resumes.
+        return undefined
+      }
       if (!enabled) {
         for (const state of [...turns.values()]) close(state.input.sessionId, state.input.turnId, true)
         for (const job of reviews) job.controller.abort()

@@ -225,8 +225,12 @@ test('reflection cannot apply registered algorithm evidence to a generic method 
 test('paired runner evaluates the same instruction and applicability text later offered to the agent', async t => {
   const { engine } = setup(t, { evaluationTokensPerDay: 64 })
   const instruction = '处理报表导出时先检查金额类型再输出结果'
-  const applicability = '仅适用于需要导出金额报表的任务'
-  const exclusions = '排除没有金额字段的天气查询任务'
+  // This fixture is about the runner and the injection carrying the SAME text, not about
+  // condition matching, so it uses a supported condition form: free prose is now conservatively
+  // refused (see tests/quality-alpha14.test.mjs) and would make the lesson unreachable.
+  // Both must clear the lesson safety filter, which requires at least 8 characters.
+  const applicability = '任何任务场景都完全适用'
+  const exclusions = '任何情况都完全不排除'
   const proposed = engine.record({ eventId: 'conditional-method', kind: 'method', source: 'host_proposal',
     instruction, applicability, exclusions })
   const cases = Array.from({ length: 16 }, (_, index) => ({ caseId: `case-${index}`, family: `family-${index % 2}`,

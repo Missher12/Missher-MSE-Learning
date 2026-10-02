@@ -1,5 +1,12 @@
 // Real DSH AgentLoop and tools with scripted in-process model responses only.
 // This does not install or exempt a package; verify-dsh-install checks admission separately.
+//
+// LAYER: a PERMISSION-CONTROLLED AgentLoop fixture. This script mounts no session directory, so
+// every mount states the host permission explicitly (`setTrustedGuard(() => true)` inside
+// `mount()`); without it the core conservatively refuses to settle, which would make the counts
+// below measure the missing fixture rather than the wiring. The real asynchronous directory,
+// archive and guard rules are covered by the Host suite (independent 14 + race checks), never by
+// this file. No assertion here is relaxed by that permission.
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs'
@@ -61,6 +68,10 @@ try {
       parameters: {}, async execute() { throw new Error('synthetic tool failure') } }))
     await ctx.plugin(plugin, { reflectionEnabled, ...extra })
     assert.ok(ctx.mseLearning)
+    // ONE explicit, controlled permission per mount — this fixture has no session directory, and
+    // an unstated guard would read as "host truth unknown" (the core's safe default). It is
+    // deliberately the same statement for every mount, so a later mount cannot silently lose it.
+    ctx.mseLearning.setTrustedGuard(() => true)
     return adapter
   }
   const create = id => ctx.agentLoop.create(session.SessionId(id), { provider: 'mse-fixture', model: 'fixture' })
@@ -243,13 +254,14 @@ try {
     settlement: { schedule: retryClock.schedule, cancel: retryClock.cancel } })
   const retryLesson = ctx.mseLearning.engine.record({ eventId: 'retry-seed', source: 'direct_user', kind: 'correction',
     instruction: '以后导出金额前先转换为数值，再按金额排序' })
-  const retryComplete = ctx.mseLearning.engine.complete.bind(ctx.mseLearning.engine)
+  const bridgeRef = ctx.mseLearning
+  const retryComplete = bridgeRef.engine.settlementApply.bind(bridgeRef.engine)
   const retryPayloads = []
   let retryFailures = 1
-  ctx.mseLearning.engine.complete = payload => {
-    retryPayloads.push(JSON.stringify(payload))
+  bridgeRef.engine.settlementApply = (...args) => {
+    retryPayloads.push(JSON.stringify(args[0]))
     if (retryFailures-- > 0) throw Object.assign(new Error('locked'), { code: 'lock_busy' })
-    return retryComplete(payload)
+    return retryComplete(...args)
   }
   const retryAgent = await create('settlement-retry')
   const offRetryCheck = ctx.on('agent/turn-stopping', ({ agent, turn }) => {
@@ -262,6 +274,7 @@ try {
   assert.equal(ctx.mseLearning.engine.status().verified, 0, 'the failed write is not reported as settled')
   assert.equal(ctx.mseLearning.lastRecall(retryAgent.session.id).outcome, 'pending')
   assert.equal(ctx.mseLearning.settlementStatus().length, 1, 'the frozen completion stays queued')
+  assert.ok(ctx.mseLearning.durableStatus(), 'the durable queue is visible to the host')
   retryClock.advance(250)
   assert.equal(ctx.mseLearning.engine.status().verified, 1, 'the replay settles exactly once')
   assert.equal(new Set(retryPayloads).size, 1, 'every attempt replays one frozen payload')
@@ -269,7 +282,7 @@ try {
   assert.equal(ctx.mseLearning.lastRecall(retryAgent.session.id).outcome, 'verified')
   assert.equal(mseMessages(adapter.requests.at(-1).messages).length, 1,
     'the injected recall is unaffected by the settlement retry')
-  console.log(JSON.stringify({ ok: true, layer: 'real AgentLoop with in-process fixture adapter',
+  console.log(JSON.stringify({ ok: true, layer: 'permission-controlled AgentLoop with in-process fixture adapter',
     settlementRetryThroughAgentLoop: true, settlementRetryAttempts: retryPayloads.length,
     settlementVerifiedOnce: ctx.mseLearning.engine.status().verified,
     statusCommandVisible: true, statusCommandOutsideContext: true, reasonReported: true,

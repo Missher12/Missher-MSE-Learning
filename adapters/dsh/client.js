@@ -213,6 +213,12 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     },
     settleNames: { settled: '已结算', duplicate: '重复（已记录）', retrying: '待重试', exhausted: '重试耗尽',
       failed: '失败', expired: '已过期', stopped: '已停止', capacity: '容量已满', pending: '待处理' },
+    durablePending: '核心待结算', durableTerminal: '核心终态', durableUnreadable: '核心状态不可读',
+    durableNone: '空', pauseState: '用户暂停', pauseNotSet: '未设置', pauseConfirmed: '已确认生效',
+    pausePending: '暂停未确认（{reason}，第 {n} 次）', resumePending: '恢复未确认（{reason}，第 {n} 次）',
+    stopsUnconfirmed: '未确认的精确停止',
+    stopsExhaustedSuffix: '，其中 {n} 已耗尽', stopsClean: '无',
+    savedButControlPending: '设置已保存；持久暂停尚未确认（{reason}），会在下一个人工回合重试。',
     codeNames: {
       core_unavailable: '学习核心未加载（插件可能已停用或加载失败）',
       session_unknown: '该会话不在宿主会话目录中（可能已删除），请重新选择',
@@ -516,6 +522,12 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       filtered_origin: 'Origin filtered' },
     settleNames: { settled: 'Settled', duplicate: 'Duplicate (recorded)', retrying: 'Retrying', exhausted: 'Exhausted',
       failed: 'Failed', expired: 'Expired', stopped: 'Stopped', capacity: 'At capacity', pending: 'Pending' },
+    durablePending: 'Pending in the core', durableTerminal: 'Terminal records', durableUnreadable: 'Core state unreadable',
+    durableNone: 'Empty', pauseState: 'User pause', pauseNotSet: 'Not set', pauseConfirmed: 'Confirmed',
+    pausePending: 'Pause not confirmed ({reason}, attempt {n})',
+    resumePending: 'Resume not confirmed ({reason}, attempt {n})', stopsUnconfirmed: 'Unconfirmed exact stops',
+    stopsExhaustedSuffix: ', {n} exhausted', stopsClean: 'None',
+    savedButControlPending: 'Saved; the durable pause is not confirmed yet ({reason}) and will be retried at the next explicit turn.',
     codeNames: { core_unavailable: 'The learning core is not loaded (plugin disabled or failed to load)',
       session_unknown: 'That session is not in the Host directory (it may be gone); pick another',
       session_required: 'Pick a session first', session_directory_unavailable: 'The Host session directory is unavailable',
@@ -1341,6 +1353,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const enabled = overview?.enabled === true
     const legacy = overview?.legacyOwner === true
     const options = sessionOptions(dict, shell.sessions)
+    // Read-only durable/control view. Absent control state means "unknown", never "confirmed".
+    const durable = controlState?.status === 'ready' ? controlState.payload.runtime?.durable ?? null : null
     const currentRecall = recall !== null && recall.scopeKey === scopeKey ? recall : null
     const currentLessons = lessons !== null && lessons.scopeKey === scopeKey ? lessons : null
     const currentDetail = detail !== null && detail.scopeKey === scopeKey ? detail : null
@@ -1361,7 +1375,11 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const saveRow = (() => {
       const feedback = saveState === null ? null
         : saveState.kind === 'saving' ? h('span', { key: 'f', className: 'mse-hint' }, dict.saving)
-          : saveState.kind === 'saved' ? h('span', { key: 'f', className: 'mse-ok' }, dict.saved)
+          : saveState.kind === 'saved' ? h('span', { key: 'f', className: 'mse-ok' },
+            controlState?.status === 'ready' && controlState.payload.runtime?.durable?.pause?.pending
+              ? fill(dict.savedButControlPending, {
+                reason: codeLabel(dict, controlState.payload.runtime.durable.pause.pending.error) })
+              : dict.saved)
             // A refused write is not a validation problem we can name: the controller has already
             // re-read the document, so the honest next step is to look at the host's values again.
             : saveState.kind === 'failed' ? h('span', { key: 'f', className: 'mse-error' }, dict.reloadNeeded)
@@ -1480,6 +1498,27 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
               : (controlState.payload.runtime?.turnsObserved ?? 0) === 0 ? dict.noRuns
                 : `${recentLine(dict, Array.isArray(currentRecall?.payload?.recent) && currentRecall.payload.recent.length > 0
                   ? currentRecall.payload.recent[currentRecall.payload.recent.length - 1] : null)} · ${fill(dict.runsObserved, { n: controlState.payload.runtime?.turnsObserved ?? 0 })}`],
+            // The durable queue as the CORE sees it, and whether the user's pause is really in
+            // force. Saving the settings document is not this confirmation, so a pause that is
+            // still retrying is shown with its own cause rather than as an effective one.
+            [dict.durablePending, durable === null ? dict.unknown
+              : durable.core?.ok !== true ? dict.durableUnreadable
+                : `${durable.core?.pending ?? 0}${(durable.core?.expired ?? 0) > 0 ? ` (+${durable.core.expired} ${settleLabel(dict, 'expired')})` : ''}`],
+            [dict.durableTerminal, durable?.core?.ok !== true ? dict.unknown
+              : `${settleLabel(dict, 'settled')} ${durable.core?.settled ?? 0} · ${settleLabel(dict, 'stopped')} ${durable.core?.stopped ?? 0}`],
+            // The UNCONFIRMED fact comes first: a first pause can leave `userPaused` null, and
+            // reading that as "not set" would hide a control change that is still retrying. A
+            // resume is a different statement from a pause, so both are named explicitly.
+            [dict.pauseState, durable === null ? dict.unknown
+              : durable.pause?.pending !== null && durable.pause?.pending !== undefined
+                ? fill(durable.pause.pending.paused === true ? dict.pausePending : dict.resumePending,
+                  { reason: codeLabel(dict, durable.pause.pending.error), n: durable.pause.pending.attempts ?? 0 })
+                : durable.pause?.userPaused === true ? dict.pauseConfirmed
+                  : durable.pause?.userPaused === false ? dict.pauseNotSet : dict.unknown],
+            [dict.stopsUnconfirmed, durable?.stops?.unconfirmed > 0
+              ? `${durable.stops.unconfirmed}（${(durable.stops.errors ?? []).map(code => codeLabel(dict, code)).join('，') || codeLabel(dict, 'host_state_unknown')}）` +
+                `${durable.stops.exhausted > 0 ? fill(dict.stopsExhaustedSuffix, { n: durable.stops.exhausted }) : ''}`
+              : dict.stopsClean],
           ]),
           h('p', { key: 'm', className: 'mse-hint' }, dict.masterHintFull),
           h('p', { key: 'r', className: 'mse-hint' }, dict.autoReflectHintFull),

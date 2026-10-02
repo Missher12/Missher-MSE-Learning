@@ -170,7 +170,7 @@ export class MseControl extends TypertRemoteService {
     if (!this.usable(core)) {
       return { ok: false, code: 'core_unavailable', version: text(core?.version ?? this.version, 32),
         generatedAt: Date.now(), settings: null, effective: null, budget: null, review: null,
-        runtime: { jobs: [], jobStatus: null, turnsObserved: null, settlement: null },
+        runtime: { jobs: [], jobStatus: null, turnsObserved: null, settlement: null, durable: null },
         store: null, storeError: null, note: 'installed_active_is_not_learned_or_injected' }
     }
     const settings = core.settings()
@@ -191,7 +191,10 @@ export class MseControl extends TypertRemoteService {
       settings, effective: settings?.effective ?? null,
       budget: settings?.budget ?? null, review: settings?.review ?? null,
       runtime: { jobs: core === null ? [] : jobs, jobStatus: core?.jobs.status() ?? null,
-        turnsObserved: int(core?.observedTurns?.()), settlement: core?.settlementStatus?.() ?? null },
+        turnsObserved: int(core?.observedTurns?.()), settlement: core?.settlementStatus?.() ?? null,
+        // Durable counts and the real confirmation state of the user's pause. Read-only: it is
+        // built from a status read and never becomes the moment a pending control is retried.
+        durable: core?.durableSettlement?.() ?? null },
       store, storeError, note: 'installed_active_is_not_learned_or_injected' }
   }
 

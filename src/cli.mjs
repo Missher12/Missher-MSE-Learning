@@ -5,7 +5,12 @@ import { LearningEngine } from './index.mjs'
 const operations = new Set(['prepare', 'record', 'accept', 'cancel', 'complete', 'status', 'reflectionRequest', 'reflectionResult',
   'reflectionCancel', 'migrate', 'list', 'history', 'evaluate', 'evaluateRegistered', 'checkArtifact',
   'suspend', 'resume', 'rollback', 'exportLesson', 'importLesson', 'evaluationRequest', 'evaluationCancel',
-  'diagnose'])
+  'diagnose',
+  // Durable settlement, for the trusted adapter only. `settlementApply` is called without the
+  // in-process guard: the core's own control state (pause, exact stop, owner, deadline) travels
+  // in the same document and is re-read under the lock, which is the part that must be
+  // authoritative across processes. The adapter re-reads its local permission before each call.
+  'settlementEnqueue', 'settlementStatus', 'settlementApply', 'settlementStop', 'settlementPause'])
 if (process.argv.includes('--help')) {
   process.stdout.write('MSE trusted-host JSON CLI\nSend one JSON object on stdin: {"config":{"stateRoot":"/absolute/private/state","adapterId":"generic"},"op":"status","input":{}}\nOperations: '
     + [...operations].join(', ') + '\nDo not expose evidence, migration or evaluation operations directly as model tools.\n')

@@ -1,8 +1,16 @@
-# 当前发布：MSE Learning 0.9.0-alpha.13
+## 2026-10-03：0.9.0-alpha.15 持久 complete 结算（共享 core + DSH + Hermes）
 
-2026-10-01：本公开仓库从已安装验收的 alpha.13 冻结源码导出，包含 alpha.11 的「设置 → 自我进化」控制面、alpha.12 的原生控件与排版，以及 alpha.13 的带参数 `/mse` 命令路由修复。公开范围仅独立 learning-product，不包含父项目、用户学习库、会话或凭据。
+同一核心、同一主文档、schema2 可选字段。`settlementOutbox`（pending≤64/终态≤32/单项≤4096B/总≤256KiB）与 `settlementControl`（单调代次、用户暂停、精确 stop 墓碑≤64）。抽出无锁 `completeInState` 供 public `complete` 与 `settlementApply` 共用，完成与退休同事务原子提交，不嵌套取锁。接口：`settlementEnqueue`（首事务提交才算 durable，ack 返回 key/payloadHash/deadline/generation）、`settlementStatus`（零写入）、`settlementApply`（严格校验必填 generation；终态优先回读；工作副本试算 complete，失败只提交次数/错误）、`settlementStop`（严格 XOR：raw sessionId 或本 owner 的 key+payloadHash，多余/混合/畸形一律 invalid_input 零写）、`settlementPause`。恢复只重放冻结的 `complete`，且消费冻结的原收据与接受事实（收据被替换即终态 `conflict`）。legacy 无 `sessionHash` 的 receipt 按「不可归属即保守绑定」保护，64 满且无可安全裁剪时明确拒绝控制。DSH 侧：服务就绪驱动恢复（`sessionQuery` 异步完整目录 + `workspaceRegistry` 归档真值，短时快照 + 代次失效；缺服务/异常/截断一律 unknown 且拒绝），归档/删除经 key 寻址精确 stop，dispose 保留 durable；只读配置重算不调度、不恢复、不记忆为「已恢复」。Hermes 侧：新增第 10 个 hook `on_session_finalize`，仅 `platform=cli && reason=session_boundary` 精确停旧 ID；Gateway 按 `old_session_id`；`shutdown`/unload 只停本进程。Node CLI 暴露结算操作（已移除不存在的死 API）。**已知限制**：持锁崩溃受既有 5 分钟死 PID grace 阻挡后只能明确 expired；`lock_busy` 在拿锁前发生，持久处理尝试数与锁争用调用次数是两件事。核心独立验收按轮次如实记：**r2 22 组通过**；**r3 8 组中 7 组通过、1 组失败**（失败项是 `settlementStop` 的 XOR 形态校验）；**r4 再新增 4 组，针对该形态修复做验证**。按函数与依赖字节边界复用已通过部分，不把 r3 的原 8 组整体写成通过。r2 覆盖真实跨进程恢复、SIGKILL 丢响应、双 PID 一次信用、rename 前后故障原子性与近 300 库容量。
 
-运行代码与冻结候选一致；发布时仅补齐 README、本文与 VALIDATION 的版本和历史说明。源码同步不等于另一台电脑已完成安装，schema 1 升级要求见 README。以下记录均为各候选阶段的历史验证，不能作为当前安装状态。
+## 2026-10-03：0.9.0-alpha.14 共享 core 升级（可信学习与精确召回）
+
+第一阶段三项，均由独立审计在 alpha.13 上以真实 core、隔离状态复现，本轮修复并各自带固定样例：
+
+1. **评测任务身份与完整清单身份分离**。`src/cases.mjs` 新增 `caseTaskKey`（只取规范化 prompt：NFKC、零宽字符、空白折叠，不改大小写与标点语义）、共享的严格原始校验 `checkTaskPrompt`（字符串、原长度 ≤400、可打印字符、有效 Unicode、非权威改写）与 `taskIndependence`；协议由 `prompt` **字段是否存在**决定——只要任意行带该字段，全部行都必须通过原始校验，`''`/`null`/数字/自有 `undefined`/控制符/未配对代理项/超长折叠文本一律拒绝，只有完全无该字段才是 legacy。`normalizeCases` 与**共享 core** 的 `evaluationRequest`/`runEvaluation` 都在 ticket、扣费与 runner 之前执行。全部不带 prompt 的旧 trusted-runner 协议保持兼容（其独立性仍由可信宿主保证，`evaluate(trials)` 同属受信证据接口，不声称能从分数证明来源）。完整内容身份仍进 `planIdentity`。未声明的语义重复检测能力不做承诺。
+2. **适用/排除条件进入召回准入**。`src/recall.mjs` 新增 `formatMentions`（按子句判定否定，且**同一格式的每一次出现**都参与极性）、`parseCondition`（**格式包装模板整句匹配**：有限模板（含 `仅/只 <格式表> 导出` 短前缀写法）+ 完整「或」格式表 + 限定词与报表/导出短尾；格式身份取已匹配原子且要求完整词边界（`JSONL`/`NDJSON` 各自成组 ≠ `JSON`；`XLSX`/`XLS`/`Excel` 仍同属既有 `excel` 策划组），同组内每个别名与每次出现分别记录肯定/否定，冲突格式按 unclear 保守拒绝；排除字段的裸格式模板按字段语义判为排除）、`registeredConditions`、`conditionVerdict`；通用措辞只做**整句白名单匹配**且适用/排除两个字段极性分开。`evaluateLessons` 在候选计数前先过条件门禁，`prepare` 与 `diagnose` 同一实现，新增唯一原因码 `condition_blocked` 与门禁标签。**明示能力边界**：不支持理解任意中文场景条件，此类条件按 `condition_unclear` 保守拒绝，不做子串近似。字节与条数上限、作用域、环境、版本、当轮不回灌、已发送不重复均未变。
+3. **满库仍能接收用户纠错**。`put()` 满 300 行时按 `selectEviction` 置换：只限**同作用域**、先过期/停用、其次仅对用户纠错置换最弱的未验证方法候选；`protectedLessonIds` 保护已验证方法、纠错、开放回归反证窗口、receipt `selected[]`/`accepted[]`、在途 job、近期 experiment，以及 `replacedBy` 与 `replaces` 两端的回滚链。受保护时返回明确 `capacity`；`state.evictions` 保存有界最小审计（无经验正文）。其他作用域的经验不会被删除。
+
+**本机验证**：包内 Node 188/188（含 `tests/quality-alpha14.test.mjs` 14 项针对性回归）、Hermes Python 39/39、DSH 与 Hermes 两包 `src/` 逐文件相同、包一致性与原生 Loader 检查。真实模型调用 0；未安装日常、未迁移真实库、未推 Git。第二阶段持久 outbox 仅交付设计说明，未实现。
 
 ## 2026-10-01：0.9.0-alpha.6 alpha.5 收尾修复（A/B/C/D 四组 11 项）
 
@@ -187,3 +195,23 @@ MSE 用一个与宿主无关的持久学习核心，加上 DSH/Cordis、Hermes �
 兼容性还有两项待核验：包的可选精确 peer 仍为 DSH `0.1.5-rc.2`，本轮使用 Cordis `4.0.4` / DSH `0.1.7-rc.2` 的直接 Loader 检查通过，但普通安装器的 peer 解析未验收；旧候选全源码清单与当前 `.gitignore` 有一处哈希差异，冻结安装包哈希及受检运行文件一致。完整清单检查未通过，不能用局部载荷一致代替。
 
 后续最小顺序：修复 MSE-AUD-01 的暂停/结算竞态并覆盖回归；补齐 MSE-AUD-02 的宿主请求阶段证据；再隔离验收安装器和 peer 范围，重新生成新的候选包与清单。每一步单独报告；正式安装、真实模型和 Git 发布另按当时明确授权执行。
+
+## 2026-10-03 alpha.15 精确停止与恢复收口（当前契约补充）
+
+以上历史章节保持其写作时的身份与结论，不改写；以下是 alpha.15 落地后的**当前契约**补充。
+
+- **身份映射是共享协议**：`sessionHash = sha256(UTF-8(sessionId))`（`identity()` 校验后原样返回，长度按 UTF-16
+  单元计 512 上界，不归一化 Unicode）。DSH 按同一规则匹配宿主 ID，Hermes 依据它把 raw-id 停止精确映射到
+  恢复出来的、没有 raw id 的条目。对照验证使用**真实核心写出的** `pending/history.sessionHash`（普通 ID、
+  CJK+emoji、组合/分解重音），不猜 key。
+- **停止按会话生效**：未确认的精确停止只阻断它自己命名的那个会话（raw id、核心公开 `sessionHash`、已确认
+  条目 handle 三种寻址），不再退化为全局门禁，也不放行被停会话；用户暂停才是全局门禁。意图在任何可能等待
+  的锁之前发布，条目被「hold」（取消调度、保留冻结载荷与原 `deadline`、保持可见），确认后按核心返回的
+  hash 精确退休。
+- **收敛不依赖新回合**：DSH 已确认的归档/删除若遇到真实锁忙，由本进程**有界调度**收敛——重试预算摊在整个
+  30 秒窗口内（1/2/4/8/14 秒，最多 6 次提交），解锁后自动退休为 `stopped`，越界则保留可见的未确认状态并
+  停止，不谎称成功、不刷新期限、不在只读路径触发。归档判定按公开 `sessionHash` 对照现有归档集合，不因
+  记录缺少 raw id 而被撤销（`stopStillJustified`）。
+- **运维提示**：回退到同 schema 的旧写者（alpha.13 及更早的 0.9.0）前，必须先 drain/retire 未落账的
+  pending 行，或按升级前的新鲜完整备份配对回滚；旧写者不认识 `settlementOutbox`/`settlementControl`，
+  会让这些行一直悬着。详见 README「数据升级与回退」。

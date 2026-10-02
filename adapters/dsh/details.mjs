@@ -179,7 +179,23 @@ export class MseDetails extends TypertRemoteService {
       const state = text(row?.state, 24) || 'unknown'
       byState[state] = int(byState[state]) + 1
     }
-    return { live: live.length, byState, capacity: MAX_SETTLEMENT_ROWS }
+    // The durable queue is a different fact from the in-process retry list: an entry can be
+    // acknowledged and durable while this process has not attempted it yet, and a terminal row
+    // remembers what actually happened even after a restart.
+    let durable = null
+    try {
+      const status = typeof core.durableStatus === 'function' ? core.durableStatus() : null
+      if (status?.ok === true) {
+        durable = { pending: int(status.counts?.pending), expired: int(status.counts?.expired),
+          terminal: int(status.counts?.terminal), settled: int(status.counts?.settled),
+          stopped: int(status.counts?.stopped),
+          paused: status.control?.userPaused === true, generation: int(status.control?.generation),
+          history: boundedList(status.history ?? [], 8).map(row => ({ key: text(row?.key, 80),
+            state: text(row?.state, 24), outcome: text(row?.outcome, 24), attributed: int(row?.attributed),
+            reason: text(row?.reason, 64), at: int(row?.at) })) }
+      }
+    } catch { durable = null }
+    return { live: live.length, byState, capacity: MAX_SETTLEMENT_ROWS, durable }
   }
 
   /** Version, enablement, store readability, instance-scope counts and budget. No cross-session detail. */

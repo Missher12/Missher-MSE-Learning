@@ -14,6 +14,9 @@ function fixture(t, options = {}) {
   const lesson = engine.record({ eventId: 'correction', source: 'direct_user', kind: 'correction', instruction: '以后导出金额前先转换为数值，再按金额排序' })
   let id = 0
   const bridge = createHarnessBridge({ engine, createMessage: text => ({ id: `plugin-${++id}`, role: 'user', source: { kind: 'plugin', plugin: 'mse-learning' }, content: [{ type: 'text', text }] }), ...options })
+  // The core refuses to settle under unknown host permission, which is the safe default; these
+  // tests are about the bridge, so they state the permission explicitly.
+  bridge.setTrustedGuard(() => true)
   const session = { id: 'session', header: {}, events: [] }
   const message = { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '请导出金额并进行排序' }] }
   const payload = { agent: { session }, step: 1, turn: 1, messages: [message], signal: new AbortController().signal }
@@ -348,7 +351,9 @@ test('the status surface reports the real settlement or a pending write failure'
   // A learning-state write failure must never be displayed as a settled success.
   const failing = fixture(t)
   await failing.bridge.preStep(failing.payload, failing.next)
-  failing.engine.complete = () => { throw Object.assign(new Error('disk unavailable'), { code: 'state_unavailable' }) }
+  // The durable acknowledgement is the first write now, so that is the boundary a storage
+  // failure actually happens at.
+  failing.engine.settlementEnqueue = () => { throw Object.assign(new Error('disk unavailable'), { code: 'state_unavailable' }) }
   failing.end()
   const pending = failing.bridge.lastRecall(failing.session.id)
   assert.equal(pending.outcome, 'pending')

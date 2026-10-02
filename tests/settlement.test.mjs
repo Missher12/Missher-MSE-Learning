@@ -153,15 +153,20 @@ function fixture(t, options = {}) {
   const verify = () => bridge.verification({ sessionId: session.id, turnId: 1, checkId: 'numeric-check',
     passed: true, lessonIds: [lesson.id] })
   const end = (reason = 'completed') => bridge.sessionEvent(session, { type: 'turn/end', data: { turn: 1, reason: { kind: reason } } })
+  // The core refuses to settle under unknown host permission, which is the safe default; these
+  // tests are about the queue and its ordering, so they state the permission explicitly.
+  bridge.setTrustedGuard(() => true)
   return { engine, bridge, session, lesson, clock, step, adopt, verify, end }
 }
 
 test('a transient write failure recovers on retry and credits the lesson exactly once', async t => {
   const f = fixture(t)
   const payloads = []
-  const original = f.engine.complete.bind(f.engine)
+  // The harness now settles through the durable apply, which is the boundary these tests inject at.
+  const original = f.engine.settlementApply.bind(f.engine)
   let failures = 2
-  f.engine.complete = payload => { payloads.push(JSON.stringify(payload)); if (failures-- > 0) throw error('lock_busy'); return original(payload) }
+  f.engine.settlementApply = (...args) => { payloads.push(JSON.stringify(args[0]));
+    if (failures-- > 0) throw error('lock_busy'); return original(...args) }
   const decision = await f.step()
   await f.adopt(decision.messages)
   assert.equal(f.verify(), true)
@@ -188,10 +193,11 @@ test('a transient write failure recovers on retry and credits the lesson exactly
 
 test('a commit that succeeded before the response failed is reported with the recorded result', async t => {
   const f = fixture(t)
-  const original = f.engine.complete.bind(f.engine)
+  // The harness now settles through the durable apply, which is the boundary these tests inject at.
+  const original = f.engine.settlementApply.bind(f.engine)
   let threw = false
-  f.engine.complete = payload => {
-    const result = original(payload)
+  f.engine.settlementApply = (...args) => {
+    const result = original(...args)
     if (!threw) { threw = true; throw error('state_unavailable') }
     return result
   }
@@ -212,9 +218,10 @@ test('a commit that succeeded before the response failed is reported with the re
 
 test('repeated events and timers keep exactly one queued settlement', async t => {
   const f = fixture(t)
-  const original = f.engine.complete.bind(f.engine)
+  // The harness now settles through the durable apply, which is the boundary these tests inject at.
+  const original = f.engine.settlementApply.bind(f.engine)
   let calls = 0
-  f.engine.complete = payload => { calls += 1; throw error('lock_busy') }
+  f.engine.settlementApply = payload => { calls += 1; throw error('lock_busy') }
   const decision = await f.step()
   await f.adopt(decision.messages)
   f.verify()
@@ -231,9 +238,10 @@ test('repeated events and timers keep exactly one queued settlement', async t =>
 
 test('pausing, closing a session and disposing stop retries without rewriting the frozen outcome', async t => {
   const f = fixture(t)
-  const original = f.engine.complete.bind(f.engine)
+  // The harness now settles through the durable apply, which is the boundary these tests inject at.
+  const original = f.engine.settlementApply.bind(f.engine)
   let calls = 0
-  f.engine.complete = payload => { calls += 1; throw error('state_unavailable') }
+  f.engine.settlementApply = payload => { calls += 1; throw error('state_unavailable') }
   const decision = await f.step()
   await f.adopt(decision.messages)
   f.verify()
@@ -266,9 +274,11 @@ test('pausing, closing a session and disposing stop retries without rewriting th
 test('the settlement queue never reruns a model, tool, reflection or evaluation callback', async t => {
   let reviews = 0
   const f = fixture(t, { review: async () => { reviews += 1 } })
-  const original = f.engine.complete.bind(f.engine)
+  // The harness now settles through the durable apply, which is the boundary these tests inject at.
+  const original = f.engine.settlementApply.bind(f.engine)
   let completeCalls = 0
-  f.engine.complete = payload => { completeCalls += 1; if (completeCalls < 2) throw error('lock_busy'); return original(payload) }
+  f.engine.settlementApply = (...args) => { completeCalls += 1;
+    if (completeCalls < 2) throw error('lock_busy'); return original(...args) }
   const guard = { prepare: f.engine.prepare, accept: f.engine.accept, verifyArtifact: f.engine.checkArtifact,
     evaluate: f.engine.evaluate, reflectRequest: f.engine.reflectionRequest }
   let extra = 0
@@ -291,11 +301,14 @@ test('the settlement queue never reruns a model, tool, reflection or evaluation 
 
 test('a late result is written to its own turn and never onto the newest turn', async t => {
   const f = fixture(t)
-  const original = f.engine.complete.bind(f.engine)
+  // The harness now settles through the durable apply, which is the boundary these tests inject at.
+  const original = f.engine.settlementApply.bind(f.engine)
+  // The durable apply is addressed by its frozen handle, not by turn identity, so the injected
+  // failure is keyed on the call order: the first attempt (turn 1) fails, the retry succeeds.
   let failures = 1
-  f.engine.complete = payload => {
-    if (payload.turnId === '1' && failures-- > 0) throw error('lock_busy')
-    return original(payload)
+  f.engine.settlementApply = (...args) => {
+    if (failures-- > 0) throw error('lock_busy')
+    return original(...args)
   }
   const first = await f.step(1)
   await f.adopt(first.messages)
@@ -398,4 +411,51 @@ test('an injected receipt conversion bounds the settlement the queue actually re
   assert.equal(broken.entry('broken').deadline, clock.now() + 300_000)
   queue.dispose()
   broken.dispose()
+})
+
+test('a read-only enablement recompute neither writes nor resumes the queue', async t => {
+  const f = fixture(t)
+  const realApply = f.engine.settlementApply.bind(f.engine)
+  let applies = 0
+  // The first attempt fails transiently, so one item is waiting when the read happens.
+  f.engine.settlementApply = (...args) => { applies += 1
+    throw Object.assign(new Error('busy'), { code: 'lock_busy' }) }
+  const decision = await f.step()
+  await f.adopt(decision.messages)
+  f.verify()
+  f.end()
+  assert.equal(applies, 1)
+  assert.equal(f.bridge.settlementStatus().length, 1, 'one item is waiting')
+  f.engine.settlementApply = (...args) => { applies += 1; return realApply(...args) }
+
+  // Recomputing enablement while answering a read must not schedule anything: looking at the
+  // settings page cannot be what settles work.
+  f.bridge.setEnabled(false, { resume: false })
+  f.bridge.setEnabled(true, { resume: false })
+  await settled()
+  assert.equal(applies, 1, 'a read-only recompute never attempts a settlement')
+  assert.equal(f.bridge.settlementStatus().length, 1)
+
+  // The explicit lifecycle moment still resumes the same item, with its original deadline.
+  const deadline = f.bridge.settlementStatus()[0].deadline
+  f.bridge.setEnabled(true, { resume: true })
+  f.clock.advance(250)
+  await settled()
+  assert.equal(applies, 2, 'an explicit resume retries the pending item')
+  assert.ok(f.bridge.settlementStatus().length <= 1)
+  void deadline
+})
+
+test('an entry that waits behind a temporary gate is bounded by its deadline, not by four tries', () => {
+  const clock = fakeClock()
+  let attempts = 0
+  const queue = new SettlementQueue({ now: clock.now, schedule: clock.schedule, cancel: clock.cancel,
+    complete: () => { attempts += 1; throw Object.assign(new Error('paused'), { code: 'settlement_paused' }) },
+    isTransient: error => error?.code === 'settlement_paused', maxAgeMs: 60_000 })
+  queue.enqueue({ key: 'k', payload: { turnId: '1' }, sessionId: 's', deadline: clock.now() + 60_000, maxAttempts: 20 })
+  queue.attempt('k')
+  for (let round = 0; round < 8; round++) clock.advance(4000)
+  assert.ok(attempts > 4, 'a gate refusal keeps waiting for its resume instead of exhausting at four')
+  assert.equal(queue.status().length, 1)
+  assert.equal(queue.status()[0].state, 'pending')
 })

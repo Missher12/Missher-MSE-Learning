@@ -27,10 +27,15 @@ export const REASON_LABELS = Object.freeze({
   [RECALL_REASONS.conflictUnresolved]: '偏好冲突未解决（未落库，旧规则保持）',
   [RECALL_REASONS.turnClosed]: '本轮已结束',
   [RECALL_REASONS.filteredOrigin]: '非用户来源',
+  [RECALL_REASONS.conditionBlocked]: '条件不满足（已按适用/排除条件跳过）',
 })
 
 const GATE_LABELS = Object.freeze({
   no_overlap: '无共同主题词',
+  // The two condition gates are reported by their canonical names, which is also what
+  // `conditionVerdict` returns; a mismatch here would mislabel every condition refusal.
+  condition_excluded: '明确排除（排除条件命中）',
+  condition_not_applicable: '不适用（适用条件未满足）',
   weak_only: '只有通用动作词',
   no_topic_term: '缺主题词',
   single_term: '只有单一主题词',

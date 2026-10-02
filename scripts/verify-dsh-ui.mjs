@@ -15,12 +15,16 @@
  *   • the switches write through the host settings document (the profile patch changes) and the
  *     page re-reads the effective state straight away, without a manual refresh;
  *   • the value survives a full Host restart, and the page stays usable while paused;
- *   • reading the page never rewrites the learning store.
+ *   • reading the page rewrites NEITHER the learning store nor any session budget file;
+ *   • an explicit PAUSE/RESUME save is a real control write: it must bump the control generation
+ *     and the document revision, and it must still leave lessons, receipts, events, jobs, spends
+ *     and every session budget file exactly as they were (alpha.15 makes the control write
+ *     durable, so "byte-identical across a save" is no longer the contract).
  */
 import { createRequire } from 'node:module'
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -32,7 +36,24 @@ const option = (name, fallback) => {
   const index = args.indexOf(`--${name}`)
   return index === -1 ? fallback : args[index + 1]
 }
-const artifact = resolve(option('tgz', ''))
+// A real packed artifact is REQUIRED. Resolving an absent `--tgz` would silently point at the
+// current working directory and "install" whatever happens to be there. The value is type-checked
+// first: with `--tgz` as the LAST argument `option()` returns `undefined`, and calling a string
+// method on it would throw before the usage message could ever be printed.
+const usage = 'usage: node scripts/verify-dsh-ui.mjs --tgz <package.tgz> --out <evidence-dir> ' +
+  '[--port 4399] [--keep]\n--tgz is required: it must name a packed .tgz FILE.'
+const tgzOption = option('tgz', '')
+if (typeof tgzOption !== 'string' || tgzOption.trim() === '' || tgzOption.startsWith('--')) {
+  console.error(usage)
+  process.exit(2)
+}
+const artifact = resolve(tgzOption)
+let artifactStat = null
+try { artifactStat = statSync(artifact) } catch { artifactStat = null }
+if (!artifact.endsWith('.tgz') || artifactStat === null || !artifactStat.isFile()) {
+  console.error(`${usage}\ngot: ${artifact} (a real .tgz file is required, not a directory or a name only)`)
+  process.exit(2)
+}
 const out = resolve(option('out', join(tmpdir(), 'mse-ui-evidence')))
 const port = Number(option('port', '4399'))
 const keep = args.includes('--keep')
@@ -67,6 +88,45 @@ const storeState = () => {
   if (!existsSync(path)) return null
   const bytes = readFileSync(path)
   return { sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length, mtimeMs: statSync(path).mtimeMs }
+}
+/**
+ * The control generation a document really has. A schema-2 document without `settlementControl` is
+ * LEGAL (the fixture seeds exactly that), and the core's own public default for it is generation 1
+ * with `userPaused: false` (`src/index.mjs`, `controlOf`). Comparing against `undefined` would make
+ * the control-write assertion unfalsifiable, so the absent field is read as that default.
+ */
+const controlGeneration = document => {
+  const generation = document?.settlementControl?.generation
+  return Number.isSafeInteger(generation) ? generation : 1
+}
+const controlPaused = document => document?.settlementControl?.userPaused === true
+/**
+ * The store PARSED, so a check can tell a control write (revision + `settlementControl`) apart
+ * from the content that write must never touch.
+ */
+const storeDocument = () => {
+  const path = join(home, 'mse-learning/lessons-v1.json')
+  return existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : null
+}
+/**
+ * Facts an explicit control write is FORBIDDEN to change. `revision` and `settlementControl` are
+ * deliberately absent: a persisted pause/resume is exactly a new generation and a new revision,
+ * which is what the save checks assert instead.
+ */
+const protectedFacts = document => {
+  if (document === null) return null
+  const { lessons, receipts, events, sessions, experiments, jobs, spends } = document
+  return { lessons, receipts, events, sessions, experiments, jobs, spends, schema: document.schema,
+    owner: document.owner }
+}
+/** Every session budget file, by name and bytes — they must never move under a settings save. */
+const sessionBytes = () => {
+  const directory = join(home, 'mse-learning/sessions')
+  if (!existsSync(directory)) return {}
+  return Object.fromEntries(readdirSync(directory).sort().map(name => {
+    const bytes = readFileSync(join(directory, name))
+    return [name, createHash('sha256').update(bytes).digest('hex')]
+  }))
 }
 /** The profile patch is where a settings save really lands; read it, never write it. */
 const patchPath = () => join(home, 'profiles', profile, 'cordis.patch.yml')
@@ -169,6 +229,9 @@ try {
   await shot(page, '01-host-chat-turn')
 
   const before = storeState()
+  // The read-only baseline also carries the session budget files: nothing on this page may write
+  // either of them just because it was displayed.
+  const beforeReadSessions = sessionBytes()
   // Any host dialog raised by the turn (for example "no model configured") owns a mask that
   // would swallow the navigation click; clear overlays before each step of the page under test.
   const dismissOverlays = async () => {
@@ -305,7 +368,16 @@ try {
   check('the switch reflects the edit before saving', await masterSwitch.getAttribute('aria-checked') === 'false')
   check('editing enables saving', await saveButton.isEnabled())
   check('discarding is offered once the draft differs', await discardButton.isEnabled())
+  // --- window A: pure reads never rewrite the learning store -------------------
+  check('reading the page (before any save) never rewrites the learning store',
+    JSON.stringify(storeState()) === JSON.stringify(before),
+    `${JSON.stringify(before)} vs ${JSON.stringify(storeState())}`)
+  check('reading the page (before any save) never rewrites a session budget file',
+    JSON.stringify(sessionBytes()) === JSON.stringify(beforeReadSessions))
+  // --- window B: an explicit save is a real control write ----------------------
   const beforeSave = storeState()
+  const beforeSaveDocument = storeDocument()
+  const beforeSaveSessions = sessionBytes()
   await saveButton.click()
   await page.waitForTimeout(2000)
   const savedText = await text()
@@ -445,10 +517,33 @@ try {
   await shot(page, '07-budget')
 
   const after = storeState()
-  check('page reads and setting saves never rewrite the learning store',
-    JSON.stringify(beforeSave) === JSON.stringify(after), `${JSON.stringify(beforeSave)} vs ${JSON.stringify(after)}`)
+  const afterDocument = storeDocument()
+  // A persisted pause/resume is a real control transaction: it MUST bump the control generation
+  // and the document revision, and it MUST leave every piece of learning content alone. The old
+  // single check ("byte-identical across the saves") described the pre-alpha.15 in-memory
+  // behaviour and could never hold once the control write became durable.
+  check('the explicit pause+resume save really committed a control transaction',
+    controlGeneration(afterDocument) > controlGeneration(beforeSaveDocument)
+    && afterDocument?.revision > beforeSaveDocument?.revision
+    && controlPaused(afterDocument) === false,
+    `generation ${controlGeneration(beforeSaveDocument)}→${controlGeneration(afterDocument)}, ` +
+    `revision ${beforeSaveDocument?.revision}→${afterDocument?.revision}, ` +
+    `userPaused after=${controlPaused(afterDocument)}`)
+  check('the control transaction left every learning fact and session budget untouched',
+    JSON.stringify(protectedFacts(afterDocument)) === JSON.stringify(protectedFacts(beforeSaveDocument))
+    && JSON.stringify(sessionBytes()) === JSON.stringify(beforeSaveSessions),
+    'lessons/receipts/events/sessions/jobs/spends must not move under a control write')
+  // The restart baseline is the state AFTER the last save: comparing a later read against a
+  // pre-save snapshot would be the same stale assumption in another place.
+  const afterSave = storeState()
+  const afterSaveSessions = sessionBytes()
   check('the page produced no browser errors', pageErrors.length === 0, pageErrors.slice(0, 3).join(' | '))
-  report.phases.push({ phase: 'settings-save', before: beforeSave, after, patch: patchState()?.row ?? '' })
+  report.phases.push({ phase: 'settings-save', before: beforeSave, after,
+    generation: controlGeneration(beforeSaveDocument),
+    generationAfter: controlGeneration(afterDocument),
+    userPausedAfter: controlPaused(afterDocument),
+    revision: beforeSaveDocument?.revision ?? null, revisionAfter: afterDocument?.revision ?? null,
+    patch: patchState()?.row ?? '' })
 
   const errorsBeforeRestart = pageErrors.slice()
   report.errorsBeforeRestart = errorsBeforeRestart
@@ -489,8 +584,10 @@ try {
   const restartRow = /name: '@missher\/dsh-mse-learning'[\s\S]*?(?=\n\s*- id:|$)/u.exec(composedRestart)?.[0] ?? ''
   check('the composed configuration after the restart still runs enabled',
     restartRow.includes('name:') && !restartRow.includes('enabled: false'), restartRow.trim().slice(0, 240))
-  check('the restarted page still reads the library',
-    JSON.stringify(storeState()) === JSON.stringify(beforeSave))
+  check('the restarted page still reads the library unchanged since the last save',
+    JSON.stringify(storeState()) === JSON.stringify(afterSave))
+  check('the restart changed no session budget file',
+    JSON.stringify(sessionBytes()) === JSON.stringify(afterSaveSessions))
   await shot(page, '10-after-restart')
 
   // ---------------------------------------------------------------- size / theme matrix

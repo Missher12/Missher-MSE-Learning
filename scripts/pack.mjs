@@ -11,7 +11,10 @@ const dshOnly = process.argv.includes('--dsh-only')
 if (!dshOnly && !readFileSync(join(root, 'adapters/hermes/plugin.yaml'), 'utf8').includes(`version: "${pkg.version}"`)) {
   throw new Error('Hermes has an independent version; use --dsh-only for this DSH candidate')
 }
-const dist = resolve(root, 'dist', pkg.version)
+// `--dist <dir>` lets one release build into its own delivery directory without touching an
+// earlier candidate. The default stays `dist/<version>`.
+const distFlag = process.argv.indexOf('--dist')
+const dist = distFlag === -1 ? resolve(root, 'dist', pkg.version) : resolve(root, process.argv[distFlag + 1] ?? '')
 mkdirSync(dist, { recursive: true })
 if (readdirSync(dist).some(name => name.endsWith('.tgz') || name.endsWith('.tar.gz') || name === 'candidate-manifest.json')) {
   throw new Error('candidate_exists: preserve prior artifacts; build from a fresh isolated source copy')
