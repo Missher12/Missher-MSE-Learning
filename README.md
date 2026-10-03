@@ -1,5 +1,37 @@
 # MSE Learning 0.9.0-alpha.15
 
+[← 桌面端与安装包](https://github.com/Missher12/Missher-DeepseekHarness-Desktop) · [全部插件](https://github.com/Missher12/Missher-DeepseekHarness-Desktop/blob/main/plugins/README.zh.md) · [通用安装指南](https://github.com/Missher12/Missher-DeepseekHarness-Desktop/blob/main/docs/cookbook/install-cordis-plugins.zh.md)
+
+## 新手上手：MSE 持久学习
+
+保存明确的用户纠错和适用方法，在后续相关任务中按预算召回，并记录采用、评估与停用结果。
+
+| 你需要知道的事 | 说明 |
+| --- | --- |
+| 插件包名 | `@missher/dsh-mse-learning` |
+| 当前源码版本 | `0.9.0-alpha.15` |
+| 装好后在哪里使用 | DSH 的 MSE 设置；会话命令 /mse、/mse why |
+| 下载 / 源码 | [查看当前源码与包信息](https://github.com/Missher12/Missher-MSE-Learning)（当前源码版本没有对应的正式 Release，勿把旧 Release 当作最新版） |
+
+### 安装、启用与第一次使用
+
+1. 先从[桌面端主页](https://github.com/Missher12/Missher-DeepseekHarness-Desktop)下载适合电脑的应用，完成模型配置。这个仓库是可选插件，不是独立桌面应用。
+2. 阅读[通用安装指南](https://github.com/Missher12/Missher-DeepseekHarness-Desktop/blob/main/docs/cookbook/install-cordis-plugins.zh.md)及本页原有安装说明，核对宿主与插件版本。桌面版使用“插件 → 添加插件”；Web/CLI 使用自己的目标配置组，不混用两种安装位置。
+3. 安装后按宿主提示启用并重新加载，进入上表列出的入口。更新已有插件前保留配置和数据，不同时启用旧包名与新包名。
+4. 安装后先查看 MSE 状态和 /mse why。检查经验是否符合当前任务、是否受到预算限制，不把“安装成功”当成“已学会”。
+
+### 使用前了解这些边界
+
+不会训练模型权重，也不保证每条经验都被模型遵循。经验与评估数据留在本机，Git 中只发布产品代码。
+
+如果页面或功能没出现，先检查当前应用版本、插件是否启用以及加载错误。反馈时附版本、复现步骤和已脱敏错误；不要上传 API Key、真实会话、账号 Cookie 或学习数据库。Git 中的代码更新不会自动替换电脑上已安装的插件。
+
+### 继续阅读
+
+下文保留本插件的详细行为、配置、开发和验证说明。跨平台是否实际通过，以对应版本的验证记录为准；桌面安装包能启动，不代表全部插件和外部服务都已验收。
+
+---
+
 供 DSH、Hermes 和其他 Agent 接入的持久学习核心。保存明确用户纠错，在任务中限额召回；推断方法经过比较评测或登记算法回归后才进入日常召回。采用、独立检查、负面证据、停用、替代和回滚形成同一个有版本的闭环。
 
 ## 本版行为
