@@ -1,9 +1,19 @@
 {
   "name": "@missher/dsh-mse-learning",
-  "version": "0.9.0-alpha.15",
+  "version": "0.9.0-alpha.16",
   "private": true,
   "type": "module",
   "description": "Scoped persistent lessons with bounded context for Agent adapters",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Missher12/Missher-MSE-Learning.git"
+  },
+  "homepage": "https://github.com/Missher12/Missher-MSE-Learning#readme",
+  "bugs": {
+    "url": "https://github.com/Missher12/Missher-MSE-Learning/issues"
+  },
+  "keywords": ["dsh-plugin", "persistent-learning", "memory", "agent"],
   "engines": {
     "node": ">=22.19.0"
   },
@@ -33,10 +43,10 @@
     "adapters/hermes/bridge.py",
     "adapters/hermes/plugin.yaml",
     "README.md",
-    "docs/ADAPTER_PROTOCOL.md",
+    "README.en.md",
+    "docs",
     "LICENSE",
-    "cordis.patch.yml",
-    "docs/DURABLE_SETTLEMENT_OUTBOX.md"
+    "cordis.patch.yml"
   ],
   "dsh": {
     "bundle": {

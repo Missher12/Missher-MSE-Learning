@@ -21,6 +21,8 @@ assert.ok(dist, 'usage: node scripts/pack-source.mjs [--out <directory>]')
 mkdirSync(dist, { recursive: true })
 const name = `mse-learning-${pkg.version}-source.tar.gz`
 const target = join(dist, name)
+assert.ok(!existsSync(target) && !existsSync(join(dist, 'source-archive.json')),
+  'candidate_exists: preserve prior source artifacts; choose a new output directory')
 
 const sha = path => createHash('sha256').update(readFileSync(path)).digest('hex')
 const MAC_METADATA = name => name.startsWith('/') || name.split('/').some(part =>

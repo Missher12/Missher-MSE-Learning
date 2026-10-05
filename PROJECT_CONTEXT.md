@@ -1,3 +1,7 @@
+# 公开产品上下文
+
+2026-10-05：DSH alpha.16 仅为 MARKET-20261005 包装修订，业务代码与已验收 alpha.15 相同。当前使用及验证边界见 [README](README.md)；下面为带日期的研发历史，既有“未安装/未发布”等状态不代表本轮。原生业务源码与公开导出分工保持，真实数据不入库。
+
 ## 2026-10-03：0.9.0-alpha.15 持久 complete 结算（共享 core + DSH + Hermes）
 
 同一核心、同一主文档、schema2 可选字段。`settlementOutbox`（pending≤64/终态≤32/单项≤4096B/总≤256KiB）与 `settlementControl`（单调代次、用户暂停、精确 stop 墓碑≤64）。抽出无锁 `completeInState` 供 public `complete` 与 `settlementApply` 共用，完成与退休同事务原子提交，不嵌套取锁。接口：`settlementEnqueue`（首事务提交才算 durable，ack 返回 key/payloadHash/deadline/generation）、`settlementStatus`（零写入）、`settlementApply`（严格校验必填 generation；终态优先回读；工作副本试算 complete，失败只提交次数/错误）、`settlementStop`（严格 XOR：raw sessionId 或本 owner 的 key+payloadHash，多余/混合/畸形一律 invalid_input 零写）、`settlementPause`。恢复只重放冻结的 `complete`，且消费冻结的原收据与接受事实（收据被替换即终态 `conflict`）。legacy 无 `sessionHash` 的 receipt 按「不可归属即保守绑定」保护，64 满且无可安全裁剪时明确拒绝控制。DSH 侧：服务就绪驱动恢复（`sessionQuery` 异步完整目录 + `workspaceRegistry` 归档真值，短时快照 + 代次失效；缺服务/异常/截断一律 unknown 且拒绝），归档/删除经 key 寻址精确 stop，dispose 保留 durable；只读配置重算不调度、不恢复、不记忆为「已恢复」。Hermes 侧：新增第 10 个 hook `on_session_finalize`，仅 `platform=cli && reason=session_boundary` 精确停旧 ID；Gateway 按 `old_session_id`；`shutdown`/unload 只停本进程。Node CLI 暴露结算操作（已移除不存在的死 API）。**已知限制**：持锁崩溃受既有 5 分钟死 PID grace 阻挡后只能明确 expired；`lock_busy` 在拿锁前发生，持久处理尝试数与锁争用调用次数是两件事。核心独立验收按轮次如实记：**r2 22 组通过**；**r3 8 组中 7 组通过、1 组失败**（失败项是 `settlementStop` 的 XOR 形态校验）；**r4 再新增 4 组，针对该形态修复做验证**。按函数与依赖字节边界复用已通过部分，不把 r3 的原 8 组整体写成通过。r2 覆盖真实跨进程恢复、SIGKILL 丢响应、双 PID 一次信用、rename 前后故障原子性与近 300 库容量。
@@ -121,15 +125,15 @@ Codex 独立复验 `dist/review-20261001-alpha6/REVIEW.md` 复现 5 项后，本
 
 2026-09-29 追加 UI-REFINE：当前 DSH 包名统一为 `@missher/dsh-mse-learning`，配置和存储标识保留。此处为源码候选；本轮安装与验收以协调目录 `coordination/2026-09-29/ui-refinements/` 的回执为准，下面的版本与透明空格等描述保留为历史。
 
-更新：2026-09-29。本文件仅描述 `learning-product/`；工作区分工以 [PROJECT_GOVERNANCE.md](/Users/missher/Documents/Deepseek-harness-Cordis/PROJECT_GOVERNANCE.md) 为准。当前执行 UPGRADE-20260929 中 MSE 独立导出的 DSH 兼容适配，不参与其他插件业务开发。
+更新：2026-09-29。本文件仅描述 `learning-product/`；工作区分工以 PROJECT_GOVERNANCE.md（维护者本机历史记录，未随公开产品分发） 为准。当前执行 UPGRADE-20260929 中 MSE 独立导出的 DSH 兼容适配，不参与其他插件业务开发。
 
 ## 当前兼容性候选：0.8.0-alpha.3 / DSH 0.2.0-rc.1
 
 - 唯一源码入口不变。基于父工作树 `5dc7842964a6fdf4113ad115d89be3a08c433027` 及前次 alpha.2 的既有未提交改动继续工作，保留旧包、旧文档和既有修改。
-- 只读 SDK：`/Users/missher/Documents/Projects/03-DeepSeek-Harness/升级候选/cordis-0.2.0-rc.1-20260929`，HEAD `c7c457e5e07fa11a04bf8764d5f89585d789f258`。先验证真实 AgentLoop 中的用户消息、session/event、tools/result、复盘路由及卸载行为，再将 llm peer 精确改为 `0.2.0-rc.1`；不使用通配声明或版本豁免。
+- 只读 SDK：`维护者本机历史路径（未随公开产品分发）`，HEAD `c7c457e5e07fa11a04bf8764d5f89585d789f258`。先验证真实 AgentLoop 中的用户消息、session/event、tools/result、复盘路由及卸载行为，再将 llm peer 精确改为 `0.2.0-rc.1`；不使用通配声明或版本豁免。
 - 新增 `scripts/verify-dsh-agent.mjs`，只注册内存 fixture adapter，不调用真实供应商。它分别验证原适配业务代码及最终候选的行为，和安装准入验证分层报告。
 - 学习核心与 DSH 适配业务代码无修改；Hermes 目录（包括 alpha.2 manifest）、配置和部署无修改。新增 `pack:dsh` / `--dsh-only` 只生成 DSH npm 候选和来源清单，避免随 DSH 升级产生未经授权的 Hermes 新版。
-- 本轮候选输出：`dist/0.8.0-alpha.3/`。分层验收、包 SHA256 及剩余限制见 [专属升级回执](/Users/missher/Documents/Deepseek-harness-Cordis/coordination/2026-09-29/upgrade-020/mse.md)。安装由协调会话统一审核执行；本会话不写生产 profile、不重启应用、不提交/推送 Git。
+- 本轮候选输出：`dist/0.8.0-alpha.3/`。分层验收、包 SHA256 及剩余限制见 专属升级回执（维护者本机历史记录，未随公开产品分发）。安装由协调会话统一审核执行；本会话不写生产 profile、不重启应用、不提交/推送 Git。
 - 已知 MSE-AUD-01/02 继续保留为历史待修问题，本次没有扩大为学习算法或后台控制器重构。字节预算、状态作用域和数据格式均保留。
 
 ## 2026-09-28 兼容性修复历史：0.8.0-alpha.2
@@ -142,13 +146,13 @@ Codex 独立复验 `dist/review-20261001-alpha6/REVIEW.md` 复现 5 项后，本
 
 ## 首轮审查基线与历史记录
 
-- 唯一源码入口：`/Users/missher/Documents/Deepseek-harness-Cordis/mse/learning-product`。
+- 唯一源码入口：`维护者本机历史路径（未随公开产品分发）`。
 - 父工作树 HEAD：`5dc7842964a6fdf4113ad115d89be3a08c433027`；该提交中的产品目录 tree：`662e575cfbf3ddcdbe57f26c55575bb50d931e29`。审查开始时工作树干净。
 - 产品版本仍为 `0.8.0-alpha.1`；npm 清单的 `private: true` 保留。这是独立的新学习路径，不能按版本号直接覆盖旧 MSE/Hermes 产品。
-- [2026-09-28 Git 同步记录](/Users/missher/Documents/Deepseek-harness-Cordis/GIT-PUSH-20260928-REFRESH.md) 记载：仅本目录导出到公开 `Missher12/mse-learning`，公开 main 为 `60aa2ddb04c6e559a21b17950ec59a5092b639bd`。这是协调记录，本轮没有联网重新核验远端。父仓库仍按私有范围处理。
-- [VALIDATION.md](/Users/missher/Documents/Deepseek-harness-Cordis/mse/learning-product/VALIDATION.md) 是 **2026-09-26 的历史实验记录**；其中“当前代码未提交”不代表本轮状态，历史真实模型实验也不算本轮实测。原文保留用于追溯。
-- 工作区根 [PROJECT_CONTEXT.md](/Users/missher/Documents/Deepseek-harness-Cordis/PROJECT_CONTEXT.md)、[HANDOVER.md](/Users/missher/Documents/Deepseek-harness-Cordis/HANDOVER.md) 及父项目旧文档保留历史用途，不作为全工作区或本产品的最新总表。
-- 本轮完整证据、限制和后续建议见 [MSE 审查回执](/Users/missher/Documents/Deepseek-harness-Cordis/coordination/2026-09-28/mse.md)。新增文档未提交、未推送；旧授权不延续为新 Git 操作授权。
+- 2026-09-28 Git 同步记录（维护者本机历史记录，未随公开产品分发） 记载：仅本目录导出到公开 `Missher12/mse-learning`，公开 main 为 `60aa2ddb04c6e559a21b17950ec59a5092b639bd`。这是协调记录，本轮没有联网重新核验远端。父仓库仍按私有范围处理。
+- [VALIDATION.md](VALIDATION.md) 是 **2026-09-26 的历史实验记录**；其中“当前代码未提交”不代表本轮状态，历史真实模型实验也不算本轮实测。原文保留用于追溯。
+- 工作区根 PROJECT_CONTEXT.md（维护者本机历史记录，未随公开产品分发）、HANDOVER.md（维护者本机历史记录，未随公开产品分发） 及父项目旧文档保留历史用途，不作为全工作区或本产品的最新总表。
+- 本轮完整证据、限制和后续建议见 MSE 审查回执（维护者本机历史记录，未随公开产品分发）。新增文档未提交、未推送；旧授权不延续为新 Git 操作授权。
 
 ## 产品目标与归属
 
@@ -174,7 +178,7 @@ MSE 用一个与宿主无关的持久学习核心，加上 DSH/Cordis、Hermes �
 - `verified` 必须由可信宿主检查器报告，不能靠普通完成、模型自评或工具零退出自动获得。方法需在两个不同会话被采用并通过检查，且无失败记录，才能成为 `tested`；它仍不是因果效果证明。
 - `host_verifier` 是可信宿主接口契约，不是加密认证。宿主必须守住接口调用权，不能把自授采用、验证或复盘结算直接暴露给模型工具。
 
-实现入口：[核心预算与召回](/Users/missher/Documents/Deepseek-harness-Cordis/mse/learning-product/src/index.mjs:128)、[结果归因](/Users/missher/Documents/Deepseek-harness-Cordis/mse/learning-product/src/index.mjs:198)、[DSH 消息提交确认](/Users/missher/Documents/Deepseek-harness-Cordis/mse/learning-product/adapters/harness.mjs:47)、[Hermes 请求确认](/Users/missher/Documents/Deepseek-harness-Cordis/mse/learning-product/adapters/hermes/bridge.py:92)。
+实现入口：[核心预算与召回](src/index.mjs)、[结果归因](src/index.mjs)、[DSH 消息提交确认](adapters/harness.mjs)、[Hermes 请求确认](adapters/hermes/bridge.py)。
 
 ## 宿主、数据与旧控制器隔离
 

@@ -58,13 +58,16 @@ const out = resolve(option('out', join(tmpdir(), 'mse-ui-evidence')))
 const port = Number(option('port', '4399'))
 const keep = args.includes('--keep')
 const source = process.env.MSE_DSH_SOURCE
-  ?? '/Users/missher/Documents/Projects/03-DeepSeek-Harness/升级候选/cordis-0.2.0-rc.2-20260930'
+const playwrightAnchor = process.env.MSE_PLAYWRIGHT_ANCHOR
+if (!source || !playwrightAnchor) {
+  console.error('Set MSE_DSH_SOURCE to a built DSH checkout and MSE_PLAYWRIGHT_ANCHOR to an absolute package.json path with Playwright installed.')
+  process.exit(2)
+}
 // Host packages the bundle's Host half imports (cordis, the Typert protocol, dsh-llm) are
 // provided by the application, not by the profile: the temporary home is seated under a root
 // whose node_modules stands in for the installed app's tree, exactly as a real install sees it.
 const hostModules = process.env.MSE_DSH_HOST_MODULES ?? ''
-const playwrightRequire = createRequire(process.env.MSE_PLAYWRIGHT_ANCHOR
-  ?? '/Users/missher/Documents/Projects/03-DeepSeek-Harness/源码仓库/Deepseek-harness-Cordis/plugins/dsh-usage-statistics/package.json')
+const playwrightRequire = createRequire(playwrightAnchor)
 const cli = join(source, 'apps/cli/lib/bin.js')
 assert.ok(existsSync(artifact), `artifact exists: ${artifact}`)
 assert.ok(existsSync(cli), `DSH CLI exists: ${cli}`)

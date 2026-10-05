@@ -38,7 +38,7 @@ if (!dshOnly) {
 
 function sources(dir, prefix = '') {
   return readdirSync(dir).sort().flatMap(name => {
-    if (['node_modules', 'dist', '__pycache__'].includes(name) || name.endsWith('.pyc')) return []
+    if (['.git', 'node_modules', 'dist', '__pycache__'].includes(name) || name.endsWith('.pyc')) return []
     const path = join(dir, name), relative = prefix + name
     return statSync(path).isDirectory() ? sources(path, relative + '/') : [{ path: relative, sha256: digest(path) }]
   })

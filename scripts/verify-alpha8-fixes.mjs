@@ -14,8 +14,8 @@ import { pathToFileURL } from 'node:url'
 
 const root = resolve(process.argv[2] ?? new URL('..', import.meta.url).pathname)
 const { LearningEngine } = await import(pathToFileURL(join(root, 'src/index.mjs')))
-const ALPHA6 = '/var/folders/kz/5bh16rnn7yb4frncc7xvngn00000gn/T/mse-review-alpha6-kr7ira6r/src/index.mjs'
-const ALPHA4 = '/tmp/mse-alpha4-recall-audit-baselines-20261001/0.9.0-alpha.4/package/src/index.mjs'
+const ALPHA6 = process.env.MSE_ALPHA6_ENGINE ?? ''
+const ALPHA4 = process.env.MSE_ALPHA4_ENGINE ?? ''
 
 const DAY = 86_400_000
 const results = []
