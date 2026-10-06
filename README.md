@@ -4,7 +4,7 @@
 
 为 DSH 保存按项目隔离的用户纠错与方法候选，在相关任务中限额召回，并记录可信宿主确认的采用和验证结果。它不训练模型权重，也不保证模型永不犯错。
 
-包名：`@missher/dsh-mse-learning`。本版 **0.9.0-alpha.16** 是预发布包装修订：补来源元数据、双语说明与打包文档，保持 alpha.15 的全部 `src/`、`adapters/` 业务文件原样。它与历史产品 `dsh-missher-evolution` 不同，不读取或迁移后者的数据。
+包名：`@missher/dsh-mse-learning`。本版 **0.9.0-alpha.17** 修复经验、召回、任务页的会话选择：优先显示宿主中的对话标题，重名和未命名对话用短 ID 区分。标题仅用于显示，不改变经验归属、召回身份或预算；共享学习核心与 Hermes 适配器保持 alpha.15 原样。它与历史产品 `dsh-missher-evolution` 不同，不读取或迁移后者的数据。
 
 ## 能做什么
 
@@ -23,7 +23,7 @@
 本版 Release 发布后，固定资产地址为：
 
 ```text
-https://github.com/Missher12/Missher-MSE-Learning/releases/download/v0.9.0-alpha.16/missher-dsh-mse-learning-0.9.0-alpha.16.tgz
+https://github.com/Missher12/Missher-MSE-Learning/releases/download/v0.9.0-alpha.17/missher-dsh-mse-learning-0.9.0-alpha.17.tgz
 ```
 
 **桌面版**：打开 **插件 → 添加插件**，粘贴该地址；按宿主提示启用/重新加载。随后打开 **设置 → 自我进化**，核对版本和运行状态。桌面 profile 由应用管理，不使用下方 CLI 命令修改它。
@@ -31,7 +31,7 @@ https://github.com/Missher12/Missher-MSE-Learning/releases/download/v0.9.0-alpha
 **已有 CLI / Web profile**（示例使用 `web`；换成你实际使用的非桌面 profile）：
 
 ```sh
-dsh plugin --profile web add https://github.com/Missher12/Missher-MSE-Learning/releases/download/v0.9.0-alpha.16/missher-dsh-mse-learning-0.9.0-alpha.16.tgz
+dsh plugin --profile web add https://github.com/Missher12/Missher-MSE-Learning/releases/download/v0.9.0-alpha.17/missher-dsh-mse-learning-0.9.0-alpha.17.tgz
 ```
 
 也可下载并校验 Release 的 `SHA256SUMS` 后安装本地同名 `.tgz`。源码推送、Release 下载、市场收录是独立状态；[Releases](https://github.com/Missher12/Missher-MSE-Learning/releases) 中没有本版资产时，这个地址尚不能用于安装。不要使用带版本文件名的 `latest/download` 链接。
@@ -40,7 +40,7 @@ dsh plugin --profile web add https://github.com/Missher12/Missher-MSE-Learning/r
 
 | 环境 | 证据与边界 |
 | --- | --- |
-| macOS Intel + Missher 定制 DSH 0.2.0-rc.2 | alpha.15 已做实际 Loader、设置/命令 RPC、日常加载及数据保留验收；alpha.16 沿用相同业务文件，包装验收单列。 |
+| macOS Intel + Missher 定制 DSH 0.2.0-rc.2 | alpha.15 已做实际 Loader、设置/命令 RPC、日常加载及数据保留验收；alpha.17 增加会话标题读取与选择器显示，隔离标题接口和客户端检查单列；本轮未重做原生视觉验收。 |
 | 纯官方 DSH、后续 DSH 版本、Windows、Ubuntu | 本次不宣称完整通过；宽松 peer `*` 只表示不锁宿主版本，不等于接口兼容。 |
 | Hermes 0.21.1 | alpha.15 曾通过隔离 PluginManager/CLI 验收；本次仅发布 DSH 包，Hermes manifest 仍为 alpha.15，没有新的 Hermes 发布或日常安装。 |
 | 其他 Agent | 可使用 Node SDK/JSON CLI，但需要编写可信生命周期适配；不是安装后自动适配所有 Agent，也不是浏览器 SDK。 |
@@ -59,7 +59,7 @@ dsh plugin --profile web remove @missher/dsh-mse-learning
 
 插件没有卸载删除数据的脚本；包卸载不会主动清除学习库。要删除个人数据，须先停止相关宿主，并由你自行处理备份及该目录。不要删除整个 DSH 数据根或其他插件目录。DSH 与 Hermes 不共用正在写入的学习库；检测到旧 `missherEvolutionCore` 时，新控制器会暂停。
 
-同属 schema 2 的 alpha.15→alpha.16 无需迁移。schema 1 必须显式迁移；降级到不支持持久结算的旧包前，应先让待结算项结束，或同时恢复对应旧包与升级前的完整备份。详见[数据与回退契约](docs/BEHAVIOR.zh.md#数据升级与回退)。
+同属 schema 2 的 alpha.15/alpha.16→alpha.17 无需迁移。schema 1 必须显式迁移；降级到不支持持久结算的旧包前，应先让待结算项结束，或同时恢复对应旧包与升级前的完整备份。详见[数据与回退契约](docs/BEHAVIOR.zh.md#数据升级与回退)。
 
 ## 开发与验证
 

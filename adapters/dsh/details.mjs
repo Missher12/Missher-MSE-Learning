@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Remote, TypertRemoteService, remoteMethods } from '@deepseek-ai/dsh-typert-protocol'
-import { MAX_PROMPT_CHARS, MAX_QUERY_CHARS, STATUSES, bool, boundedList, filterLessons, int, labelOfScope,
+import { MAX_PROMPT_CHARS, MAX_QUERY_CHARS, STATUSES, bool, boundedList, filterLessons, int, labelOfScope, sessionTitle,
   oneOf, pageOf, projectCounts, projectDetail, projectRow, projectSettlement, projectTurn, shortHash, text } from './project.mjs'
 
 /** One method marked as a direct Remote endpoint. */
@@ -125,12 +125,17 @@ export class MseDetails extends TypertRemoteService {
       const live = entry?.live === true
         || (typeof sessions?.get === 'function' && sessions.get(id) !== undefined)
       const agent = typeof agents?.get === 'function' ? agents.get(id) : undefined
-      records.push({ id, createdAt: int(header?.createdAt), at: int(header?.createdAt), origin,
+      const record = { id, createdAt: int(header?.createdAt), at: int(header?.createdAt), origin,
         label: labelOfScope(cwd), projectKey: cwd, scope: cwd === null ? 'instance' : 'project',
         scopeHash: cwd === null ? null : shortHash(cwd),
         live: live === true, persisted: entry?.persisted === true,
         archived: archived === null ? null : archived.has(id),
-        running: agent === undefined || agent === null ? null : agent.status === 'running' })
+        running: agent === undefined || agent === null ? null : agent.status === 'running' }
+      // The listed header rides along for the projection-cache lookup — its lifecycle identity
+      // needs the real version/createdAt/cwd/isSeeded — but it is NOT enumerable, so it can never
+      // appear in an RPC payload, a spread of the row, or a JSON dump of the directory.
+      Object.defineProperty(record, 'header', { value: header, enumerable: false })
+      records.push(record)
     }
     records.sort((left, right) => right.createdAt - left.createdAt || (left.id < right.id ? -1 : 1))
     return { ok: true, code: null, records: records.slice(0, MAX_SESSIONS), scanned: scan.length,
@@ -249,7 +254,35 @@ export class MseDetails extends TypertRemoteService {
     }
   }
 
-  /** The Host's own session directory: ids, trusted scope labels, live/persisted/archived. */
+  /**
+   * The Host's own title for one listed session, or null when no public projection can answer.
+   *
+   * It is read the way the Host's own listings read it (see `sessionTitle`): the live projection
+   * cut for an attached session, the durable cache for a cold one. `header.title` is never
+   * consulted, no log is folded, and one unreadable title is that row's null rather than a failed
+   * directory. Only the rows actually being displayed are asked (the directory is already bounded
+   * to `MAX_SESSIONS`), so a scope resolution never pays for titles.
+   */
+  sessionTitleOf(record) {
+    return sessionTitle({ attached: this.attachedSession(record.id), header: record.header,
+      projections: this.service('sessionProjections'), cache: this.service('sessionProjectionCache') })
+  }
+
+  /** The attached Session object for one id, or undefined when it is not live in this process. */
+  attachedSession(id) {
+    try {
+      const sessions = this.service('sessions')
+      return typeof sessions?.get === 'function' ? sessions.get(id) ?? undefined : undefined
+    } catch { return undefined }
+  }
+
+  /**
+   * The Host's own session directory: ids, trusted scope labels, titles, live/persisted/archived.
+   *
+   * `title` is display-only: it never takes part in the selection value (`id`), the scope identity
+   * (`projectKey`/`scopeHash`/`scope`) or any core identity. A missing title is reported as null
+   * and rendered by the client as an explicit untitled label.
+   */
   async sessions() {
     const directory = await this.directory()
     if (directory.ok !== true) return { ok: false, code: directory.code, sessions: [] }
@@ -257,7 +290,8 @@ export class MseDetails extends TypertRemoteService {
       archivedError: directory.archivedError ?? null, excludedInternal: directory.excluded,
       truncated: directory.truncated === true,
       sessions: directory.records.map(record => ({ id: record.id, createdAt: record.createdAt, at: record.at,
-        label: record.label, scope: record.scope, scopeHash: record.scopeHash, live: record.live,
+        label: record.label, title: this.sessionTitleOf(record), scope: record.scope,
+        scopeHash: record.scopeHash, live: record.live,
         persisted: record.persisted, archived: record.archived, running: record.running })) }
   }
 

@@ -105,12 +105,36 @@ try {
 
   // --- Host services with the documented rc.2 shapes ---
   const createdAt = 1_700_000_000_000
+  const titleReads = []
   const directoryEntries = [
-    { header: { id: 's-created-early', createdAt: createdAt - 5000, cwd: projectKey, origin: 'user' }, live: false, persisted: true },
-    { header: { id: 's-live', createdAt, cwd: projectKey, origin: 'user' }, live: true, persisted: true },
+    { header: { id: 's-created-early', createdAt: createdAt - 5000, cwd: projectKey, origin: 'user', version: 3, isSeeded: false }, live: false, persisted: true },
+    { header: { id: 's-live', createdAt, cwd: projectKey, origin: 'user', version: 3, isSeeded: false }, live: true, persisted: true },
     { header: { id: 's-subagent', createdAt: createdAt + 1, cwd: projectKey, origin: 'subagent', delegationDepth: 1 }, live: true, persisted: true },
-    { header: { id: 's-instance', createdAt: createdAt + 2, origin: 'user' }, live: true, persisted: false },
+    { header: { id: 's-instance', createdAt: createdAt + 2, origin: 'user', version: 3, isSeeded: false }, live: true, persisted: false },
+    // One cold conversation the durable cache can title, one only its predecessor checkpoint can,
+    // and one whose projection throws: a title failure is that row's null, never a failed list.
+    { header: { id: 's-cold-cached', createdAt: createdAt + 3, cwd: projectKey, origin: 'user', version: 3, isSeeded: false }, live: false, persisted: true },
+    { header: { id: 's-cold-predecessor', createdAt: createdAt + 4, cwd: projectKey, origin: 'user', version: 3, isSeeded: false }, live: false, persisted: true },
+    { header: { id: 's-broken-title', createdAt: createdAt + 5, cwd: projectKey, origin: 'user', version: 3, isSeeded: false }, live: false, persisted: true },
   ]
+  // The Host's own projection shapes: `projections.snapshot(session, keys)` for an attached
+  // session, `cache.cachedSnapshot(header, keys)` / `cachedPredecessorTitle(header)` for a cold
+  // one, every answer `{ values: { title } }`.
+  const snapshotOf = title => ({ asOfSeq: 1, values: title === undefined ? {} : { title } })
+  const sessionProjections = {
+    snapshot: (session, keys) => { titleReads.push(['snapshot', session?.id, keys?.join(',')])
+      return session?.id === 's-live' ? snapshotOf('实时标题：重构召回排序') : snapshotOf(undefined) },
+    cachedSnapshot: (session, keys) => { titleReads.push(['projections.cachedSnapshot', session?.id, keys?.join(',')])
+      return undefined },
+  }
+  const sessionProjectionCache = {
+    cachedSnapshot: (header, keys) => { titleReads.push(['cache.cachedSnapshot', header?.id, keys?.join(',')])
+      if (header?.id === 's-cold-cached') return snapshotOf('冷会话标题 📊')
+      if (header?.id === 's-broken-title') throw Object.assign(new Error('projection cache offline'), { code: 'projection_failed' })
+      return undefined },
+    cachedPredecessorTitle: header => { titleReads.push(['cache.cachedPredecessorTitle', header?.id, ''])
+      return header?.id === 's-cold-predecessor' ? snapshotOf('前身标题') : undefined },
+  }
   const ctx = new Context()
   await ctx.plugin(TypertRegistry)
   await ctx.plugin(Gateway)
@@ -118,6 +142,8 @@ try {
   ctx.provide('sessionQuery', { listSessions: async signal => { signal?.throwIfAborted?.(); return directoryEntries } })
   ctx.provide('workspaceRegistry', { archivedSessionIds: ['s-created-early'] })
   ctx.provide('sessions', { get: id => id === 's-live' ? { id, header: directoryEntries[1].header } : undefined })
+  ctx.provide('sessionProjections', sessionProjections)
+  ctx.provide('sessionProjectionCache', sessionProjectionCache)
   ctx.provide('agents', { get: id => id === 's-live' ? { status: 'running' } : undefined })
   ctx.typert.register(TYPERT)
   const recallCalls = []
@@ -198,7 +224,7 @@ try {
     && overview.budget.turnBytes === 768 && overview.budget.sessionBytes === 1536)
   check('overview shows the session directory state instead of a guessed count',
     overview.sessionDirectory.available === true && overview.sessionDirectory.archivedKnown === true
-      && overview.sessionDirectory.excludedInternal === 1 && overview.sessionsKnown === 3,
+      && overview.sessionDirectory.excludedInternal === 1 && overview.sessionsKnown === 6,
     JSON.stringify(overview.sessionDirectory))
   check('overview keeps settlement as aggregates, never another session detail',
     typeof overview.settlement.live === 'number'
@@ -214,6 +240,26 @@ try {
     sessions.sessions.some(row => row.id === 's-instance' && row.persisted === false && row.scope === 'instance'))
   check('the directory excludes sub-agent work instead of showing it as a conversation',
     sessions.excludedInternal === 1 && sessions.sessions.every(row => row.id !== 's-subagent'))
+  // The conversation title is DISPLAY-ONLY: it comes from the Host's own public projections, it
+  // never becomes a selection value or a scope identity, and one unreadable title is one null.
+  const titleOf = id => sessions.sessions.find(row => row.id === id)?.title ?? null
+  check('every listed conversation carries a bounded title field',
+    sessions.sessions.every(row => Object.hasOwn(row, 'title')
+      && (row.title === null || (typeof row.title === 'string' && row.title.length <= 200))))
+  check('an attached conversation is titled from its live projection cut',
+    titleOf('s-live') === '实时标题：重构召回排序', titleOf('s-live'))
+  check('a cold conversation is titled from the durable projection cache',
+    titleOf('s-cold-cached') === '冷会话标题 📊', titleOf('s-cold-cached'))
+  check('a cold conversation falls back to its predecessor-title checkpoint',
+    titleOf('s-cold-predecessor') === '前身标题', titleOf('s-cold-predecessor'))
+  check('a look-alike header field is never used as a title',
+    !Object.hasOwn(directoryEntries[3].header, 'title') || titleOf('s-instance') === null, titleOf('s-instance'))
+  check('a throwing title projection degrades to null instead of failing the directory',
+    titleOf('s-broken-title') === null && sessions.ok === true)
+  check('titles never enter the scope identity or the selection value',
+    sessions.sessions.every(row => typeof row.id === 'string' && row.id.length > 0
+      && (row.scopeHash === null || /^[a-f0-9]{12}$/u.test(row.scopeHash))
+      && !JSON.stringify(row.scopeHash ?? '').includes('标题')))
   check('the directory reports a label and a one-way scope hash, never the path',
     sessions.sessions.every(row => !JSON.stringify(row).includes('/synthetic')
       && (row.scopeHash === null || row.scopeHash.length === 12)))

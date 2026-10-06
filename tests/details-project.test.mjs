@@ -5,8 +5,9 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { LearningEngine } from '../src/index.mjs'
-import { MAX_PAGE_SIZE, MAX_QUERY_CHARS, filterLessons, labelOfScope, pageOf, projectDetail, projectRow,
-  projectSettlement, projectTurn, shortHash } from '../adapters/dsh/project.mjs'
+import { MAX_PAGE_SIZE, MAX_QUERY_CHARS, MAX_TITLE_CHARS, clipCodePoints, filterLessons, labelOfScope, pageOf,
+  projectDetail, projectRow, projectSettlement, projectTurn, sessionTitle, shortHash, titleOfBlock,
+  titleOfWire } from '../adapters/dsh/project.mjs'
 
 const DAY = 86_400_000
 function fixture() {
@@ -163,4 +164,119 @@ test('a stored lesson projects its provenance honestly', () => {
     assert.equal(detail.instruction, stored.instruction)
     return undefined
   } finally { f.cleanup() }
+})
+
+test('a session title comes from the Host projections, never from a header field', () => {
+  const header = { id: 'session-abc', version: 3, createdAt: 1, cwd: '/synthetic/one' }
+  const live = { id: 'session-abc' }
+  // A live session answers from its live projection cut first.
+  assert.equal(sessionTitle({ attached: live, header,
+    projections: { snapshot: () => ({ values: { title: '重构召回排序' } }) },
+    cache: { cachedSnapshot: () => ({ values: { title: 'cached' } }) } }), '重构召回排序')
+  // Its cached cells answer when the live cut carries no title.
+  assert.equal(sessionTitle({ attached: live, header,
+    projections: { snapshot: () => ({ values: {} }), cachedSnapshot: () => ({ values: { title: '已物化' } }) },
+    cache: { cachedSnapshot: () => ({ values: { title: 'cold' } }) } }), '已物化')
+  // A cold (unattached) session answers from the durable cache, then the predecessor checkpoint.
+  assert.equal(sessionTitle({ attachments: undefined, header,
+    cache: { cachedSnapshot: (meta, keys) => keys.includes('title') ? { values: { title: '冷会话标题' } } : undefined } }),
+  '冷会话标题')
+  assert.equal(sessionTitle({ header,
+    cache: { cachedSnapshot: () => undefined, cachedPredecessorTitle: () => ({ values: { title: '前身标题' } }) } }),
+  '前身标题')
+  // A header carrying a look-alike field is NOT a title source, and no log is folded for it.
+  assert.equal(sessionTitle({ header: { ...header, title: '伪造标题', name: 'also fake' }, cache: {} }), null)
+  assert.equal(sessionTitle({ header }), null)
+  assert.equal(sessionTitle({}), null)
+  assert.equal(sessionTitle(), null)
+})
+
+test('a title read is bounded, local to one row, and never throws outward', () => {
+  const header = { id: 'session-quiet', version: 1, createdAt: 0 }
+  const throwing = () => { throw Object.assign(new Error('projection offline'), { code: 'projection_failed' }) }
+  // One failing source must not stop the next one from answering.
+  assert.equal(sessionTitle({ header, cache: { cachedSnapshot: throwing, cachedPredecessorTitle: () => ({ values: { title: 'ok' } }) } }), 'ok')
+  // Everything failing is "no title", never an exception.
+  assert.equal(sessionTitle({ attached: { id: 'x' }, header,
+    projections: { snapshot: throwing, cachedSnapshot: throwing },
+    cache: { cachedSnapshot: throwing, cachedPredecessorTitle: throwing } }), null)
+  // The WIRE view of the host's title unit is `string | null`
+  // (`const titleViewSchema = zod.string().min(1).nullable(); wire.view = state => state`), so a
+  // plain string is the only accepted shape. A folded internal snapshot — the query service's
+  // `readTitleSnapshots` shape, which is bound to its source header — is NOT a wire title and must
+  // never be coerced into one (no `String(value)`, no `value.title`).
+  assert.equal(titleOfBlock({ values: { title: { title: '折叠快照', header: { id: 'x' } } } }), null)
+  assert.equal(titleOfBlock({ values: { title: { text: '对象形态' } } }), null)
+  assert.equal(titleOfBlock({ values: { title: ['标题'] } }), null)
+  assert.equal(titleOfBlock({ values: { title: '' } }), null, 'the wire schema is min(1): empty is not a title')
+  // Shapeless, blank, control-character and non-string values are not titles.
+  assert.equal(titleOfBlock(undefined), null)
+  assert.equal(titleOfBlock({ values: {} }), null)
+  assert.equal(titleOfBlock({ values: { title: '   ' } }), null)
+  assert.equal(titleOfBlock({ values: { title: 42 } }), null)
+  assert.equal(titleOfBlock({ values: { title: 'a\u0000b\u001fc' } }), 'a b c')
+  // Emoji and HTML survive as PLAIN TEXT: nothing here interprets markup.
+  assert.equal(sessionTitle({ header, cache: { cachedSnapshot: () => ({ values: { title: '图表 📊 <b>加粗</b>' } }) } }),
+    '图表 📊 <b>加粗</b>')
+  const long = '标'.repeat(MAX_TITLE_CHARS + 50)
+  assert.equal(titleOfBlock({ values: { title: long } }).length, MAX_TITLE_CHARS)
+})
+
+test('a title is truncated by code point, never by UTF-16 unit', () => {
+  const emoji = '📊'
+  // A pair straddling the bound is dropped whole instead of leaving a lone surrogate.
+  const straddling = 'a'.repeat(MAX_TITLE_CHARS) + emoji
+  const clipped = titleOfBlock({ values: { title: straddling } })
+  assert.equal([...clipped].length, MAX_TITLE_CHARS)
+  assert.equal(clipped.includes(emoji), false, 'the pair is not half-kept')
+  assert.equal(/[\uD800-\uDBFF]$|^[\uDC00-\uDFFF]/u.test(clipped), false, 'no lone surrogate survives')
+  assert.equal(clipped, 'a'.repeat(MAX_TITLE_CHARS))
+  // A pair that fits is kept intact, and a short title is untouched.
+  const fitting = 'a'.repeat(MAX_TITLE_CHARS - 1) + emoji
+  assert.equal(titleOfBlock({ values: { title: fitting } }), fitting)
+  assert.equal(clipCodePoints('图表 📊 统计', 20), '图表 📊 统计')
+  assert.equal(clipCodePoints('📊📊📊', 2), '📊📊')
+  assert.equal(clipCodePoints(undefined), '')
+  assert.equal(clipCodePoints('abcdef', 0), '')
+})
+
+test('an authoritative untitled answer is NOT replaced by a stale cached title', () => {
+  const header = { id: 'session-live', version: 4, createdAt: 9, cwd: '/synthetic/one' }
+  const live = { id: 'session-live' }
+  const stale = { cachedSnapshot: () => ({ values: { title: '旧冷缓存标题' } }),
+    cachedPredecessorTitle: () => ({ values: { title: '更旧的前身标题' } }) }
+  // The live cut ANSWERED with null: the conversation really has no title, so the cache must not
+  // be consulted at all.
+  assert.equal(sessionTitle({ attached: live, header, cache: stale,
+    projections: { snapshot: () => ({ values: { title: null } }) } }), null)
+  // The live cut answered with an empty string (malformed for `min(1)`): answered "no title".
+  assert.equal(sessionTitle({ attached: live, header, cache: stale,
+    projections: { snapshot: () => ({ values: { title: '' } }) } }), null)
+  // The live projection is UNAVAILABLE (no key on the block): the later sources may answer.
+  assert.equal(sessionTitle({ attached: live, header,
+    projections: { snapshot: () => ({ values: {} }) }, cache: stale }), '旧冷缓存标题')
+  // …and when the whole live service is missing, the durable cache answers as before.
+  assert.equal(sessionTitle({ attached: live, header, cache: stale }), '旧冷缓存标题')
+  // A cold session mirrors the host's block-level order: a present block wins over the predecessor.
+  assert.equal(sessionTitle({ header, cache: { cachedSnapshot: () => ({ values: { title: null } }),
+    cachedPredecessorTitle: () => ({ values: { title: '前身标题' } }) } }), null)
+  assert.equal(sessionTitle({ header, cache: { cachedSnapshot: () => undefined,
+    cachedPredecessorTitle: () => ({ values: { title: '前身标题' } }) } }), '前身标题')
+  // The tri-state itself: answered-with-null is different from cannot-answer.
+  assert.equal(titleOfWire({ values: { title: null } }), null)
+  assert.equal(titleOfWire({ values: {} }), undefined)
+  assert.equal(titleOfWire(undefined), undefined)
+})
+
+test('titles are read once per displayed row and never touch the store', () => {
+  const header = { id: 'session-counted', version: 2, createdAt: 5 }
+  let cacheReads = 0
+  let coreCalls = 0
+  const cache = {
+    cachedSnapshot: () => { cacheReads += 1; return { values: { title: '一次读取' } } },
+    cachedPredecessorTitle: () => { coreCalls += 1; return undefined },
+  }
+  assert.equal(sessionTitle({ header, cache }), '一次读取')
+  assert.equal(cacheReads, 1, 'one row asks the cache exactly once')
+  assert.equal(coreCalls, 0, 'the predecessor hint is not consulted after a title was found')
 })

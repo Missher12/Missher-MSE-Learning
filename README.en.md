@@ -4,7 +4,7 @@ English | [中文](README.md) · [Desktop and downloads](https://github.com/Miss
 
 Persists scoped user corrections and method candidates for DSH, recalls relevant lessons within a byte budget, and records adoption and verification established by the trusted host. It does not train model weights or guarantee that a model will never repeat a mistake.
 
-Package: `@missher/dsh-mse-learning`. **0.9.0-alpha.16** is a prerelease packaging revision: repository metadata, bilingual instructions and complete packaged documentation. Every business file under `src/` and `adapters/` remains identical to alpha.15. The historical `dsh-missher-evolution` package is a separate product; this plugin does not read or migrate its data.
+Package: `@missher/dsh-mse-learning`. **0.9.0-alpha.17** fixes the session pickers in lessons, recall and tasks: they show the host conversation title first, with short IDs for duplicate or untitled conversations. Titles are display-only and do not change scope, recall identity or budgets. The shared learning core and Hermes adapter remain identical to alpha.15. The historical `dsh-missher-evolution` package is a separate product; this plugin does not read or migrate its data.
 
 ## Features and cost
 
@@ -23,7 +23,7 @@ Use a configured DSH host with Node.js ≥22.19.0. The tarball contains executab
 Once this version's Release is published, its fixed asset URL is:
 
 ```text
-https://github.com/Missher12/Missher-MSE-Learning/releases/download/v0.9.0-alpha.16/missher-dsh-mse-learning-0.9.0-alpha.16.tgz
+https://github.com/Missher12/Missher-MSE-Learning/releases/download/v0.9.0-alpha.17/missher-dsh-mse-learning-0.9.0-alpha.17.tgz
 ```
 
 **Desktop:** open **Plugins → Add plugin**, paste the URL, then enable/reload as directed by the host. Open **Settings → 自我进化** and inspect the version and state. The desktop profile is managed by the application; do not target it with the CLI example below.
@@ -31,7 +31,7 @@ https://github.com/Missher12/Missher-MSE-Learning/releases/download/v0.9.0-alpha
 **Existing CLI / Web profile:** the example targets `web`; substitute your actual non-desktop profile.
 
 ```sh
-dsh plugin --profile web add https://github.com/Missher12/Missher-MSE-Learning/releases/download/v0.9.0-alpha.16/missher-dsh-mse-learning-0.9.0-alpha.16.tgz
+dsh plugin --profile web add https://github.com/Missher12/Missher-MSE-Learning/releases/download/v0.9.0-alpha.17/missher-dsh-mse-learning-0.9.0-alpha.17.tgz
 ```
 
 Alternatively, download the asset, check it against the Release's `SHA256SUMS`, and install that local `.tgz`. Source publication, downloadable Releases and marketplace acceptance are separate states. If [Releases](https://github.com/Missher12/Missher-MSE-Learning/releases) does not yet contain this version, its download URL is not available. Do not combine a versioned filename with `latest/download`.
@@ -40,7 +40,7 @@ Alternatively, download the asset, check it against the Release's `SHA256SUMS`, 
 
 | Environment | Evidence and limits |
 | --- | --- |
-| Intel macOS with Missher's customized DSH 0.2.0-rc.2 | alpha.15 passed actual Loader, settings/command RPC, daily loading and data-preservation checks. alpha.16 retains those business files; packaging checks are recorded separately. |
+| Intel macOS with Missher's customized DSH 0.2.0-rc.2 | alpha.15 passed actual Loader, settings/command RPC, daily loading and data-preservation checks. alpha.17 adds title projection and picker display; isolated title-interface/client checks are separate. Native visual acceptance was not repeated in this revision. |
 | Unmodified official DSH, later DSH versions, Windows and Ubuntu | Full compatibility is not claimed in this release. Permissive `*` peers do not prove the required interfaces exist. |
 | Hermes 0.21.1 | alpha.15 passed isolated PluginManager/CLI checks. This release packages DSH only; the Hermes manifest stays at alpha.15 and no new Hermes release or daily installation is performed. |
 | Other Agents | A host-independent Node SDK and JSON CLI are available, but a trusted lifecycle adapter is required. This is not automatic support for every Agent or a browser SDK. |
@@ -59,7 +59,7 @@ dsh plugin --profile web remove @missher/dsh-mse-learning
 
 There is no uninstall data-deletion script; removing the package does not actively erase its learning store. If you want to erase personal data, first stop the relevant host, then manage that directory and its backups yourself. Do not delete the entire DSH data root or another plugin's directory. DSH and Hermes must not share a live writable learning store. A detected legacy `missherEvolutionCore` pauses the new controller.
 
-alpha.15→alpha.16 stays on schema 2 and needs no migration. Schema 1 needs explicit migration. Before downgrading to a package without durable settlement support, drain/retire pending settlements, or restore both the corresponding old package and the complete pre-upgrade backup. See the [durable settlement contract](docs/DURABLE_SETTLEMENT_OUTBOX.md).
+alpha.15/alpha.16→alpha.17 stays on schema 2 and needs no migration. Schema 1 needs explicit migration. Before downgrading to a package without durable settlement support, drain/retire pending settlements, or restore both the corresponding old package and the complete pre-upgrade backup. See the [durable settlement contract](docs/DURABLE_SETTLEMENT_OUTBOX.md).
 
 ## Development and verification
 

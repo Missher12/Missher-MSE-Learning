@@ -104,7 +104,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     scopeRunning: '运行中',
     scopePersisted: '已保存',
     scopeLive: '在内存',
-    scopeUnknown: '目录不可用',
+    scopeUnknown: '目录不可用', untitledConversation: '未命名对话',
     tabOverview: '常规',
     tabLessons: '经验',
     tabRecall: '召回',
@@ -482,6 +482,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     scopePicker: 'Session', scopeDefault: 'Default (instance) scope', scopeProject: 'Project scope',
     scopeInstance: 'Instance scope', scopeArchived: 'Archived', scopeRunning: 'Running',
     scopePersisted: 'Persisted', scopeLive: 'In memory', scopeUnknown: 'Directory unavailable',
+    untitledConversation: 'Untitled conversation',
     tabOverview: 'General', tabLessons: 'Lessons', tabRecall: 'Recall', tabManual: 'Tasks', tabBudget: 'Budget',
     version: 'Version', runtime: 'Adapter', enabled: 'Enabled', paused: 'Paused', disabled: 'Disabled',
     legacy: 'Legacy controller active', storeReadable: 'Store readable',
@@ -832,6 +833,34 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       `${scope.scopeHash ? ` · ${scope.scopeHash}` : ''}${scope.archived === true ? ` · ${dict.scopeArchived}` : ''}`
 
   /** Session options: one default scope plus the Host's own directory, honestly labelled. */
+  /** At most this many characters of a Host session id are ever used as a display discriminator. */
+  const SESSION_ID_DISPLAY_MAX = 512
+  /** The id without the prefix every Host session shares; a shared prefix distinguishes nothing. */
+  const sessionIdBody = value => {
+    if (typeof value !== 'string') return ''
+    return value.replace(/^session[-_]/u, '').slice(0, SESSION_ID_DISPLAY_MAX)
+  }
+  /** The complete original id, used only when the stripped forms cannot be told apart. */
+  const sessionIdFull = value => typeof value === 'string' ? value.slice(0, SESSION_ID_DISPLAY_MAX) : ''
+  /**
+   * The short id shown beside a title. Host session ids share a long common prefix
+   * (`session-…`), so a raw 8-character slice distinguishes nothing; the prefix is dropped first.
+   */
+  const sessionShortId = (value, length = 6) => sessionIdBody(value).slice(0, length) || '—'
+  /**
+   * The 会话 rows for 经验 / 召回 / 任务: the conversation's own Host title first, its
+   * project/mode/archived facts second.
+   *
+   * Titles are display-only. `id` stays the selection value and every scope identity is untouched,
+   * so renaming a conversation changes what is read here and nothing else. Rows that would
+   * otherwise be indistinguishable — every untitled one, and any set sharing one FINAL visible
+   * title, inside or across projects — carry a short id, extended until it really is distinct.
+   *
+   * The full title is kept: there is no JavaScript truncation here, because slicing at a fixed
+   * UTF-16 offset can split an emoji into a lone surrogate and can turn two different long titles
+   * into the same option. Narrow windows are handled by the existing CSS ellipsis on the trigger
+   * plus a native tooltip carrying the whole text.
+   */
   function sessionOptions(dict, payload) {
     const options = [{ id: '', label: dict.scopeDefault }]
     if (payload === null || payload === undefined) return options
@@ -839,14 +868,53 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       options.push({ id: '', label: dict.scopeUnknown })
       return options
     }
-    for (const row of payload.sessions ?? []) {
-      const flags = [row.scope === 'project' ? dict.scopeProject : dict.scopeInstance,
-        row.running === true ? dict.scopeRunning : null,
-        row.archived === true ? dict.scopeArchived : null,
-        row.live === true ? dict.scopeLive : null,
-        row.persisted === true ? dict.scopePersisted : null].filter(Boolean)
-      options.push({ id: row.id, label: `${row.label ?? '—'} · ${flags.join(' · ')}` })
+    const rows = (payload.sessions ?? []).map(row => {
+      const raw = typeof row.title === 'string' ? row.title.trim() : ''
+      return { id: row.id, title: raw === '' ? null : raw,
+        flags: [typeof row.label === 'string' && row.label !== '' ? row.label : null,
+          row.scope === 'project' ? dict.scopeProject : dict.scopeInstance,
+          row.running === true ? dict.scopeRunning : null,
+          row.archived === true ? dict.scopeArchived : null,
+          row.live === true ? dict.scopeLive : null,
+          row.persisted === true ? dict.scopePersisted : null].filter(Boolean) }
+    })
+    const named = rows.map(row => row.title ?? dict.untitledConversation)
+    const groups = new Map()
+    named.forEach((value, index) => {
+      const bucket = groups.get(value.toLocaleLowerCase())
+      if (bucket === undefined) groups.set(value.toLocaleLowerCase(), [index])
+      else bucket.push(index)
+    })
+    const titles = new Array(rows.length)
+    for (const bucket of groups.values()) {
+      if (bucket.length === 1 && rows[bucket[0]].title !== null) {
+        titles[bucket[0]] = named[bucket[0]]
+        continue
+      }
+      // Extend the short id until every member of this bucket is distinct, up to the FULL stripped
+      // id — a standard UUID body is 36 characters, and a cap below that would leave two
+      // conversations sharing every displayed character. The bound is the longest stripped id in
+      // this bucket, so it always covers the real, bounded id; the shared `session-` prefix is
+      // never counted as a difference.
+      const longest = bucket.reduce((most, index) => Math.max(most, sessionIdBody(rows[index].id).length), 0)
+      let length = Math.min(6, Math.max(longest, 1))
+      let shorts = bucket.map(index => sessionShortId(rows[index].id, length))
+      while (new Set(shorts).size !== shorts.length && length < longest) {
+        length = Math.min(longest, length + 2)
+        shorts = bucket.map(index => sessionShortId(rows[index].id, length))
+      }
+      // Two rows whose stripped forms are identical (they differ only in the prefix that is not a
+      // discriminator) fall back to the COMPLETE original id, which is what actually differs.
+      if (new Set(shorts).size !== shorts.length) {
+        shorts = bucket.map(index => sessionIdFull(rows[index].id) || '—')
+      }
+      bucket.forEach((index, position) => {
+        titles[index] = `${named[index]} ${shorts[position]}`
+      })
     }
+    rows.forEach((row, index) => {
+      options.push({ id: row.id, label: [titles[index], ...row.flags].join(' · ') })
+    })
     return options
   }
 
@@ -871,7 +939,10 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       anchor: h(Button, { variant: 'outline', size: 'sm', disabled, className: 'mse-picker-trigger',
         'aria-haspopup': 'menu', 'aria-expanded': open, 'aria-label': label,
         onClick: () => setOpen(current => !current) }, [
-        h('span', { key: 'l', className: 'mse-picker-label' }, selected?.label ?? label),
+        // `title` is the plain-text tooltip: the label may be visually ellipsised by CSS in a
+        // narrow window, and the whole value stays readable on hover.
+        h('span', { key: 'l', className: 'mse-picker-label', title: selected?.label ?? label },
+          selected?.label ?? label),
         h(IconChevronsUpDownOutlineRegular, { key: 'c', className: 'mse-picker-chevrons' }),
       ]),
       items,
@@ -2166,7 +2237,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     // Pure helpers the packaged regression suite imports; the rendering path never reads them.
     __test: { NS, SETTINGS_ID, BUNDLE, REMOTE, CONTROL, TABS, PAGE_SIZES, zh, en, reasonLabel, settleLabel,
       codeLabel, kindLabel, formatBytes, formatTime, storeState, statusLabelOf, environmentLabel, normalizeQuery,
-      scopeLine, sessionOptions, callRemote, controlCall, failureCode, failureText, diffOps, defaultDraft, fill,
+      scopeLine, sessionOptions, sessionShortId, callRemote, controlCall, failureCode, failureText,
+      diffOps, defaultDraft, fill,
       MsePanel, SettingsSection, BundlePage, ManualPanel, JobRow, useFormSnapshot, CONTEXT_MIN, CONTEXT_MAX },
   }
 } })

@@ -37,6 +37,108 @@ export function labelOfScope(projectKey) {
   return parts.length === 0 ? '默认作用域' : parts[parts.length - 1].slice(0, 48)
 }
 
+/** How much of a Host title is ever carried to the browser; display only. */
+export const MAX_TITLE_CHARS = 200
+
+/**
+ * Truncate to a number of UNICODE CODE POINTS, never UTF-16 units.
+ *
+ * `String.prototype.slice` counts UTF-16 units, so cutting an emoji-terminated title at an odd
+ * boundary would leave a lone surrogate — a broken glyph that also breaks any later comparison.
+ * The bound is measured in code points instead, so a pair is always kept or dropped whole.
+ */
+export function clipCodePoints(value, max = MAX_TITLE_CHARS) {
+  if (typeof value !== 'string') return ''
+  if (value.length <= max) return value      // UTF-16 length is never below the code-point count
+  const points = [...value]
+  return points.length <= max ? value : points.slice(0, max).join('')
+}
+
+/**
+ * The wire title of one projection block, in three DISTINCT answers:
+ *  • a string — the title the Host itself would show;
+ *  • `null` — the projection ANSWERED and the session really has no title;
+ *  • `undefined` — this projection cannot answer for this session (no block, no `values`, no
+ *    `title` key, or a non-string value), so a later source may still be consulted.
+ *
+ * The accepted shape is the Host's own WIRE view of the title unit:
+ * `titleViewSchema = zod.string().min(1).nullable()` with `wire.view = state => state`. A folded
+ * per-session snapshot — the internal shape `readTitleSnapshots(ids)` returns, bound to its source
+ * header — is NOT a wire title and is rejected instead of coerced (no `String(value)`, no
+ * `value.title`), which reads as "cannot answer" rather than as a title.
+ *
+ * A title is display-only: never stored, never part of a scope identity, never compared with
+ * anything the learning core writes. Control characters are neutralised and blank input is an
+ * answered "no title".
+ */
+export function titleOfWire(block) {
+  const values = block?.values
+  if (values === null || typeof values !== 'object') return undefined
+  if (!Object.hasOwn(values, 'title')) return undefined
+  const value = values.title
+  if (value === null) return null
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.replace(/[\u0000-\u001f\u007f]/gu, ' ').trim()
+  return trimmed === '' ? null : clipCodePoints(trimmed)
+}
+
+/** The same answer flattened for callers that only need a display string. */
+export function titleOfBlock(block) {
+  const answered = titleOfWire(block)
+  return typeof answered === 'string' ? answered : null
+}
+
+/**
+ * Resolve one session's title through the Host's OWN public projections, in the Host's own
+ * order, and never by guessing a header field.
+ *
+ * The services arrive as values (not read from a context) so the decision stays pure:
+ *  • an ATTACHED session answers from its live projection cut (`projections.snapshot`), then
+ *    from its already-materialized cells (`projections.cachedSnapshot`);
+ *  • a COLD session answers from the durable projection cache (`cache.cachedSnapshot(header)`),
+ *    then from the predecessor-title checkpoint (`cache.cachedPredecessorTitle(header)`);
+ *  • nothing else is attempted: folding a cold session's log would cost the whole log, and
+ *    `header.title` / `header.name` are not part of the public projection contract.
+ *
+ * An ATTACHED session's live cut is authoritative: if it answers (a title OR an explicit null,
+ * which means the conversation really has no title), that answer is final and the durable cache is
+ * NOT consulted — replacing an authoritative "untitled" with a stale cached title would show a
+ * name the live session no longer has. Only an UNAVAILABLE live projection falls through.
+ *
+ * A cold session mirrors the Host's own order, block for block:
+ * `cache.cachedSnapshot(header) ?? cache.cachedPredecessorTitle(header)` — the predecessor hint is
+ * consulted only when there is no current block at all.
+ *
+ * Every source is optional and every failure stays local — a missing service, an unknown key or a
+ * throwing projection degrades THIS row to `null` instead of failing the directory.
+ * @returns the bounded title, or null when no public projection can answer for this session.
+ */
+export function sessionTitle({ attached = undefined, projections = undefined, cache = undefined, header = undefined } = {}) {
+  const ask = reader => {
+    try { return reader() } catch { return undefined }
+  }
+  if (attached !== undefined && attached !== null) {
+    if (typeof projections?.snapshot === 'function') {
+      const answered = titleOfWire(ask(() => projections.snapshot(attached, ['title'])))
+      if (answered !== undefined) return answered
+    }
+    if (typeof projections?.cachedSnapshot === 'function') {
+      const answered = titleOfWire(ask(() => projections.cachedSnapshot(attached, ['title'])))
+      if (answered !== undefined) return answered
+    }
+  }
+  if (header === undefined || header === null) return null
+  if (typeof cache?.cachedSnapshot === 'function') {
+    const block = ask(() => cache.cachedSnapshot(header, ['title']))
+    if (block !== undefined && block !== null) return titleOfWire(block) ?? null
+  }
+  if (typeof cache?.cachedPredecessorTitle === 'function') {
+    const answered = titleOfWire(ask(() => cache.cachedPredecessorTitle(header)))
+    if (answered !== undefined) return answered
+  }
+  return null
+}
+
 /** One lesson row in list form, including the saved provenance the page must explain. */
 export function projectRow(row) {
   return {

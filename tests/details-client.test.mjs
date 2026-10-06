@@ -122,7 +122,7 @@ test('the client descriptors mirror the Host manifest endpoint for endpoint', as
 test('view helpers stay bounded and never invent a label or a byte', () => {
   const { module: mod } = loadClient()
   const { zh, en, formatBytes, formatTime, reasonLabel, settleLabel, kindLabel, normalizeQuery, storeState,
-    callRemote, statusLabelOf, TABS, PAGE_SIZES } = mod.__test
+    callRemote, statusLabelOf, sessionOptions, sessionShortId, TABS, PAGE_SIZES } = mod.__test
   const dict = zh
   assert.deepEqual(Object.keys(zh).sort(), Object.keys(en).sort(), 'both dictionaries carry the same keys')
   assert.deepEqual(Object.keys(zh.reasonNames).sort(), Object.keys(en.reasonNames).sort())
@@ -357,4 +357,144 @@ test('a read failure is reported as unknown, never as paused or as a zero', asyn
   const tabs = nodes.find(node => node.type?.uiName === 'SegmentedTabs')
   assert.equal(tabs.props.items.length, 5)
   assert.deepEqual(tabs.props.items.map(item => item.label), ['常规', '经验', '召回', '任务', '额度'])
+})
+
+test('the scope picker leads with the conversation title and keeps the id as the value', () => {
+  const { module: mod } = loadClient()
+  const { zh, en, sessionOptions, sessionShortId } = mod.__test
+  const rows = [
+    { id: 'session-aaaabbbb-1111', title: '重构召回排序', label: 'learning-product', scope: 'project', live: true },
+    { id: 'session-ccccdddd-2222', title: '部署脚本整理', label: 'learning-product', scope: 'project', live: true },
+    { id: 'session-eeeeffff-3333', title: null, label: 'learning-product', scope: 'project', live: true },
+  ]
+  const options = sessionOptions(zh, { ok: true, sessions: rows })
+  assert.equal(options[0].label, zh.scopeDefault, 'the default scope stays first')
+  assert.deepEqual(options.slice(1).map(option => option.id), rows.map(row => row.id),
+    'every row still selects by the real Host id')
+  assert.ok(options[1].label.startsWith('重构召回排序'), options[1].label)
+  assert.ok(options[2].label.startsWith('部署脚本整理'), options[2].label)
+  assert.ok(!options[1].label.startsWith('learning-product'), 'the project name is no longer the leading text')
+  assert.ok(options[1].label.includes(zh.scopeProject) && options[1].label.includes('learning-product'),
+    'the project and mode stay as secondary information')
+  assert.ok(options[3].label.startsWith(zh.untitledConversation), options[3].label)
+  assert.equal(/session-/u.test(options[3].label), false, 'the shared id prefix is never shown')
+  assert.ok(options[3].label.includes(sessionShortId(rows[2].id)), options[3].label)
+  // English carries the same key with its own wording.
+  assert.ok(sessionOptions(en, { ok: true, sessions: rows })[3].label.startsWith(en.untitledConversation))
+  assert.notEqual(zh.untitledConversation, en.untitledConversation)
+})
+
+test('one title, two conversations: a short id disambiguates inside and across projects', () => {
+  const { module: mod } = loadClient()
+  const { zh, sessionOptions, sessionShortId } = mod.__test
+  const rows = [
+    { id: 'session-aaaa1111-0001', title: '修复导出', label: 'alpha', scope: 'project' },
+    { id: 'session-bbbb2222-0002', title: '修复导出', label: 'alpha', scope: 'project' },
+    { id: 'session-cccc3333-0003', title: '修复导出', label: 'beta', scope: 'project' },
+    { id: 'session-dddd4444-0004', title: '唯一的标题', label: 'beta', scope: 'project' },
+  ]
+  const labels = sessionOptions(zh, { ok: true, sessions: rows }).slice(1).map(option => option.label)
+  const ids = rows.map(row => sessionShortId(row.id))
+  assert.equal(new Set(labels).size, labels.length, 'every displayed row is distinguishable')
+  for (const index of [0, 1, 2]) assert.ok(labels[index].includes(ids[index]), labels[index])
+  assert.equal(labels[3].includes(ids[3]), false, 'a unique title needs no id')
+  // A short id that would collide is extended until it does not.
+  const collide = [
+    { id: 'session-abcd1111-0001', title: '同名', label: 'p', scope: 'project' },
+    { id: 'session-abcd2222-0002', title: '同名', label: 'p', scope: 'project' },
+  ]
+  const collided = sessionOptions(zh, { ok: true, sessions: collide }).slice(1).map(option => option.label)
+  assert.equal(new Set(collided).size, 2, collided.join(' | '))
+  assert.notEqual(sessionShortId(collide[0].id), sessionShortId(collide[1].id))
+})
+
+test('two standard UUID-style ids that differ only in the last character stay distinguishable', () => {
+  const { module: mod } = loadClient()
+  const { zh, sessionOptions, sessionShortId } = mod.__test
+  // The exact independent counterexample: same title, same project, a standard 36-character body,
+  // identical everywhere except the final character.
+  const first = 'session-11111111-1111-4111-8111-111111111111'
+  const second = 'session-11111111-1111-4111-8111-111111111112'
+  assert.equal(sessionShortId(first), sessionShortId(second),
+    'the default short form genuinely cannot tell these apart — that is why it must extend')
+  const labels = sessionOptions(zh, { ok: true, sessions: [
+    { id: first, title: '同一个标题', label: 'alpha', scope: 'project' },
+    { id: second, title: '同一个标题', label: 'alpha', scope: 'project' }] }).slice(1).map(option => option.label)
+  assert.equal(new Set(labels).size, 2, `UUID tails must differ: ${labels.join(' | ')}`)
+  assert.ok(labels[0].startsWith('同一个标题 '), labels[0])
+  assert.ok(labels[0].includes('11111111-1111-4111-8111-111111111111'), labels[0])
+  assert.ok(labels[1].includes('11111111-1111-4111-8111-111111111112'), labels[1])
+  assert.equal(labels[0].startsWith('session-'), false, 'the shared prefix is not the discriminator')
+  assert.equal(labels[1].startsWith('session-'), false, 'the shared prefix is not the discriminator')
+  // A bucket of three, and a stripped form that collides completely: the COMPLETE original id is
+  // then the only truthful discriminator (a shared prefix never counts as a difference).
+  const triple = sessionOptions(zh, { ok: true, sessions: [
+    { id: 'session-aaaaaaaa-1111-4111-8111-111111111111', title: '三连', label: 'p', scope: 'project' },
+    { id: 'session-aaaaaaaa-1111-4111-8111-111111111112', title: '三连', label: 'p', scope: 'project' },
+    { id: 'session-aaaaaaaa-1111-4111-8111-111111111113', title: '三连', label: 'p', scope: 'project' }] })
+    .slice(1).map(option => option.label)
+  assert.equal(new Set(triple).size, 3, triple.join(' | '))
+  const sameBody = sessionOptions(zh, { ok: true, sessions: [
+    { id: 'session-abcdefgh', title: '去前缀同体', label: 'p', scope: 'project' },
+    { id: 'abcdefgh', title: '去前缀同体', label: 'p', scope: 'project' }] })
+    .slice(1).map(option => option.label)
+  assert.equal(new Set(sameBody).size, 2, sameBody.join(' | '))
+  assert.ok(sameBody[0].includes('session-abcdefgh'), sameBody[0])
+})
+
+test('a rename changes the label and nothing else, and hostile titles stay plain text', () => {
+  const { module: mod } = loadClient()
+  const { zh, sessionOptions, sessionShortId } = mod.__test
+  const before = sessionOptions(zh, { ok: true, sessions: [
+    { id: 'session-11112222-0001', title: '旧标题', label: 'alpha', scope: 'project', archived: true, running: true }] })
+  const after = sessionOptions(zh, { ok: true, sessions: [
+    { id: 'session-11112222-0001', title: '新标题', label: 'alpha', scope: 'project', archived: true, running: true }] })
+  assert.equal(before[1].id, after[1].id, 'a rename never changes the selection value')
+  assert.ok(before[1].label.startsWith('旧标题') && after[1].label.startsWith('新标题'))
+  assert.ok(after[1].label.includes(zh.scopeArchived) && after[1].label.includes(zh.scopeRunning))
+  // The label is a plain string: markup and emoji are rendered as characters, never interpreted.
+  const hostile = sessionOptions(zh, { ok: true, sessions: [
+    { id: 'session-33334444-0001', title: '<img src=x onerror=alert(1)> 📊', label: 'alpha', scope: 'project' }] })
+  assert.equal(typeof hostile[1].label, 'string')
+  assert.ok(hostile[1].label.startsWith('<img src=x onerror=alert(1)> 📊'), hostile[1].label)
+  assert.equal(hostile[1].label.includes('\u0000'), false)
+  // A long title is NOT truncated in JavaScript: the client keeps the whole string (CSS ellipsis
+  // and the native tooltip handle narrow windows), so nothing is cut mid-glyph.
+  const longTitle = '长'.repeat(400)
+  const long = sessionOptions(zh, { ok: true, sessions: [
+    { id: 'session-55556666-0001', title: longTitle, label: 'alpha', scope: 'project' }] })
+  assert.equal(long[1].label.startsWith(longTitle), true, 'the full title survives to the option')
+  assert.equal(long[1].label.includes('…'), false, 'the client adds no truncation marker of its own')
+  // Two DIFFERENT long titles sharing a prefix stay distinguishable: grouping is done on the full
+  // final visible title, so they collide and both receive a short id.
+  const shared = '前缀'.repeat(40)
+  const pair = sessionOptions(zh, { ok: true, sessions: [
+    { id: 'session-aaaabbbb-0001', title: shared + '甲', label: 'alpha', scope: 'project' },
+    { id: 'session-ccccdddd-0002', title: shared + '乙', label: 'alpha', scope: 'project' }] })
+  assert.equal(new Set(pair.slice(1).map(option => option.label)).size, 2, 'prefix twins stay distinct')
+  assert.equal(pair[1].label.includes('甲') && pair[2].label.includes('乙'), true, 'each keeps its own tail')
+  // An emoji-terminated title survives whole (no lone surrogate, no dropped glyph).
+  const emoji = sessionOptions(zh, { ok: true, sessions: [
+    { id: 'session-eeeeffff-0001', title: '图表 📊', label: 'alpha', scope: 'project' }] })
+  assert.equal(emoji[1].label.startsWith('图表 📊'), true)
+  assert.equal(/[\uD800-\uDFFF]/u.test([...emoji[1].label].filter(char => char.length === 2).join('')), false,
+    'the pair is intact')
+  const missing = sessionOptions(zh, { ok: true, sessions: [
+    { id: 'session-77778888-0001', title: '   ', label: 'alpha', scope: 'project' },
+    { id: 'session-99990000-0001', label: 'alpha', scope: 'project' }] })
+  for (const option of missing.slice(1)) {
+    assert.ok(option.label.startsWith(zh.untitledConversation), option.label)
+    assert.ok(option.label.includes(sessionShortId(option.id)), option.label)
+  }
+  // A title that is not the wire string (an older producer, or a folded object) is "untitled":
+  // it must never be rendered as "[object Object]".
+  const notAString = sessionOptions(zh, { ok: true, sessions: [
+    { id: 'session-abcabcab-0001', title: { title: '折叠快照' }, label: 'alpha', scope: 'project' }] })
+  assert.ok(notAString[1].label.startsWith(zh.untitledConversation), notAString[1].label)
+  assert.equal(notAString[1].label.includes('object'), false)
+  // A directory failure is still reported as unknown, never as an empty title list.
+  assert.equal(sessionOptions(zh, { ok: false, code: 'session_directory_failed' })[1].label, zh.scopeUnknown)
+  assert.deepEqual(sessionOptions(zh, null), [{ id: '', label: zh.scopeDefault }])
+  assert.equal(sessionShortId(undefined), '—')
+  assert.equal(sessionShortId('plain-id-1234'), 'plain-')
 })
