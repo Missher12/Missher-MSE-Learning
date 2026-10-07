@@ -271,6 +271,9 @@ export function analyze(text) {
   }
   const mentions = formatMentions(text)
   const view = {
+    // The normalized prompt itself travels with the view: a domain predicate must read the task's
+    // actual words, not a bag of terms that already dropped the ones the domain needs.
+    raw: normalized,
     semantic: [...aliases, ...semantic],
     weak: new Set(weak),
     // Only a format the text actually ASSERTS counts as the task's format: "不用 CSV" must not
@@ -542,6 +545,10 @@ export function conditionVerdict(lesson, query) {
   const applicability = parseCondition(lesson?.applicability ?? '', 'applicability')
   const exclusions = parseCondition(lesson?.exclusions ?? '', 'exclusions')
   if (applicability.kind === 'unsupported' || exclusions.kind === 'unsupported') {
+    // Before refusing, try the REGISTERED domain sentences: a candidate whose conditions are in the
+    // table is decidable, and one whose conditions are not stays refused exactly as before.
+    const domain = domainConditionVerdict(lesson, query)
+    if (domain !== null) return domain
     return { ok: false, gate: CONDITION_GATES.unclear, detail: [], verified: false, kind: 'unsupported' }
   }
   const positive = new Set((query.formatMentions ?? []).filter(item => item.hasPositive === true).map(item => item.id))
@@ -566,6 +573,74 @@ export function conditionVerdict(lesson, query) {
   }
   return { ok: true, gate: null, detail: [], verified: true,
     kind: applicability.kind === 'format' || exclusions.kind === 'format' ? 'format' : 'empty' }
+}
+
+/**
+ * Registered DOMAIN conditions: a closed, operator-visible set of condition sentences whose meaning
+ * this module is allowed to decide.
+ *
+ * The format templates above cover conditions about a data FORMAT (CSV, JSON…). A working method
+ * from a development domain instead carries prose like "同一会话切换筛选或快速展开多条经验详情时",
+ * which nothing could decide — so every such row refused itself and the candidate could never be
+ * used, however well it had been reviewed. Registering the sentence HERE keeps the closed-grammar
+ * promise: a sentence is decidable only because it appears verbatim in this table, with the task
+ * terms that decide it. Anything else stays `unsupported` and refuses the lesson, so registering a
+ * phrase is a deliberate, reviewable act rather than a loosening of the gate.
+ *
+ * Semantics, in order (exclusions first, exactly as everywhere else):
+ *  • `excludeWhen` — any listed task term present means the method must NOT be offered;
+ *  • `requireAll`  — every listed term must be present;
+ *  • `requireAny`  — at least one listed term must be present when the list is non-empty.
+ * The sentences are the ones the domain's own candidates carry, kept verbatim so a stored row can
+ * be matched without rewriting the user's text.
+ */
+export const DOMAIN_CONDITION_PAIRS = Object.freeze([
+  Object.freeze({
+    // "列表与详情请求应绑定当前会话、筛选条件和请求代次…" — the request-generation method.
+    applicability: '同一会话切换筛选或快速展开多条经验详情时',
+    exclusions: '同步且没有共享状态的纯函数无需请求代次',
+    requireAll: ['会话'],
+    requireAny: ['筛选', '详情', '切换'],
+    excludeWhen: ['纯函数'],
+  }),
+  Object.freeze({
+    // "后台结算与前台写入共享同一串行化边界…" — the serialisation-boundary method.
+    applicability: '后台结算与前台写入并发且任务可能暂停关闭或到期时',
+    exclusions: '锁外检查不能替代提交时的生命周期复核',
+    requireAll: [],
+    requireAny: ['结算', '写入', '并发', '锁'],
+    // The exclusion is a statement about the method's own discipline, not a task property, so it
+    // contributes no task term: the pair is decidable purely by its applicability.
+    excludeWhen: [],
+  }),
+])
+
+/** The registered pair a stored row matches verbatim, or null. */
+export function registeredDomainCondition(lesson) {
+  const applicability = typeof lesson?.applicability === 'string' ? lesson.applicability.trim() : ''
+  const exclusions = typeof lesson?.exclusions === 'string' ? lesson.exclusions.trim() : ''
+  if (applicability === '') return null
+  return DOMAIN_CONDITION_PAIRS.find(pair => pair.applicability === applicability
+    && (pair.exclusions ?? '') === exclusions) ?? null
+}
+
+/** Decide one registered domain pair against a task view. Returns null when no pair matches. */
+function domainConditionVerdict(lesson, query) {
+  const pair = registeredDomainCondition(lesson)
+  if (pair === null) return null
+  const terms = new Set(query?.semantic ?? [])
+  const excluded = (pair.excludeWhen ?? []).filter(term => terms.has(term))
+  if (excluded.length > 0) {
+    return { ok: false, gate: CONDITION_GATES.excluded, detail: excluded, verified: true, kind: 'domain' }
+  }
+  const missing = (pair.requireAll ?? []).filter(term => !terms.has(term))
+  const anyOf = pair.requireAny ?? []
+  const anyHit = anyOf.length === 0 || anyOf.some(term => terms.has(term))
+  if (missing.length > 0 || !anyHit) {
+    return { ok: false, gate: CONDITION_GATES.notApplicable,
+      detail: missing.length > 0 ? missing : anyOf, verified: true, kind: 'domain' }
+  }
+  return { ok: true, gate: null, detail: [], verified: true, kind: 'domain' }
 }
 
 /** Gate names reported by {@link conditionVerdict}. */

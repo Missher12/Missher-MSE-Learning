@@ -239,6 +239,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       migration_required: '学习库需要迁移（schema 1 → 2），当前不可读',
       store_unavailable: '学习库不可读',
       lesson_not_in_scope: '该经验不属于当前作用域',
+      lesson_unattributable: '这条经验不在本进程可读的作用域中（可能属于未列出或已归档的项目）',
+      lesson_scope_ambiguous: '这条经验标识在多个作用域中同时命中，已拒绝猜测归属',
       invalid_lesson_id: '经验 ID 格式不正确',
       stale_version: '该经验在确认后已被修改，请重新载入详情再试',
       history_unavailable: '世代记录不可读',
@@ -377,13 +379,63 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       user_paused: '用户已暂停', plugin_not_started: '尚未开始' },
     unavailable: '当前不可读。',
     selected: '已选择',
+    // ---- whole-library view and per-row progress (read-only) ----
+    libraryTitle: '全库总览（默认视图）',
+    libraryNote: '全库读数来自本机学习库的只读投影，与所选项目、召回范围和写入范围无关。',
+    libraryCorrections: '纠错记录',
+    libraryAwaiting: '待评审/待验证',
+    libraryTrial: '试用中（未验证）',
+    libraryValidated: '已验证',
+    libraryAdopted: '实际采用',
+    libraryUnreadable: '全库计数不可读',
+    libraryPartial: '另有 {n} 条属于本进程未观察到的项目作用域，未计入本次读数。',
+    libraryPartialCats: '纠错、方法与试用只统计本进程已扫描的作用域，因此显示为“至少 N”或未知；总数、状态计数与采用数仍来自全库。',
+    atLeast: '至少 {n}',
+    owningScope: '所属项目',
+    selectedProjectTitle: '所选项目',
+    selectedProjectNone: '未选择项目：以上为全库读数。选择会话后可在这里看到该项目的独立计数。',
+    selectedProjectBoth: '全库读数与所选项目计数同时显示，两者互不影响。',
+    scopeCountsNote: '以下计数只属于实例作用域（未选择项目时）。',
+    scopeGuideTitle: '按项目浏览',
+    scopeGuideNote: '未选择项目：以下是全库只读列表，每行标注所属项目。选择会话可只看单个项目。',
+    scopeGuideMore: '另有 {n} 个项目未列出',
+    scopeScanLimited: '项目作用域扫描受限',
+    completeLibrary: '全库共 {total} 条，本次列出 {shown} 条（库上限 {cap}）。',
+    progressStage: '阶段',
+    progressLast: '上次处理',
+    progressNext: '下次处理',
+    progressModel: '模型',
+    progressBudget: '评审预算',
+    progressReason: '未晋升原因',
+    progressAttempts: '尝试',
+    noPlan: '无自动计划',
+    promoted: '已晋升为已验证',
+    reasonNotRecorded: '未记录原因',
+    budgetReviewRun: '每次评审预留 {n} tokens',
+    budgetHolding: '（本行正在使用）',
+    reviewState: '模型评审',
+    trialState: '试用许可',
+    validationDomain: '验证域',
+    turnsObservedMeaning: '这里统计的是“本进程内出现过回合的会话数”，不是回合数；宿主重启后从零开始，已保存的经验与预算不受影响。',
+    runsObservedMeaning: '统计口径',
+    autoQueue: '自动队列',
+    autoReason: '最近原因',
+    stageNames: { queued: '排队中', running: '运行中', done: '已完成', blocked: '已阻断', failed: '失败', interrupted: '已中断' },
+    reviewNames: { reviewed: '已评审（仅可试用）', rejected: '已拒绝', inconclusive: '无结论' },
+    trialNames: { trial: '试用中', withdrawn: '已撤回' },
+    // The detail view keeps the precise trial contract; the settings help line stays plain.
+    trialDetail: '试用最长 14 天、同时最多 1 条，且始终标注「未经证实」；只有客观验证通过才会记为已验证。',
     // ---- runtime controls ----
     controls: '运行控制',
-    controlsNote: '保存只改变下一次实际使用的有效值；保存本身不调用模型、不注入上下文。',
+    controlsNote: '保存只改变下一次实际使用的有效值。保存这个动作本身不发起任何调用；但开启「自动验证」后，'
+      + '系统会在额度允许时按有界队列自行发起评审/评测调用（先预约后请求，可在运行详情里看到待处理项与原因）。',
     masterSwitch: '持久学习',
     masterHint: '随任务自动学习，暂停后保留已有经验',
     masterHintFull: '随 DSH 加载、按任务事件工作，不需要另启常驻进程。暂停后本页与只读诊断仍然可用，随时可以再启用；已有经验、已用预算和待结算记录都不会被清空。',
     autoReflect: '自动复盘',
+    autoValidation: '自动验证',
+    autoValidate: '自动审查候选经验',
+    autoValidationHint: '自动审查候选经验，符合条件后限量试用；只有客观验证通过，才记为已验证。受评测额度限制。',
     autoReflectHint: '任务结束后提炼经验，每日最多 3 次',
     autoReflectHintFull: '沿用当前任务的模型与推理路由；24 小时内最多 3 次、间隔至少 30 分钟，单次输出不超过 384 tokens。关闭会取消本插件排队与在途的自动复盘，不影响纠错学习、召回与可信结算。',
     contextBytes: '单轮上下文上限',
@@ -393,6 +445,17 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     advancedHint: '默认 0 表示停用“基于模型”的候选验证；登记方法的确定性回归不使用模型，也不消耗这里任何额度。',
     evalTokens: '每日评测 token 上限',
     evalCalls: '每日评测次数上限',
+    // ---- the verification session a historical candidate borrows its route from ----
+    verifySession: '历史候选验证会话',
+    verifySessionHint: '选择历史经验验证时使用的会话和模型，经验仍归原项目。',
+    verifySessionNone: '不指定（历史候选保持阻断）',
+    verifySessionNoneShort: '未指定',
+    verifySessionNoneHint: '尚未指定验证会话：历史（无来源回合）候选会一直保持阻断，直到选定一个会话。',
+    verifySessionReady: '已选定：历史候选用这个会话记录的模型路由验证，其他会话的路由不会被借用。',
+    verifySessionMissing: '已保存的验证会话 {id} 不在当前会话目录中（可能已删除或归档）；在你重新选择之前，历史候选仍会阻断。',
+    verifySessionMissingShort: '目录中不存在',
+    verifySessionUnverified: '已保存的值（未与目录核对）',
+    verifySessionUnknown: '会话目录当前不可用，暂时不能选择验证会话；已保存的值“{id}”保持不变。',
     save: '保存',
     saving: '保存中…',
     saved: '已保存并生效。',
@@ -409,8 +472,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     autoReflectOn: '开启（{used}/{limit} 已于 24 小时内使用）',
     autoReflectOff: '已关闭',
     recentRun: '最近召回/失败',
-    noRuns: '本进程内尚无运行记录（重启后从零开始统计；已保存的经验与用量不受影响）。',
-    runsObserved: '本进程记录过 {n} 个会话的回合',
+    noRuns: '本进程内尚无运行记录（进程重启会重新统计；已保存的经验与预算不受影响）。',
+    runsObserved: '本进程已跟踪 {n} 个会话（不是回合数；重启后从零开始，已保存的经验与预算不受影响）',
     jobsTitle: '任务记录',
     jobsNone: '暂无手动任务。',
     jobsNote: '任务只存在于本进程：宿主重启会中断并丢弃未完成的任务，不会重放模型请求。',
@@ -534,6 +597,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       session_required: 'Pick a session first', session_directory_unavailable: 'The Host session directory is unavailable',
       session_directory_failed: 'Reading the session directory failed', migration_required: 'The store needs migration (schema 1 → 2)',
       store_unavailable: 'The learning store is unreadable', lesson_not_in_scope: 'That lesson is not in this scope',
+      lesson_unattributable: 'That lesson is not in any scope this process can read (it may belong to an unlisted or archived project)',
+      lesson_scope_ambiguous: 'That lesson id resolves in more than one scope; the owner is not guessed',
       history_unavailable: 'Generation history unreadable', library_counts_unavailable: 'Counts unreadable',
       session_ledger_unavailable: 'Session byte ledger unreadable', diagnose_unavailable: 'The dry run is unavailable',
       remote_failed: 'Remote call failed', empty_result: 'The Host returned an empty result' },
@@ -611,12 +676,63 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     reasonNamesForControl: { plugin_disposed: 'Plugin unloading', legacy_controller: 'Legacy MSE controller active',
       user_paused: 'Paused by the user', plugin_not_started: 'Not started' },
     unavailable: 'Unavailable.', selected: 'Selected',
+    // ---- whole-library view and per-row progress (read-only) ----
+    libraryTitle: 'Whole library (default view)',
+    libraryNote: 'Whole-library counts are a read-only projection of the local store; they are independent of the selected project, of recall scope and of write scope.',
+    libraryCorrections: 'Corrections',
+    libraryAwaiting: 'Awaiting review/validation',
+    libraryTrial: 'On trial (unverified)',
+    libraryValidated: 'Validated',
+    libraryAdopted: 'Actually adopted',
+    libraryUnreadable: 'Whole-library counts unreadable',
+    libraryPartial: '{n} more records belong to project scopes this process has not observed and are not part of this reading.',
+    libraryPartialCats: 'Corrections, methods and trials count only the scopes this process scanned, so they read "at least N" or unknown; the total, the status counts and adoption still cover the whole library.',
+    atLeast: 'at least {n}',
+    owningScope: 'Owning project',
+    selectedProjectTitle: 'Selected project',
+    selectedProjectNone: 'No project selected: everything above is the whole library. Pick a session to see that project’s own counts here.',
+    selectedProjectBoth: 'The whole-library reading and the selected project’s counts are shown together; neither changes the other.',
+    scopeCountsNote: 'These counts cover the instance scope only (no project selected).',
+    scopeGuideTitle: 'Browse by project',
+    scopeGuideNote: 'No project selected: this is the whole-library read-only list, every row labelled with its owner. Pick a session to narrow it to one project.',
+    scopeGuideMore: '{n} more projects are not listed',
+    scopeScanLimited: 'Project scan limited',
+    completeLibrary: 'The library holds {total} records; {shown} are listed here (library cap {cap}).',
+    progressStage: 'Stage',
+    progressLast: 'Last processed',
+    progressNext: 'Next attempt',
+    progressModel: 'Model',
+    progressBudget: 'Review budget',
+    progressReason: 'Not promoted',
+    progressAttempts: 'Attempts',
+    noPlan: 'No automatic plan',
+    promoted: 'Promoted to validated',
+    reasonNotRecorded: 'Reason not recorded',
+    budgetReviewRun: 'reserves {n} tokens per review',
+    budgetHolding: ' (in use by this row)',
+    reviewState: 'Model review',
+    trialState: 'Trial licence',
+    validationDomain: 'Validation domain',
+    turnsObservedMeaning: 'This counts the sessions with a turn in THIS process, not turns; a restart starts from zero and never affects stored lessons or budget.',
+    runsObservedMeaning: 'What it counts',
+    autoQueue: 'Automatic queue',
+    autoReason: 'Latest reason',
+    stageNames: { queued: 'Queued', running: 'Running', done: 'Done', blocked: 'Blocked', failed: 'Failed', interrupted: 'Interrupted' },
+    reviewNames: { reviewed: 'Reviewed (trial only)', rejected: 'Rejected', inconclusive: 'Inconclusive' },
+    trialNames: { trial: 'On trial', withdrawn: 'Withdrawn' },
+    trialDetail: 'A trial lasts at most 14 days, at most one at a time, and is always labelled unverified; only an objective check marks a lesson as verified.',
     controls: 'Runtime controls',
-    controlsNote: 'Saving only changes the value the next real use sees; saving itself calls no model and injects nothing.',
+    controlsNote: 'Saving only changes the value the next real use sees. The save itself issues no call; '
+      + 'but once Automatic validation is on, the plugin does run bounded review/evaluation calls by itself '
+      + 'whenever the budget allows (reserved before each request; pending items and reasons are visible in the runtime details).',
     masterSwitch: 'Persistent learning',
     masterHint: 'Learns from tasks automatically; pausing keeps what was learned',
     masterHintFull: 'Loaded with DSH and driven by task events; no extra daemon. While paused this page and the read-only diagnostics stay available, and stored lessons, spent budget and pending settlements are all kept.',
     autoReflect: 'Automatic reflection',
+    autoValidation: 'Automatic validation',
+    autoValidate: 'Review candidate lessons automatically',
+    autoValidationHint: 'Candidate lessons are reviewed automatically and, if they qualify, offered as a limited '
+      + 'trial; only an objective check marks one as verified. Bounded by the evaluation budget.',
     autoReflectHint: 'Distils a lesson after a task, at most 3 per day',
     autoReflectHintFull: 'Uses the task’s own model and reasoning route; at most 3 per 24 h, at least 30 min apart, at most 384 output tokens each. Turning it off cancels this plugin’s queued and in-flight automatic reflection only; corrections, recall and trusted settlement are unaffected.',
     contextBytes: 'Per-turn context cap',
@@ -625,6 +741,17 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     advanced: 'Advanced: model evaluation budget',
     advancedHint: 'Default 0 disables model-based candidate verification. Registered-algorithm regressions use no model and no budget.',
     evalTokens: 'Daily evaluation token cap', evalCalls: 'Daily evaluation call cap',
+    // ---- the verification session a historical candidate borrows its route from ----
+    verifySession: 'Verification session for historical candidates',
+    verifySessionHint: 'The session and model used to verify historical lessons; the lesson still belongs to its original project.',
+    verifySessionNone: 'Not selected (historical candidates stay blocked)',
+    verifySessionNoneShort: 'not selected',
+    verifySessionNoneHint: 'No verification session is selected yet: historical candidates (no source turn) stay blocked until you pick one.',
+    verifySessionReady: 'Selected: historical candidates use the model route this session logged; no other session\u2019s route is borrowed.',
+    verifySessionMissing: 'The saved verification session {id} is not in the current session directory (it may be deleted or archived); historical candidates stay blocked until you pick again.',
+    verifySessionMissingShort: 'not in the directory',
+    verifySessionUnverified: 'saved value (not checked against the directory)',
+    verifySessionUnknown: 'The session directory is unavailable right now, so no verification session can be chosen; the saved value \u201c{id}\u201d is kept as it is.',
     save: 'Save', saving: 'Saving…', saved: 'Saved and in effect.',
     saveFailed: 'Not saved: {reason}',
     reloadNeeded: 'Rejected: the configuration may have changed elsewhere, or a value is out of range. Host values were reloaded.',
@@ -634,8 +761,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     effectivePaused: 'Paused', effectiveReasons: 'Reasons', autoReflectEffective: 'Automatic reflection',
     autoReflectOn: 'On ({used}/{limit} used in 24 h)', autoReflectOff: 'Off',
     recentRun: 'Recent recall / failures',
-    noRuns: 'No record in this process yet (counting restarts at zero; stored lessons and usage are unaffected).',
-    runsObserved: 'This process has recorded turns for {n} sessions',
+    noRuns: 'No record in this process yet (a restart counts from zero; stored lessons and budget are unaffected).',
+    runsObserved: 'This process tracks {n} sessions (not turns; a restart counts from zero and never affects stored lessons or budget)',
     jobsTitle: 'Task log', jobsNone: 'No manual job yet.',
     jobsNote: 'Jobs live in this process only: a Host restart interrupts and drops unfinished jobs and never replays a model request.',
     jobState: { queued: 'Queued', running: 'Running', done: 'Done', failed: 'Failed', cancelled: 'Cancelled', blocked: 'Blocked' },
@@ -716,6 +843,16 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-metric-value{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
 .mse-details .mse-metric-value b{font-size:20px;line-height:28px;font-weight:500;font-variant-numeric:tabular-nums}
 .mse-details .mse-metric-value span{font-size:12px;color:var(--dsw-alias-label-tertiary)}
+/* The whole-library reading is the DEFAULT view and states something different from the selected
+   project's counts, so it carries its own frame rather than reading as a second metric grid. */
+.mse-details .mse-library{border-bottom:none;padding:14px 0 14px}
+.mse-details .mse-library .mse-metric-value b{font-size:22px;line-height:30px}
+.mse-details .mse-project-block{padding:2px 0 14px;border-bottom:0.5px solid var(--dsw-alias-border-l2)}
+.mse-details .mse-project-block .mse-metrics{border-bottom:none;padding:10px 0 4px}
+.mse-details .mse-guide{display:flex;flex-direction:column;gap:6px;padding:10px 0 2px;min-width:0}
+.mse-details .mse-guide-row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-width:0}
+.mse-details .mse-progress{margin-top:2px;font-variant-numeric:tabular-nums}
+.mse-details .mse-project{border:0.5px solid var(--dsw-alias-border-l2)}
 .mse-details .mse-disclosure{border-bottom:0.5px solid var(--dsw-alias-border-l2);min-width:0}
 .mse-details .mse-disclosure>summary{list-style:none;display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;padding:16px 0;font-size:13px}
 .mse-details .mse-disclosure>summary::-webkit-details-marker{display:none}
@@ -832,6 +969,137 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     : `${scope.label ?? '—'} · ${scope.kind === 'project' ? dict.scopeProject : dict.scopeInstance}` +
       `${scope.scopeHash ? ` · ${scope.scopeHash}` : ''}${scope.archived === true ? ` · ${dict.scopeArchived}` : ''}`
 
+  /**
+   * The 常规 whole-library block: one row per library fact the Host published.
+   *
+   * A value the Host did not publish prints as `—`, never as `0`. An unreadable library and an
+   * empty one are different facts, and `0` reports the second for the first — which is exactly
+   * how this page used to claim "nothing learned" while 23 records were in daily use.
+   *
+   * When the Host says the read is PARTIAL (`library.partial`, the same single completeness field
+   * the whole-library list publishes) the category counts only cover the scopes this process could
+   * NAME, so they are shown as lower bounds — "at least N" — and a scanned zero there is UNKNOWN
+   * rather than "none". `total`, the status counts and `adopted` come from the whole store and stay
+   * exact: a complete total must never be downgraded just because the categories are bounded.
+   */
+  const libraryMetrics = (dict, overview) => {
+    const library = overview === null || overview === undefined ? null : overview.library
+    const known = library !== null && library !== undefined && library.readable === true
+    const partial = known && library.partial === true
+    /** A scanned category: exact over a complete read, a lower bound (or unknown) over a partial one. */
+    const scanned = key => {
+      if (!known || !Number.isFinite(library[key])) return '—'
+      if (!partial) return String(library[key])
+      return library[key] > 0 ? fill(dict.atLeast, { n: library[key] }) : '—'
+    }
+    /** A store-wide fact: exact whenever the core answered, whatever the scan covered. */
+    const stored = key => known && Number.isFinite(library[key]) ? String(library[key]) : '—'
+    return [
+      { key: 'total', label: dict.total, value: stored('total'), partial: false },
+      { key: 'corrections', label: dict.libraryCorrections, value: scanned('corrections'), partial },
+      { key: 'methods', label: dict.methods, value: scanned('methods'), partial },
+      // "Awaiting review/validation" is the two statuses the core keeps apart; both are whole-store
+      // status counts, so a number the Host did not send is unknown rather than a zero.
+      { key: 'awaiting', label: dict.libraryAwaiting,
+        value: known && Number.isFinite(library.candidate) && Number.isFinite(library.tested)
+          ? String(library.candidate + library.tested) : '—', partial: false },
+      { key: 'trial', label: dict.libraryTrial, value: scanned('trial'), partial },
+      { key: 'validated', label: dict.libraryValidated, value: stored('validated'), partial: false },
+      { key: 'adopted', label: dict.libraryAdopted, value: stored('adopted'), partial: false },
+    ]
+  }
+
+  /** The selected project's own counts; `—` for anything the Host did not publish. */
+  const scopeNumbers = (dict, scope) => {
+    const counts = scope === null || scope === undefined ? null : scope.counts ?? null
+    const value = key => counts !== null && Number.isFinite(counts[key]) ? String(counts[key]) : '—'
+    return [
+      { key: 'scopeLessons', label: dict.scopeLessons, value: value('scopeLessons') },
+      { key: 'activeCorrections', label: dict.activeCorrections, value: value('activeCorrections') },
+      { key: 'methodsUnvalidated', label: dict.methodsUnvalidated, value: value('methodsUnvalidated') },
+      { key: 'methodsValidated', label: dict.methodsValidated, value: value('methodsValidated') },
+    ]
+  }
+
+  /** The 经验 guide rows: one label + count per project the Host could attribute records to. */
+  const scopeGuideRows = (dict, guide) => {
+    const projects = guide !== null && guide !== undefined && Array.isArray(guide.projects) ? guide.projects : []
+    return projects.map((project, index) => ({
+      key: typeof project?.scopeHash === 'string' && project.scopeHash !== '' ? project.scopeHash : `project-${index}`,
+      label: typeof project?.label === 'string' && project.label !== '' ? project.label : dict.scopeProject,
+      count: Number.isFinite(project?.lessons) ? String(project.lessons) : '—',
+    }))
+  }
+
+  /**
+   * The in-process session counter, from whichever Host surface answered.
+   *
+   * The number counts SESSIONS with a status row in this process — not turns, and not history;
+   * a restart legitimately returns 0 while the stored library is intact. `null` means no surface
+   * answered and the page must show the unknown label: `0` there would read as "no history".
+   */
+  const observedSessions = (overview, controlPayload) => {
+    const values = [overview?.sessionsObserved, overview?.turnsObserved, controlPayload?.runtime?.turnsObserved]
+    const found = values.find(value => Number.isFinite(value) && value >= 0)
+    return found === undefined ? null : Math.trunc(found)
+  }
+
+  /** Stage / review / trial codes go through their own label maps, then stay raw codes. */
+  const planStageLabel = (dict, stage) => (dict.stageNames && dict.stageNames[stage]) || stage || ''
+  const reviewLabel = (dict, state) => (dict.reviewNames && dict.reviewNames[state]) || state || ''
+  const trialLabel = (dict, state) => (dict.trialNames && dict.trialNames[state]) || state || ''
+
+  /**
+   * Why this row is not a validated method — a stored fact, in order of authority.
+   *
+   * The plan's own reason comes first (it is the scheduler's answer), then a review verdict's
+   * first reason, then the trial or withdrawal reason. A validated row is not unpromoted at all,
+   * and a row with nothing recorded says so instead of being handed a plausible-sounding cause.
+   */
+  const notPromotedReason = (dict, item) => {
+    if (item?.status === 'validated') return dict.promoted
+    const codes = [item?.reason, item?.lastError,
+      ...(Array.isArray(item?.review?.reasons) ? item.review.reasons : []),
+      item?.trial?.reason, item?.suspensionReason].filter(code => typeof code === 'string' && code !== '')
+    return codes.length === 0 ? dict.reasonNotRecorded : codeLabel(dict, codes[0])
+  }
+
+  /**
+   * The read-only progress of one lesson row: stage, last/next processing, model, budget and the
+   * reason it has not been promoted. Anything the Host did not send prints as `—` or a labelled
+   * code — never as a value nobody measured.
+   */
+  const lessonProgress = (dict, item, locale) => {
+    const route = item?.route ?? null
+    const budget = item?.budget ?? null
+    const model = route !== null && typeof route.model === 'string' && route.model !== ''
+      ? `${typeof route.provider === 'string' && route.provider !== '' ? `${route.provider}/` : ''}${route.model}`
+      : dict.notRecorded
+    return {
+      stage: typeof item?.stage === 'string' && item.stage !== '' ? planStageLabel(dict, item.stage) : dict.noPlan,
+      attempts: Number.isFinite(item?.attempts) && Number.isFinite(item?.maxAttempts)
+        ? `${item.attempts}/${item.maxAttempts}` : '—',
+      last: formatTime(item?.updatedAt, locale),
+      next: formatTime(item?.nextAttemptAt, locale),
+      model,
+      budget: budget === null || !Number.isFinite(budget?.reviewRunTokens) ? dict.notRecorded
+        : fill(dict.budgetReviewRun, { n: budget.reviewRunTokens })
+          + (budget.holding === true ? dict.budgetHolding : ''),
+      reason: notPromotedReason(dict, item),
+      review: item?.review === null || item?.review === undefined ? '—'
+        : `${reviewLabel(dict, item.review.state)}${item.review.agreement ? ` · ${item.review.agreement}` : ''}`,
+      trial: item?.trial === null || item?.trial === undefined ? '—' : trialLabel(dict, item.trial.state),
+    }
+  }
+
+  /** The same facts as one compact plain-text line; nothing here interprets markup. */
+  const progressLine = (dict, item, locale) => {
+    const progress = lessonProgress(dict, item, locale)
+    return `${dict.progressStage} ${progress.stage} · ${dict.progressLast} ${progress.last} · ` +
+      `${dict.progressNext} ${progress.next} · ${dict.progressModel} ${progress.model} · ` +
+      `${dict.progressBudget} ${progress.budget} · ${dict.progressReason} ${progress.reason}`
+  }
+
   /** Session options: one default scope plus the Host's own directory, honestly labelled. */
   /** At most this many characters of a Host session id are ever used as a display discriminator. */
   const SESSION_ID_DISPLAY_MAX = 512
@@ -916,6 +1184,49 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       options.push({ id: row.id, label: [titles[index], ...row.flags].join(' · ') })
     })
     return options
+  }
+
+  /**
+   * The 验证会话 row: the options the picker may offer, and what the SAVED value means right now.
+   *
+   * The options come from `mseDetails.sessions()` and nowhere else — the page cannot invent a
+   * session and the operator cannot type one — with exactly one entry that is the opposite of
+   * inventing: a saved id the directory no longer lists is carried as an explicitly "not in the
+   * directory" option, so the control can never display "not selected" for a session that IS
+   * configured, and never quietly substitutes a different one. The first option is always the
+   * explicit no-choice that maps to `''`.
+   *
+   * Five states, each with its own visible sentence: the directory has not been read YET
+   * (`pending` — no claim either way), nothing saved (`none` — historical, source-less candidates
+   * stay blocked, which is exactly what the empty value means), a saved id the directory answers
+   * for (`ready`), a saved id it does not (`missing`, showing the saved value), and a directory
+   * that really did not answer (`unknown` — no choice can be made right now).
+   *
+   * A configured value is carried as an option in EVERY state, so the control can never display
+   * "not selected" for a session that is configured: what changes between `missing` and the two
+   * unanswerable states is only how much is known about it, which is what its label says.
+   */
+  const verificationSession = (dict, payload, savedId) => {
+    // The saved value is the Host's own, and the Host schema caps it at 512 characters.
+    const id = typeof savedId === 'string' ? savedId.slice(0, 512) : ''
+    const none = { id: '', label: dict.verifySessionNone }
+    const savedOnly = label => id === '' ? [] : [{ id, label: `${label} · ${sessionShortId(id)}` }]
+    // `undefined` is "not read yet", which is not the same statement as "the read failed".
+    if (payload === undefined) {
+      return { state: 'pending', tone: 'hint', options: [none, ...savedOnly(dict.verifySessionUnverified)],
+        text: dict.loading }
+    }
+    if (payload === null || payload.ok !== true) {
+      return { state: 'unknown', tone: 'err', options: [none, ...savedOnly(dict.verifySessionUnverified)],
+        text: fill(dict.verifySessionUnknown, { id: id === '' ? dict.verifySessionNoneShort : id }) }
+    }
+    const rows = sessionOptions(dict, payload).slice(1)
+    if (id === '') return { state: 'none', tone: 'hint', options: [none, ...rows], text: dict.verifySessionNoneHint }
+    if (rows.some(option => option.id === id)) {
+      return { state: 'ready', tone: 'hint', options: [none, ...rows], text: dict.verifySessionReady }
+    }
+    return { state: 'missing', tone: 'err', text: fill(dict.verifySessionMissing, { id }),
+      options: [none, ...rows, { id, label: `${dict.verifySessionMissingShort} · ${sessionShortId(id)}` }] }
   }
 
   /**
@@ -1061,6 +1372,13 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
   const defaultDraft = value => ({
     enabled: value?.enabled !== false,
     reflectionEnabled: value?.reflectionEnabled !== false,
+    // Automatic validation is opt-in and off by default: it spends the evaluation budget without
+    // anyone pressing a button, so the page states it plainly instead of implying it is free.
+    autoValidationEnabled: value?.autoValidationEnabled === true,
+    // The session a historical (source-less) candidate may borrow its route from. An empty value
+    // is the documented "no backfill route": those candidates stay blocked, which is a state the
+    // row states rather than a failure the page hides.
+    verificationSessionId: typeof value?.verificationSessionId === 'string' ? value.verificationSessionId : '',
     maxContextBytes: String(value?.maxContextBytes ?? 768),
     evaluationTokensPerDay: String(value?.evaluationTokensPerDay ?? 0),
     evaluationCallsPerDay: String(value?.evaluationCallsPerDay ?? 2),
@@ -1078,6 +1396,19 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     if (draft.enabled !== (value?.enabled !== false)) ops.push({ op: 'set', path: ['enabled'], value: draft.enabled })
     if (draft.reflectionEnabled !== (value?.reflectionEnabled !== false)) {
       ops.push({ op: 'set', path: ['reflectionEnabled'], value: draft.reflectionEnabled })
+    }
+    if (draft.autoValidationEnabled !== (value?.autoValidationEnabled === true)) {
+      ops.push({ op: 'set', path: ['autoValidationEnabled'], value: draft.autoValidationEnabled })
+    }
+    // One setting, one op, in the SAME patch as the switches: the verification session is not a
+    // separate write. Only a bounded string may travel — the Host schema would refuse anything
+    // else, and a page that sent it anyway would turn a typo into a refused save of every edit.
+    const savedSession = typeof value?.verificationSessionId === 'string' ? value.verificationSessionId : ''
+    const draftSession = typeof draft.verificationSessionId === 'string' ? draft.verificationSessionId : null
+    if (draftSession === null || [...draftSession].length > 512) {
+      problems.push('verificationSessionId 0–512')
+    } else if (draftSession !== savedSession) {
+      ops.push({ op: 'set', path: ['verificationSessionId'], value: draftSession })
     }
     const number = (raw, min, max, label) => {
       const parsed = Number(String(raw).trim())
@@ -1241,7 +1572,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       void (async () => {
         try {
           const [overview, sessions] = await Promise.all([
-            callRemote(call, 'overview', {}),
+            // The scope rides along so 常规 can show the whole library AND the selected project's
+            // own counts in one read; the Host still resolves the id itself and never trusts it.
+            callRemote(call, 'overview', sessionId === '' ? {} : { sessionId }),
             callRemote(call, 'sessions', {}),
           ])
           if (generation.current !== mine) return
@@ -1421,6 +1754,23 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 
     const overview = shell.overview
     const store = storeState(dict, overview?.store)
+    // The whole-library reading is the page's DEFAULT answer; `libraryKnown` is false when the
+    // Host could not read it, and the page then states the code instead of zeros.
+    const library = overview === null || overview === undefined ? null : overview.library ?? null
+    const libraryKnown = library !== null && library.readable === true
+    // The Host's single completeness field for the whole-library read: when it is set, the category
+    // numbers are lower bounds and the page must SAY so instead of letting them read as history.
+    const libraryPartial = libraryKnown && library.partial === true
+    // The selected project's own counts, present only when this read named a Host-observed scope.
+    const selectedScope = overview === null || overview === undefined ? null : overview.scope ?? null
+    // `counts` keeps its original meaning — the INSTANCE scope — and is quoted as such below; a
+    // value the Host did not send prints as `—` rather than as a zero.
+    const instanceCounts = overview === null || overview === undefined ? null : overview.counts ?? null
+    const scopeValue = key => instanceCounts !== null && Number.isFinite(instanceCounts[key])
+      ? String(instanceCounts[key]) : '—'
+    // The scheduler's own queue, when a surface published it.
+    const autoStatus = overview === null || overview === undefined ? null : overview.auto ?? null
+    const queueValue = key => autoStatus !== null && Number.isFinite(autoStatus[key]) ? String(autoStatus[key]) : '—'
     const enabled = overview?.enabled === true
     const legacy = overview?.legacyOwner === true
     const options = sessionOptions(dict, shell.sessions)
@@ -1438,6 +1788,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const settings = controlReady ? controlState.payload.settings ?? null : null
     const reasons = effective?.reasons ?? []
     const review = settings?.review ?? null
+    // Whichever Host surface answered: the detail overview's own counter, then the control card.
+    const inProcessSessions = observedSessions(overview, controlReady ? controlState.payload : null)
 
     // ---------------------------------------------------------------- shared pieces
     // Whether the draft differs from what the Host holds. A save is offered only then, and the
@@ -1488,6 +1840,11 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         return h('div', { key: 'settings' }, [h('p', { key: 'n', className: 'mse-note' },
           snapshot?.status === 'unavailable' ? dict.configUnavailable : dict.loading)])
       }
+      // Which session a historical candidate may borrow its route from, with the state of the
+      // saved value spelled out beside it (the switch above it only decides THAT it may run).
+      // Three distinct inputs, three distinct statements: not read yet, read and failed, read.
+      const sessionsSeen = shell.status === 'ready' ? shell.sessions : shell.status === 'error' ? null : undefined
+      const verify = verificationSession(dict, sessionsSeen, draft.values.verificationSessionId)
       return h('div', { key: 'settings' }, [
         row('enabled', dict.masterSwitch, dict.masterHint,
           h(Switch, { checked: draft.values.enabled, disabled: !writable, label: dict.masterSwitch,
@@ -1495,6 +1852,14 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         row('reflect', dict.autoReflect, dict.autoReflectHint,
           h(Switch, { checked: draft.values.reflectionEnabled, disabled: !writable, label: dict.autoReflect,
             onChange: next => edit({ reflectionEnabled: next }) })),
+        row('autoValidation', dict.autoValidation, dict.autoValidationHint,
+          h(Switch, { checked: draft.values.autoValidationEnabled, disabled: !writable, label: dict.autoValidate,
+            onChange: next => edit({ autoValidationEnabled: next }) })),
+        row('verifySession', dict.verifySession,
+          verify.tone === 'err' ? h('span', { key: 's', className: 'mse-error' }, verify.text) : verify.text,
+          h(Picker, { key: 'p', label: dict.verifySession, value: draft.values.verificationSessionId,
+            options: verify.options, disabled: !writable, testId: 'verify-session', className: 'mse-picker-scope',
+            onChange: next => edit({ verificationSessionId: next }) })),
         row('bytes', dict.contextBytes, dict.contextBytesHint,
           [h(Input, { key: 'i', type: 'number', min: CONTEXT_MIN, max: CONTEXT_MAX, step: 1, disabled: !writable,
             className: 'mse-num', 'aria-label': dict.contextBytes, value: draft.values.maxContextBytes,
@@ -1523,22 +1888,51 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
             : emptyState('e', codeLabel(dict, overview.code ?? 'unavailable')),
         ])
       }
-      const counts = overview.counts ?? {}
       return h('div', { key: 'overview', className: 'mse-pane' }, [
         // The three runtime controls are the first thing on the page, exactly as the confirmed
         // design has them. They were computed but never mounted once — this is that omission.
         settingsRows,
-        h('h2', { key: 'h', className: 'mse-section-title' }, [
-          h('span', { key: 't' }, dict.countsTitle),
+        // The WHOLE LIBRARY is the default reading: the instance scope is empty in daily use, so
+        // reporting only it showed 0/0/0 while the real library sat unread one click away.
+        h('h2', { key: 'lh', className: 'mse-section-title' }, [
+          h('span', { key: 't' }, dict.libraryTitle),
           h(Button, { key: 'go', variant: 'ghost', size: 'sm', onClick: () => setTab('lessons') }, dict.goLessons),
         ]),
+        libraryKnown
+          ? h('div', { key: 'lm', className: 'mse-metrics mse-library' },
+            libraryMetrics(dict, overview).map(item => metric(item.label, item.value, dict.unitItems)))
+          : h('p', { key: 'lu', className: 'mse-note' },
+            `${dict.libraryUnreadable}：${codeLabel(dict, library?.code ?? 'store_unavailable')}`),
+        // A partial read is stated where the numbers are, not buried: the categories above are
+        // lower bounds and the count nobody could attribute is named with its number.
+        libraryPartial
+          ? h('div', { key: 'lp', className: 'mse-callout' }, [
+            h('p', { key: 'n' }, fill(dict.libraryPartial,
+              { n: Number.isFinite(library.unattributed) ? library.unattributed : dict.unknown })),
+            h('p', { key: 'c' }, dict.libraryPartialCats),
+          ])
+          : null,
+        // A scope the directory could not name is a LIMIT on the reading, not a silent subtraction.
+        overview.libraryScan?.code
+          ? h('p', { key: 'ls', className: 'mse-hint' },
+            `${dict.scopeScanLimited}：${codeLabel(dict, overview.libraryScan.code)}`)
+          : null,
+        h('p', { key: 'ln', className: 'mse-hint' }, dict.libraryNote),
+        // The selected project's OWN counts, shown beside the library reading whenever a scope is
+        // chosen — never instead of it, and never as a silent substitute for the library.
+        h('h2', { key: 'sh', className: 'mse-section-title' }, [h('span', { key: 't' }, dict.selectedProjectTitle)]),
+        selectedScope === null
+          ? h('p', { key: 'sn', className: 'mse-note' },
+            `${dict.selectedProjectNone}${overview.scopeReason ? `（${codeLabel(dict, overview.scopeReason)}）` : ''}`)
+          : h('div', { key: 'sp', className: 'mse-project-block' }, [
+            h('p', { key: 'l', className: 'mse-hint' }, scopeLine(dict, selectedScope)),
+            h('div', { key: 'm', className: 'mse-metrics' },
+              scopeNumbers(dict, selectedScope).map(item => metric(item.label, item.value, dict.unitItems))),
+            h('p', { key: 'b', className: 'mse-hint' }, dict.selectedProjectBoth),
+          ]),
         overview.countsError !== null && overview.countsError !== undefined
           ? h('p', { key: 'ce', className: 'mse-note' }, `${dict.countsFailed}：${codeLabel(dict, overview.countsError)}`)
-          : h('div', { key: 'm', className: 'mse-metrics' }, [
-            metric(dict.activeCorrections, counts.activeCorrections ?? 0, dict.unitItems),
-            metric(dict.methodsUnvalidated, counts.methodsUnvalidated ?? 0, dict.unitItems),
-            metric(dict.methodsValidated, counts.methodsValidated ?? 0, dict.unitItems),
-          ]),
+          : null,
         disclosure('versions', dict.detailsMore, [
           definition('d', [
             [dict.version, `${overview.version ?? settings?.pluginVersion ?? '—'}`],
@@ -1548,12 +1942,22 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
             [dict.sessionBudget, formatBytes(overview.budget?.sessionBytes)],
             [dict.maxLessons, `${overview.budget?.maxLessons ?? '—'} ${dict.unitItems}`],
             [dict.sessionUsed, ledger === null ? dict.notRecorded : `${formatBytes(ledger.bytes)} / ${formatBytes(ledger.budgetBytes)}`],
-            [dict.scopeLessons, `${counts.scopeLessons ?? 0} ${dict.unitItems}`],
-            [dict.otherScope, `${counts.otherScope ?? 0} ${dict.unitItems}`],
-            [dict.otherEnvironment, `${counts.otherEnvironment ?? 0} ${dict.unitItems}`],
-            [dict.suspendedExpired, `${counts.suspended ?? 0} / ${counts.expired ?? 0} ${dict.unitItems}`],
+            [dict.scopeLessons, `${scopeValue('scopeLessons')} ${dict.unitItems}`],
+            [dict.otherScope, `${scopeValue('otherScope')} ${dict.unitItems}`],
+            [dict.otherEnvironment, `${scopeValue('otherEnvironment')} ${dict.unitItems}`],
+            [dict.suspendedExpired, `${scopeValue('suspended')} / ${scopeValue('expired')} ${dict.unitItems}`],
+            // The automatic queue as the scheduler itself reports it; a surface that cannot answer
+            // is `未知` with its code, never a zero-filled queue.
+            [dict.autoQueue, autoStatus === null
+              ? `${dict.unknown}（${codeLabel(dict, overview.autoError ?? 'auto_status_unavailable')}）`
+              : `${dict.stageNames.queued} ${queueValue('queued')} · ${dict.stageNames.running} ${queueValue('running')} · ` +
+                `${dict.stageNames.blocked} ${queueValue('blocked')} · ${dict.stageNames.failed} ${queueValue('failed')} · ` +
+                `${dict.stageNames.interrupted} ${queueValue('interrupted')}`],
+            [dict.autoReason, autoStatus === null || autoStatus.lastReason === null || autoStatus.lastReason === undefined
+              ? dict.notRecorded : codeLabel(dict, autoStatus.lastReason)],
           ]),
-          h('p', { key: 'n', className: 'mse-hint' }, dict.notLearnedNote),
+          h('p', { key: 'n', className: 'mse-hint' }, dict.scopeCountsNote),
+          h('p', { key: 'm', className: 'mse-hint' }, dict.notLearnedNote),
         ], { id: 'versions' }),
         disclosure('runtime', dict.runtimeHelpTitle, [
           h('p', { key: 'n', className: 'mse-note' }, dict.controlsNote),
@@ -1565,10 +1969,14 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
                 : dict.autoReflectOff],
             [dict.userEnabled, settings?.user?.enabled === undefined ? dict.unknown
               : settings.user.enabled === true ? dict.yes : dict.no],
-            [dict.recentRun, controlState?.status !== 'ready' ? dict.statusUnreadable
-              : (controlState.payload.runtime?.turnsObserved ?? 0) === 0 ? dict.noRuns
+            // The in-process observation counter. It counts SESSIONS with a status row in this
+            // process, not turns and not history: an unread surface is `未知`, never `0`, and 0
+            // itself is a restart rather than an empty library.
+            [dict.recentRun, inProcessSessions === null ? dict.unknown
+              : inProcessSessions === 0 ? dict.noRuns
                 : `${recentLine(dict, Array.isArray(currentRecall?.payload?.recent) && currentRecall.payload.recent.length > 0
-                  ? currentRecall.payload.recent[currentRecall.payload.recent.length - 1] : null)} · ${fill(dict.runsObserved, { n: controlState.payload.runtime?.turnsObserved ?? 0 })}`],
+                  ? currentRecall.payload.recent[currentRecall.payload.recent.length - 1] : null)} · ${fill(dict.runsObserved, { n: inProcessSessions })}`],
+            [dict.runsObservedMeaning, dict.turnsObservedMeaning],
             // The durable queue as the CORE sees it, and whether the user's pause is really in
             // force. Saving the settings document is not this confirmation, so a pause that is
             // still retrying is shown with its own cause rather than as an effective one.
@@ -1593,6 +2001,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           ]),
           h('p', { key: 'm', className: 'mse-hint' }, dict.masterHintFull),
           h('p', { key: 'r', className: 'mse-hint' }, dict.autoReflectHintFull),
+          // The row above states WHAT is saved; this states what the setting is for.
+          h('p', { key: 'v', className: 'mse-hint' }, dict.verifySessionHint),
           h('p', { key: 'b', className: 'mse-hint' }, fill(dict.contextBytesHintFull,
             { min: CONTEXT_MIN, max: CONTEXT_MAX, def: 768 })),
           h('p', { key: 'a', className: 'mse-hint' },
@@ -1611,6 +2021,10 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       const page = currentLessons
       const entries = options
       const rows = page !== null && page.error === undefined && page.payload?.ok === true ? page.payload.items ?? [] : []
+      // The whole-library read carries its own flag: the page must know whether the rows it is
+      // showing are one project's or the library's before it labels them.
+      const libraryList = page !== null && page.error === undefined && page.payload?.ok === true
+        && page.payload.library === true
       const controls = h('div', { key: 'controls', className: 'mse-toolbar' }, [
         h('div', { key: 'search', className: 'mse-search' },
           h(Input, { type: 'search', placeholder: dict.search, 'aria-label': dict.search, value: listQuery.query,
@@ -1630,10 +2044,15 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         const payload = currentDetail.payload
         if (payload.ok !== true) return h('p', { key: 'e', className: 'mse-error' }, codeLabel(dict, payload.code))
         const item = payload.lesson
+        // The same read-only progress the list row shows, in full, for the row that is open.
+        const progress = lessonProgress(dict, item, locale)
         return h('div', { key: 'body' }, [
           definition('d', [
             [dict.kind, kindLabel(dict, item.kind)],
             [dict.status, `${statusLabelOf(dict, item.status)} (${item.status})`],
+            // Which project this row was read from: with no session selected the Host LOCATES the
+            // row inside its own named scopes, so the page says which owner it found.
+            [dict.owningScope, scopeLine(dict, payload.scope)],
             [dict.savedAt, formatTime(item.createdAt, locale)],
             [dict.expiresAt, formatTime(item.expiresAt, locale)],
             [dict.source, item.sourceTurn === null ? dict.notRecorded
@@ -1645,14 +2064,34 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
               `${dict.failed} ${item.failed} · ${dict.inconclusive} ${item.inconclusive}`],
             [dict.validation, item.validation === null ? dict.notRecorded
               : `${item.validation.decision} · ${item.validation.basis || '—'} · ${formatTime(item.validation.at, locale)}`],
+            // A pack verdict covers a DOMAIN, never "everywhere": the domain is shown whenever the
+            // stored verdict carries one instead of being folded into the decision word.
+            [dict.validationDomain, item.validation?.domain === null || item.validation?.domain === undefined
+              ? dict.notRecorded
+              : `${item.validation.domain.packId} v${item.validation.domain.version ?? '—'}`],
+            [dict.reviewState, item.review === null || item.review === undefined ? dict.notRecorded
+              : `${reviewLabel(dict, item.review.state)} · ${item.review.agreement ?? '—'} · ${item.review.benefit ?? '—'}` +
+                `${item.review.judge ? ` · ${item.review.judge}` : ''}`],
+            [dict.trialState, item.trial === null || item.trial === undefined ? dict.notRecorded
+              : `${trialLabel(dict, item.trial.state)}${item.trial.reason ? ` · ${item.trial.reason}` : ''}`],
             [dict.topic, item.topicKey ?? dict.notRecorded],
             [dict.value, item.value ?? dict.notRecorded],
             [dict.history, item.historyComplete ? dict.historyComplete : dict.historyIncomplete],
             [dict.replaces, item.replaces ?? dict.notRecorded],
             [dict.replacedBy, item.replacedBy ?? dict.notRecorded],
+            [dict.progressStage, `${progress.stage}${progress.attempts === '—' ? '' : ` · ${dict.progressAttempts} ${progress.attempts}`}`],
+            [dict.progressLast, progress.last],
+            [dict.progressNext, progress.next],
+            [dict.progressModel, progress.model],
+            [dict.progressBudget, progress.budget],
+            [dict.progressReason, progress.reason],
             [dict.lessonId, h('span', { key: 'i', className: 'mse-mono mse-test-long' }, item.id)],
             ['version', String(item.version ?? 0)],
           ], { left: true }),
+          // The precise trial contract lives HERE, in the row's own detail: the settings help line
+          // stays a plain two-sentence explanation a normal user can read.
+          item.trial?.state === 'trial' && typeof dict.trialDetail === 'string'
+            ? h('p', { key: 'td', className: 'mse-hint' }, dict.trialDetail) : null,
           item.experiments.length === 0 ? null : h('div', { key: 'exp' }, [
             h('p', { key: 'l', className: 'mse-hint' }, dict.experiments),
             ...item.experiments.map((record, index) => h('p', { key: `e${index}`, className: 'mse-hint' },
@@ -1677,18 +2116,29 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           h('div', { key: 'm', className: 'mse-meta' }, [
             h('span', { key: 'k', className: 'mse-badge' }, kindLabel(dict, item.kind)),
             h('span', { key: 's', className: 'mse-badge' }, statusLabelOf(dict, item.status)),
+            // Whole-library rows name their owner; a scoped list needs no badge, because the
+            // picker above already states which project is being read.
+            libraryList ? h('span', { key: 'p', className: 'mse-badge mse-project' },
+              typeof item.scopeLabel === 'string' && item.scopeLabel !== '' ? item.scopeLabel : dict.scopeInstance) : null,
             h('span', { key: 't' }, formatTime(item.createdAt, locale)),
             h('span', { key: 'c', className: 'mse-mono' },
               `${item.adopted}/${item.verified}/${item.failed}/${item.inconclusive}`),
           ]),
+          // Read-only progress: stage, last/next processing, model, budget and why the row has not
+          // been promoted. Plain text — nothing here interprets markup from a stored document.
+          h('div', { key: 'pr', className: 'mse-meta mse-progress' }, progressLine(dict, item, locale)),
         ]),
         h(IconChevronRightOutlineRegular, { key: 'c', className: 'mse-chevron' }),
       ]),
       h('div', { key: 'd', className: 'mse-lesson-detail' }, detailBody(item))))
       const pager = page !== null && page.error === undefined && page.payload?.ok === true
         ? h('div', { key: 'pager', className: 'mse-footline' }, [
-          h('span', { key: 'c' }, `${dict.complete.replace('{total}', String(page.payload.scopeTotal ?? 0))
-            .replace('{cap}', String(page.payload.storeCap ?? '—'))}`),
+          h('span', { key: 'c' }, page.payload.library === true
+            ? fill(dict.completeLibrary, { total: Number.isFinite(page.payload.libraryTotal) ? page.payload.libraryTotal : '—',
+              shown: Number.isFinite(page.payload.scopeTotal) ? page.payload.scopeTotal : '—',
+              cap: Number.isFinite(page.payload.storeCap) ? page.payload.storeCap : '—' })
+            : fill(dict.complete, { total: Number.isFinite(page.payload.scopeTotal) ? page.payload.scopeTotal : 0,
+              cap: Number.isFinite(page.payload.storeCap) ? page.payload.storeCap : '—' })),
           h('div', { key: 'n', className: 'mse-inline' }, [
             h(Button, { key: 'prev', variant: 'ghost', size: 'sm', disabled: page.payload.page <= 1,
               onClick: () => setListQuery(current => ({ ...current, page: Math.max(1, current.page - 1) })) }, dict.prev),
@@ -1702,6 +2152,28 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       return h('div', { key: 'lessons', className: 'mse-pane' }, [
         scopeRow('lessons', dict.scopePicker, entries, sessionId, setSessionId),
         controls,
+        // No project selected: the whole library, with the guide that says where the rest of it
+        // lives and how to narrow the list to one project.
+        libraryList
+          ? h('div', { key: 'guide', className: 'mse-guide' }, [
+            h('p', { key: 't', className: 'mse-hint' }, dict.scopeGuideTitle),
+            h('p', { key: 'n', className: 'mse-hint' }, dict.scopeGuideNote),
+            h('div', { key: 'r', className: 'mse-guide-row' }, [
+              ...scopeGuideRows(dict, page.payload.scopeGuide).map(entry =>
+                h('span', { key: entry.key, className: 'mse-badge' }, `${entry.label} · ${entry.count}`)),
+              Number.isFinite(page.payload.scopeGuide?.omitted) && page.payload.scopeGuide.omitted > 0
+                ? h('span', { key: 'more', className: 'mse-hint' },
+                  fill(dict.scopeGuideMore, { n: page.payload.scopeGuide.omitted })) : null,
+            ]),
+            Number.isFinite(page.payload.unattributed) && page.payload.unattributed > 0
+              ? h('p', { key: 'u', className: 'mse-hint' }, fill(dict.libraryPartial, { n: page.payload.unattributed }))
+              : null,
+            page.payload.scanCode
+              ? h('p', { key: 'c', className: 'mse-hint' },
+                `${dict.scopeScanLimited}：${codeLabel(dict, page.payload.scanCode)}`)
+              : null,
+          ])
+          : null,
         page === null || page === undefined
           ? h('p', { key: 'l', className: 'mse-note' }, dict.loading)
           : page.error !== undefined ? h('p', { key: 'e', className: 'mse-error' }, page.error)
@@ -2238,7 +2710,10 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     __test: { NS, SETTINGS_ID, BUNDLE, REMOTE, CONTROL, TABS, PAGE_SIZES, zh, en, reasonLabel, settleLabel,
       codeLabel, kindLabel, formatBytes, formatTime, storeState, statusLabelOf, environmentLabel, normalizeQuery,
       scopeLine, sessionOptions, sessionShortId, callRemote, controlCall, failureCode, failureText,
+      libraryMetrics, scopeNumbers, scopeGuideRows, observedSessions, planStageLabel, reviewLabel, trialLabel,
+      verificationSession,
+      notPromotedReason, lessonProgress, progressLine,
       diffOps, defaultDraft, fill,
-      MsePanel, SettingsSection, BundlePage, ManualPanel, JobRow, useFormSnapshot, CONTEXT_MIN, CONTEXT_MAX },
+      MsePanel, SettingsSection, BundlePage, ManualPanel, JobRow, Picker, useFormSnapshot, CONTEXT_MIN, CONTEXT_MAX },
   }
 } })

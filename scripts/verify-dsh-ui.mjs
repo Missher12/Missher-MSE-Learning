@@ -15,7 +15,11 @@
  *   • the switches write through the host settings document (the profile patch changes) and the
  *     page re-reads the effective state straight away, without a manual refresh;
  *   • the value survives a full Host restart, and the page stays usable while paused;
- *   • reading the page rewrites NEITHER the learning store nor any session budget file;
+ *   • reading the page rewrites NEITHER the learning store nor any session budget file, checked as
+ *     three windows: A (before any Host starts) → afterStartup (this start's recovery has run) →
+ *     B (after every page read/navigation). A process start legitimately commits one control
+ *     transaction, so "byte-identical ACROSS a restart" was never the right contract and the old
+ *     single-window assertion is recorded as outdated instead of being claimed as a pass;
  *   • an explicit PAUSE/RESUME save is a real control write: it must bump the control generation
  *     and the document revision, and it must still leave lessons, receipts, events, jobs, spends
  *     and every session budget file exactly as they were (alpha.15 makes the control write
@@ -144,6 +148,75 @@ const check = (name, value, detail) => {
   report.assertions.push({ name, ok: value === true, detail })
   assert.equal(value, true, `${name}${detail === undefined ? '' : ` (${detail})`}`)
 }
+/**
+ * One verification window: the whole store bytes, the parsed document, every session budget file.
+ *
+ * Windows are compared as WHOLE FILES (bytes, size and mtime) whenever the claim is "nothing
+ * wrote", and as protected facts plus an explicit allowed-delta whenever a documented write is
+ * permitted in between. Collapsing the two into one byte-equality check is exactly how the old
+ * restart assertion became unfalsifiable in the wrong direction.
+ */
+const windowOf = () => ({ store: storeState(), document: storeDocument(), sessions: sessionBytes() })
+/**
+ * The top-level document fields a Host START is documented to write, and the only ones.
+ *
+ * A start runs two recovery steps that legitimately commit: the automatic-queue recovery
+ * (`recoverAutoPlans`, which only bumps the revision and clears void tickets) and the durable
+ * settlement control transaction (whose core-side `settlementControl` mutates control state and
+ * always bumps `generation` inside the same transaction, which bumps `revision` with it). Every
+ * other top-level fact — lessons, receipts, events, sessions, jobs, spends, experiments, schema,
+ * owner — must come out of a start exactly as it went in.
+ */
+const STARTUP_WRITE_KEYS = ['revision', 'settlementControl']
+/** The top-level keys that actually differ between two parsed documents. */
+const changedKeys = (before, after) => {
+  if (before === null || after === null) return null
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)])
+  return [...keys].filter(key => JSON.stringify(before[key]) !== JSON.stringify(after[key])).sort()
+}
+/**
+ * Wait until THIS start's documented recovery write has landed, then return the document.
+ *
+ * `previous` is the window the start began from. The recovery transaction is the first write after
+ * a start, so the baseline is taken as soon as the revision or the control generation has moved
+ * past it — polling, never a fixed sleep, so the baseline cannot race an asynchronous recovery.
+ * A start with nothing to recover hits the bound and reports `moved: false` rather than being
+ * assumed to have written.
+ */
+const awaitStartupRecovery = async (previous, { timeoutMs = 20_000, stepMs = 250 } = {}) => {
+  const started = Date.now()
+  for (;;) {
+    const doc = storeDocument()
+    if (doc !== null) {
+      const revisionMoved = Number.isSafeInteger(doc.revision)
+        && Number.isSafeInteger(previous?.document?.revision) && doc.revision > previous.document.revision
+      const generationMoved = controlGeneration(doc) > controlGeneration(previous?.document)
+      if (revisionMoved || generationMoved) return { document: doc, moved: true, waitedMs: Date.now() - started }
+    }
+    if (Date.now() - started >= timeoutMs) return { document: doc, moved: false, waitedMs: Date.now() - started }
+    await new Promise(resolveStep => setTimeout(resolveStep, stepMs))
+  }
+}
+/** A window as the report carries it: file facts and control bookkeeping, never lesson content. */
+const windowSummary = window => ({ store: window.store, sessions: window.sessions,
+  revision: window.document?.revision ?? null, generation: controlGeneration(window.document),
+  userPaused: window.document === null ? null : controlPaused(window.document) })
+/**
+ * The three windows, declared before anything runs so even a failed run records which contract was
+ * being checked — and so the RESULT of the old single-window form is never reported as a pass: it
+ * asserted whole-store byte equality across a Host restart, which a documented startup recovery
+ * write makes impossible by construction. That assertion was outdated; the three-window form below
+ * is what this run verifies.
+ */
+report.windows = {
+  contract: 'A (before any Host starts) → afterStartup (this start recovery ran) → B (after every page read/navigation)',
+  startupWriteKeys: STARTUP_WRITE_KEYS,
+  previousForm: {
+    assertion: 'the restarted page still reads the library unchanged since the last save',
+    status: 'outdated — whole-store byte equality across a Host restart cannot hold once every start '
+      + 'commits its own control transaction; this run does not claim that result',
+  },
+}
 
 let server
 try {
@@ -165,6 +238,14 @@ try {
   })
   report.phases.push({ phase: 'seed', summary: JSON.parse(seedOut.trim().split('\n').at(-1)) })
 
+  // ---------------------------------------------------------------- window A
+  // Before ANY Host starts: the store as the seed left it, plus every session budget file.
+  const windowA = windowOf()
+  report.windows.windowA = { ...windowSummary(windowA), phase: 'before the first Host start' }
+  check('window A: the seeded store is readable and non-empty before the Host starts',
+    windowA.store !== null && windowA.document !== null && windowA.document.lessons.length > 0,
+    JSON.stringify(windowA.store))
+
   server = spawn(process.execPath, [cli, '--profile', profile, '--no-open', '--port', String(port)],
     { env, cwd: work, stdio: ['ignore', 'pipe', 'pipe'] })
   let log = ''
@@ -183,6 +264,30 @@ try {
   report.url = url.split('?')[0]
   report.urlNote = 'the boot token query is dropped from this report'
   report.phases.push({ phase: 'boot', ok: true })
+
+  // ---------------------------------------------------------------- afterStartup baseline
+  // This start has now run its documented recovery. The protected facts must equal window A — a
+  // recovery never edits learning content — while the control generation and the document revision
+  // are ALLOWED to have moved, and nothing else may have: that movement is verified as the exact
+  // documented one instead of being compared as bytes (the old single-window mistake).
+  const startup = await awaitStartupRecovery(windowA)
+  const afterStartup = windowOf()
+  report.windows.afterStartup = { ...windowSummary(afterStartup), phase: 'this Host ready, recovery ran',
+    recoveryMoved: startup.moved, recoveryWaitedMs: startup.waitedMs,
+    changedKeys: changedKeys(windowA.document, afterStartup.document) }
+  check('window A→afterStartup: the startup recovery left every learning fact as window A had it',
+    JSON.stringify(protectedFacts(afterStartup.document)) === JSON.stringify(protectedFacts(windowA.document)),
+    `changed keys: ${JSON.stringify(changedKeys(windowA.document, afterStartup.document))}`)
+  check('window A→afterStartup: the startup recovery left every session budget file untouched',
+    JSON.stringify(afterStartup.sessions) === JSON.stringify(windowA.sessions))
+  check('window A→afterStartup: the only fields that moved are the control generation and the revision',
+    (afterStartup.document?.revision ?? -1) >= (windowA.document?.revision ?? -1)
+    && controlGeneration(afterStartup.document) >= controlGeneration(windowA.document)
+    && (changedKeys(windowA.document, afterStartup.document) ?? ['<unreadable>'])
+      .every(key => STARTUP_WRITE_KEYS.includes(key)),
+    `revision ${windowA.document?.revision}→${afterStartup.document?.revision}, ` +
+    `generation ${controlGeneration(windowA.document)}→${controlGeneration(afterStartup.document)}, ` +
+    `changed ${JSON.stringify(changedKeys(windowA.document, afterStartup.document))}`)
 
   const { chromium } = playwrightRequire('playwright')
   const browser = await chromium.launch()
@@ -235,6 +340,16 @@ try {
   // The read-only baseline also carries the session budget files: nothing on this page may write
   // either of them just because it was displayed.
   const beforeReadSessions = sessionBytes()
+  // ---------------------------------------------------------------- window B's baseline
+  // The state the page's read-only stretch starts from. Everything after this point is the page
+  // (navigation, tab reads, the read-only dry run), so window B can compare whole files against
+  // it. The refused chat turn above is a HOST action, not the page: whether it wrote anything is
+  // recorded here instead of being silently folded into the page's own budget.
+  const pageBaseline = { store: before, document: storeDocument(), sessions: beforeReadSessions }
+  report.windows.pageBaseline = { ...windowSummary(pageBaseline), phase: 'before the first page read',
+    equalsAfterStartupStore: JSON.stringify(pageBaseline.store) === JSON.stringify(afterStartup.store),
+    equalsAfterStartupSessions: JSON.stringify(pageBaseline.sessions) === JSON.stringify(afterStartup.sessions),
+    changedKeysSinceAfterStartup: changedKeys(afterStartup.document, pageBaseline.document) }
   // Any host dialog raised by the turn (for example "no model configured") owns a mask that
   // would swallow the navigation click; clear overlays before each step of the page under test.
   const dismissOverlays = async () => {
@@ -371,13 +486,18 @@ try {
   check('the switch reflects the edit before saving', await masterSwitch.getAttribute('aria-checked') === 'false')
   check('editing enables saving', await saveButton.isEnabled())
   check('discarding is offered once the draft differs', await discardButton.isEnabled())
-  // --- window A: pure reads never rewrite the learning store -------------------
+  // --- window B (first process): after every page read/navigation of this stretch, before any save ---
   check('reading the page (before any save) never rewrites the learning store',
     JSON.stringify(storeState()) === JSON.stringify(before),
     `${JSON.stringify(before)} vs ${JSON.stringify(storeState())}`)
   check('reading the page (before any save) never rewrites a session budget file',
     JSON.stringify(sessionBytes()) === JSON.stringify(beforeReadSessions))
-  // --- window B: an explicit save is a real control write ----------------------
+  check('window B: the whole store is byte-identical to the page-read baseline',
+    JSON.stringify(storeState()) === JSON.stringify(pageBaseline.store),
+    `${JSON.stringify(windowSummary(pageBaseline))} vs ${JSON.stringify(windowSummary(windowOf()))}`)
+  check('window B: every session budget file is unchanged since the page-read baseline',
+    JSON.stringify(sessionBytes()) === JSON.stringify(pageBaseline.sessions))
+  // --- an explicit save is a real control write (a DIFFERENT window: an intended write) -----
   const beforeSave = storeState()
   const beforeSaveDocument = storeDocument()
   const beforeSaveSessions = sessionBytes()
@@ -569,6 +689,30 @@ try {
     poll()
   })
   report.restartedUrl = restartedUrl.split('?')[0]
+
+  // ---------------------------------------------------------------- restart: A→afterStartup→B
+  // The second start commits its OWN documented recovery write, so it is verified exactly like the
+  // first one: the protected facts must survive the restart unchanged and only the control
+  // bookkeeping may move. Comparing whole-store bytes across the restart is what the old
+  // single-window assertion did; that form is recorded as outdated in `report.windows.previousForm`.
+  const restart = await awaitStartupRecovery({ store: afterSave, document: afterDocument, sessions: afterSaveSessions })
+  const afterRestartStartup = windowOf()
+  report.windows.restartRecovery = { ...windowSummary(afterRestartStartup),
+    phase: 'restarted Host ready, its recovery ran', recoveryMoved: restart.moved, recoveryWaitedMs: restart.waitedMs,
+    changedKeys: changedKeys(afterDocument, afterRestartStartup.document) }
+  check('restart A→afterStartup: the restart left every learning fact as the last save left it',
+    JSON.stringify(protectedFacts(afterRestartStartup.document)) === JSON.stringify(protectedFacts(afterDocument)),
+    `changed keys: ${JSON.stringify(changedKeys(afterDocument, afterRestartStartup.document))}`)
+  check('restart A→afterStartup: the restart left every session budget file untouched',
+    JSON.stringify(afterRestartStartup.sessions) === JSON.stringify(afterSaveSessions))
+  check('restart A→afterStartup: only the control generation and the revision moved',
+    (afterRestartStartup.document?.revision ?? -1) >= (afterDocument?.revision ?? -1)
+    && controlGeneration(afterRestartStartup.document) >= controlGeneration(afterDocument)
+    && (changedKeys(afterDocument, afterRestartStartup.document) ?? ['<unreadable>'])
+      .every(key => STARTUP_WRITE_KEYS.includes(key)),
+    `revision ${afterDocument?.revision}→${afterRestartStartup.document?.revision}, ` +
+    `generation ${controlGeneration(afterDocument)}→${controlGeneration(afterRestartStartup.document)}, ` +
+    `changed ${JSON.stringify(changedKeys(afterDocument, afterRestartStartup.document))}`)
   await page.goto(restartedUrl, { waitUntil: 'domcontentloaded' })
   await page.waitForTimeout(3500)
   await dismissOverlays()
@@ -587,10 +731,16 @@ try {
   const restartRow = /name: '@missher\/dsh-mse-learning'[\s\S]*?(?=\n\s*- id:|$)/u.exec(composedRestart)?.[0] ?? ''
   check('the composed configuration after the restart still runs enabled',
     restartRow.includes('name:') && !restartRow.includes('enabled: false'), restartRow.trim().slice(0, 240))
-  check('the restarted page still reads the library unchanged since the last save',
-    JSON.stringify(storeState()) === JSON.stringify(afterSave))
-  check('the restart changed no session budget file',
-    JSON.stringify(sessionBytes()) === JSON.stringify(afterSaveSessions))
+  // Window B, after the restarted page has opened the section: whole files, against the baseline
+  // this start's own recovery ended at. The previous form of this check compared against a
+  // PRE-restart snapshot and therefore failed on the legitimate recovery write (see
+  // `report.windows.previousForm`); the protection it carried — the page writes nothing — is kept
+  // and now covers the control bookkeeping as well.
+  check('window B: the restarted page left the whole store byte-identical to this start baseline',
+    JSON.stringify(storeState()) === JSON.stringify(afterRestartStartup.store),
+    `${JSON.stringify(windowSummary(afterRestartStartup))} vs ${JSON.stringify(windowSummary(windowOf()))}`)
+  check('window B: the restarted page changed no session budget file',
+    JSON.stringify(sessionBytes()) === JSON.stringify(afterRestartStartup.sessions))
   await shot(page, '10-after-restart')
 
   // ---------------------------------------------------------------- size / theme matrix
@@ -625,14 +775,19 @@ try {
       await section.getByRole('tab', { name: label }).click()
       await page.waitForTimeout(450)
       const state = await section.evaluate((_, wanted) => {
-        const tabs = [...document.querySelectorAll('[role="tab"]')]
+        // EVERY query below is scoped to this section root. The Host keeps its own tabs in the same
+        // document (the conversation page is usually still open behind the settings), so a
+        // document-wide `[role="tab"]` query counted those too and reported two selected tabs for a
+        // page that has exactly one — the assertion itself was right, the query was too wide.
+        const root = _
+        const tabs = [...root.querySelectorAll('[role="tab"]')]
         const selected = tabs.filter(node => node.getAttribute('aria-selected') === 'true')
-        const panels = [...document.querySelectorAll('[data-mse-details="page"] [role="tabpanel"]')]
+        const panels = [...root.querySelectorAll('[role="tabpanel"]')]
         const shown = panels.filter(node => node.offsetParent !== null)
         // The native tab list paints its own sliding block: a span[aria-hidden] sized
         // `(100% - 8px) / n` and shifted by `index * 100%`. Comparing ITS rect with the
         // selected tab's rect is the real highlight check; a non-zero width is not.
-        const list = document.querySelector('[data-mse-details="page"] [role="tablist"]')
+        const list = root.querySelector('[role="tablist"]')
         const indicator = list === null ? null : list.querySelector(':scope > span[aria-hidden="true"]')
         const rect = node => { const r = node.getBoundingClientRect()
           return { left: Math.round(r.left * 10) / 10, width: Math.round(r.width * 10) / 10 } }
@@ -732,6 +887,16 @@ try {
   check('the plugin page does not mount a second full panel',
     await page.locator('[data-mse-details="page"]').count() === 0)
   await shot(page, '13-plugin-pointer')
+
+  // ---------------------------------------------------------------- window B (final)
+  // The size/theme matrix, the long-text probes and the plugin-page navigation are the last page
+  // activity of this run: after ALL of it the store must still be byte-identical to this start's
+  // baseline, and no session budget file may have moved.
+  check('window B (after every page read and navigation) never wrote the store',
+    JSON.stringify(storeState()) === JSON.stringify(afterRestartStartup.store),
+    `${JSON.stringify(windowSummary(afterRestartStartup))} vs ${JSON.stringify(windowSummary(windowOf()))}`)
+  check('window B (after every page read and navigation) never wrote a session budget file',
+    JSON.stringify(sessionBytes()) === JSON.stringify(afterRestartStartup.sessions))
 
   report.restartTeardownNoise = pageErrors.slice(errorsBeforeRestart.length)
   check('the page produced no browser errors of its own', errorsBeforeRestart.length === 0,

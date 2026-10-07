@@ -4,7 +4,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { LearningEngine, RECALL_REASONS } from '../src/index.mjs'
-import { analyze, relevance, admits } from '../src/recall.mjs'
+import { analyze, relevance, admits, conditionVerdict, parseCondition, registeredDomainCondition,
+  DOMAIN_CONDITION_PAIRS } from '../src/recall.mjs'
 
 function setup(t, extra = {}) {
   const stateRoot = mkdtempSync(join(tmpdir(), 'mse-recall-'))
@@ -334,4 +335,38 @@ test('captured literals stay valid and recall in a fresh session', t => {
   const recalled = prepare(engine, 'literal-task', '导出 JSON 空值字段怎么处理')
   assert.equal(recalled.reason, RECALL_REASONS.recalled)
   assert.ok(recalled.context.includes('`{"state":"unknown","code":0}`'), 'the recalled rule is still valid JSON')
+})
+
+test('a registered domain condition is decidable; an unregistered one still refuses', () => {
+  const row = { methodId: null, applicability: '同一会话切换筛选或快速展开多条经验详情时',
+    exclusions: '同步且没有共享状态的纯函数无需请求代次' }
+  // The sentence is not a format template, so the format parser alone cannot read it…
+  assert.equal(parseCondition(row.applicability, 'applicability').kind, 'unsupported')
+  assert.equal(registeredDomainCondition(row).applicability, row.applicability)
+  const view = terms => ({ semantic: terms, formatMentions: [], ambiguousFormats: [] })
+  // …but the registered pair decides it, and it is a HOST-registered decision, not a guess.
+  const applicable = conditionVerdict(row, view(['会话', '详情', '切换']))
+  assert.equal(applicable.ok, true)
+  assert.equal(applicable.kind, 'domain')
+  assert.equal(applicable.verified, true)
+  // A task that never mentions the session/detail work is outside the stated applicability.
+  const outside = conditionVerdict(row, view(['报表', '导出']))
+  assert.equal(outside.ok, false)
+  assert.equal(outside.gate, 'condition_not_applicable')
+  // The exclusion is decided FIRST, exactly like every other condition.
+  const excluded = conditionVerdict(row, view(['会话', '详情', '纯函数']))
+  assert.equal(excluded.ok, false)
+  assert.equal(excluded.gate, 'condition_excluded')
+  // A row carrying ANY other prose is still refused: registering a sentence is a deliberate act.
+  const unregistered = { methodId: null, applicability: '某个没有被登记的适用条件时', exclusions: '' }
+  const refused = conditionVerdict(unregistered, view(['会话', '详情']))
+  assert.equal(refused.ok, false)
+  assert.equal(refused.gate, 'condition_unclear')
+  assert.equal(refused.verified, false)
+  // The registry is closed, verbatim and small: every pair must name both fields.
+  for (const pair of DOMAIN_CONDITION_PAIRS) {
+    assert.equal(typeof pair.applicability, 'string')
+    assert.ok(pair.applicability.length > 0)
+    assert.equal(typeof pair.exclusions, 'string')
+  }
 })

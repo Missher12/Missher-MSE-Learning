@@ -218,6 +218,10 @@ test('a cancelled runner keeps the single slot until it really stops, however lo
   assert.equal(queue.status().running, two.job.id,
     'the freed slot goes to the waiting job, which is the only runner alive now')
   assert.equal(peak, 1)
+  // Cleanup only: `dispose()` now waits for every accepted job to PHYSICALLY finish, so the second
+  // runner — which deliberately ignores aborts — is released here. No assertion above changes.
+  for (const resolve of release) resolve()
+  await flush()
 })
 
 test('a job settles only after its last tracked request drains', async t => {

@@ -1,6 +1,6 @@
 {
   "name": "@missher/dsh-mse-learning",
-  "version": "0.9.0-alpha.17",
+  "version": "0.9.0-alpha.18",
   "private": true,
   "type": "module",
   "description": "Scoped persistent lessons with bounded context for Agent adapters",
@@ -13,7 +13,12 @@
   "bugs": {
     "url": "https://github.com/Missher12/Missher-MSE-Learning/issues"
   },
-  "keywords": ["dsh-plugin", "persistent-learning", "memory", "agent"],
+  "keywords": [
+    "dsh-plugin",
+    "persistent-learning",
+    "memory",
+    "agent"
+  ],
   "engines": {
     "node": ">=22.19.0"
   },
@@ -46,7 +51,8 @@
     "README.en.md",
     "docs",
     "LICENSE",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "VALIDATION.md"
   ],
   "dsh": {
     "bundle": {

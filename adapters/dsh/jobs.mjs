@@ -69,6 +69,8 @@ export class JobQueue {
     this.maxCompleted = maxCompleted
     /** Ordered oldest-first; the tail is the newest submission. */
     this.jobs = []
+    // One settled handle per live job (see whenSettled); emptied as each job completes.
+    this.waiters = new Map()
     /** requestId → terminal record, kept past the retained window for bounded dedupe. */
     this.completed = new Map()
     this.running = null
@@ -273,7 +275,35 @@ export class JobQueue {
   releaseSlot(job) {
     if (job.labelTimer !== null && job.labelTimer !== undefined) { this.cancelTimer(job.labelTimer); job.labelTimer = null }
     if (this.running === job) this.running = null
+    // The ONE physical-completion point: the runner has returned (or never started), so the caller
+    // waiting on this job may continue. Idempotent, and it happens before the next job starts so a
+    // waiter cannot observe a released slot without its own job being finished.
+    const waiter = this.waiters.get(job.id)
+    if (waiter !== undefined) { this.waiters.delete(job.id); waiter.resolve(this.view(job)) }
     this.pump()
+  }
+
+  /**
+   * Wait for a job to be physically finished — the runner returned, or it never ran at all.
+   *
+   * Created with the job and resolved through `releaseSlot`, so it also covers the cases a runner's
+   * own `finally` cannot: refused by the gate, cancelled while queued, or cancelled between `submit`
+   * and the runner microtask. A job already retained answers immediately, and an unknown id answers
+   * `job_unknown` instead of hanging.
+   */
+  whenSettled(id) {
+    const live = this.jobs.find(row => row.id === id)
+    if (live !== undefined) {
+      if (TERMINAL.includes(live.state) && live.settled) return Promise.resolve(this.view(live))
+      const existing = this.waiters.get(id)
+      if (existing !== undefined) return existing.promise
+      let resolve = null
+      const promise = new Promise(settle => { resolve = settle })
+      this.waiters.set(id, { promise, resolve })
+      return promise
+    }
+    for (const record of this.completed.values()) if (record.view.id === id) return Promise.resolve(record.view)
+    return Promise.resolve({ id, state: 'unknown', code: 'job_unknown' })
   }
 
   /** Cancel one job. A queued job stops before running; a running job is aborted and ignored. */
@@ -313,9 +343,35 @@ export class JobQueue {
       dedupeWindowMs: this.completedTtlMs, dedupeCapacity: this.maxCompleted }
   }
 
-  dispose() {
-    this.cancelAll('plugin_disposed')
+  /**
+   * Wait until every job this queue accepted has PHYSICALLY finished.
+   *
+   * "Cancelled" is a statement about the task, not about the request it started: a runner that
+   * ignores its AbortSignal keeps running until it returns. The slot is released exactly at that
+   * point (`releaseSlot`), so waiting on `whenSettled` for each accepted job is the only honest
+   * drain — a timer would only pretend, and a disposed plugin that returned early leaves a paid
+   * request running behind an unloaded module.
+   */
+  async drainAll() {
+    const accepted = [...this.jobs]
+    const live = accepted.filter(job => job.settled !== true)
+    if (live.length === 0) return { drained: 0, outstanding: 0 }
+    await Promise.allSettled(live.map(job => this.whenSettled(job.id)))
+    return { drained: live.length, outstanding: this.jobs.filter(job => job.settled !== true).length }
+  }
+
+  /**
+   * Unload: stop accepting and starting work, cancel what this plugin owns, then WAIT for every
+   * accepted job to really finish before the records are dropped.
+   */
+  async dispose() {
+    const accepted = [...this.jobs]
+    // Set first: a job that settles while this loop runs must not `pump()` a successor into life.
     this.disposed = true
+    for (const job of accepted) {
+      if (!TERMINAL.includes(job.state)) this.cancel(job.id, 'plugin_disposed')
+    }
+    await Promise.allSettled(accepted.filter(job => job.settled !== true).map(job => this.whenSettled(job.id)))
     // Every timer this queue created is dropped here, including the ones belonging to a job
     // whose runner never returned: a disposed plugin must not keep the process alive.
     for (const job of this.jobs) {

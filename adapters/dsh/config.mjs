@@ -30,6 +30,9 @@ import z from '@deepseek-ai/schemastery'
 export const SETTINGS_DEFAULTS = Object.freeze({
   enabled: true,
   reflectionEnabled: true,
+  // Automatic validation is OPT-IN and off by default: it spends the evaluation budget without a
+  // person pressing anything, so it must be a decision the operator makes, not a surprise.
+  autoValidationEnabled: false,
   maxContextBytes: 768,
   evaluationTokensPerDay: 0,
   evaluationCallsPerDay: 2,
@@ -46,6 +49,15 @@ export const Config = z.object({
   enabled: z.boolean().default(SETTINGS_DEFAULTS.enabled).volatile(),
   /** Automatic reflection for qualifying turns. Never gates direct corrections or recall. */
   reflectionEnabled: z.boolean().default(SETTINGS_DEFAULTS.reflectionEnabled).volatile(),
+  /** Automatic review/validation of pending method candidates, inside the evaluation budget. */
+  autoValidationEnabled: z.boolean().default(SETTINGS_DEFAULTS.autoValidationEnabled).volatile(),
+  /**
+   * The session a HISTORICAL (source-less) candidate is verified against. A backfilled item has no
+   * original turn, so its route may not be borrowed from whatever session happened to run last:
+   * the operator names the verification session explicitly, and only that session's route is used.
+   * An empty value means "no backfill route", and those items stay blocked with a visible reason.
+   */
+  verificationSessionId: z.string().max(512).default('').volatile(),
   /** Per-turn injection ceiling in UTF-8 bytes; the per-session 1536 B ceiling is separate. */
   maxContextBytes: z.number().min(CONTEXT_BYTES_MIN).max(CONTEXT_BYTES_MAX).step(1)
     .default(SETTINGS_DEFAULTS.maxContextBytes).volatile(),
