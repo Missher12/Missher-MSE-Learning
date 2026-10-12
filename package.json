@@ -1,6 +1,6 @@
 {
   "name": "@missher/dsh-mse-learning",
-  "version": "0.9.0-alpha.18",
+  "version": "0.9.0-alpha.19",
   "private": true,
   "type": "module",
   "description": "Scoped persistent lessons with bounded context for Agent adapters",
@@ -46,6 +46,8 @@
     "adapters/harness.mjs",
     "adapters/hermes/__init__.py",
     "adapters/hermes/bridge.py",
+    "adapters/hermes/driver.py",
+    "adapters/hermes/plan.py",
     "adapters/hermes/plugin.yaml",
     "README.md",
     "README.en.md",

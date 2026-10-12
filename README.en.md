@@ -1,5 +1,7 @@
 # MSE Learning
 
+> The current source version is **0.9.0-alpha.19**. See the [current delivery notes](https://github.com/Missher12/Missher-MSE-Learning/blob/main/PUBLICATION.md) for the DSH / Hermes scheduling, cancellation accounting, and validation scope. The alpha.18 versions, download examples, and validation tables below are historical. Git, Release assets, and each platform installation are tracked separately.
+
 English | [中文](README.md) · [Desktop and downloads](https://github.com/Missher12/Missher-DeepseekHarness-Desktop)
 
 Persists scoped user corrections and method candidates for DSH, recalls relevant lessons within a byte budget, and records adoption and verification established by the trusted host. It does not train model weights or guarantee that a model will never repeat a mistake.

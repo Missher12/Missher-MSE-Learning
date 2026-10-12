@@ -9,7 +9,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { LearningEngine } from '../src/index.mjs'
-import { packCases, packCriteriaHash, packScenarioHash, packSuiteId } from '../src/domains.mjs'
+import { packCases, packCaseCriteriaHash, packCriteriaHash, packScenarioHash, packSuiteId } from '../src/domains.mjs'
 import { parseVerdict, planHash } from '../src/review.mjs'
 import { packAdmits } from '../src/domains.mjs'
 
@@ -278,11 +278,16 @@ test('a review reservation carries the queue identity and the frozen criteria te
   const f = fixture()
   try {
     const lesson = candidate(f)
-    const criteria = packCases('mse-lifecycle-v1')[0].criteria
+    const sample = packCases('mse-lifecycle-v1')[0]
+    const criteria = sample.criteria
     const plan = f.engine.autoPlanRegister({ ...planInput(f, lesson), criteria })
     const binding = plan.plan.planHash
+    // A queue-driven reservation names the REGISTERED case and the identity the registry derives for
+    // it: the core refuses self-declared hashes and criteria for a pack-backed review.
     const ticket = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000,
-      planHash: binding, queueKey: plan.plan.queueKey, criteria, scenarioHash: 'x', criteriaHash: 'y' }).ticket
+      planHash: binding, queueKey: plan.plan.queueKey, criteria, packId: 'mse-lifecycle-v1',
+      caseId: sample.caseId, scenarioHash: packScenarioHash('mse-lifecycle-v1', sample.caseId),
+      criteriaHash: packCaseCriteriaHash('mse-lifecycle-v1', sample.caseId) }).ticket
     assert.equal(typeof ticket, 'string')
     // (r1-1) Re-registering the SAME work under a DIFFERENT route leaves the old ticket describing an
     // execution that no longer exists: the current plan no longer matches, so the result is refused.
@@ -329,12 +334,15 @@ test('a restart voids every ticket, not only the expired ones', () => {
     f.advance(60_000)
     const recovered = f.engine.recoverAutoPlans()
     assert.equal(recovered.releasedTickets, 1)
-    // An unknown or voided ticket is a caller error, so the core refuses it outright — the point is
-    // that it cannot be submitted at all.
-    assert.throws(() => f.engine.reviewResult({ ticket, planHash: binding, projectKey: f.projectKey, criteria,
+    // Stage 4c: a ticket THIS core really signed is answered with its own terminal state instead of a
+    // bare caller error — it can still never be submitted, and the late reply now says WHY (the
+    // restart voided it) instead of looking like a ticket the core never saw. A ticket with no record
+    // here still throws `review_ticket_rejected`.
+    const late = f.engine.reviewResult({ ticket, planHash: binding, projectKey: f.projectKey, criteria,
       first: '{"winner":"A"}', second: '{"winner":"B"}', structuredPassed: true,
-      answers: { candidate: '先记录代次，迟到结果按代次丢弃并说明处理方式。', baseline: '直接处理即可，不需要额外记录任何东西。' } }),
-    error => error.code === 'review_ticket_rejected')
+      answers: { candidate: '先记录代次，迟到结果按代次丢弃并说明处理方式。', baseline: '直接处理即可，不需要额外记录任何东西。' } })
+    assert.equal(late.ok, false)
+    assert.equal(late.code, 'ticket_voided')
     // The reservation stays spent: the call may have been paid for.
     assert.equal(f.engine.status().evaluationCallsLast24h, 1)
   } finally { f.cleanup() }

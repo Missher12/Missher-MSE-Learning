@@ -274,3 +274,71 @@ test('a permission withdrawn during the final permit never commits a result', as
   assert.equal(last[1], 'queued', 'a cancelled commit returns the plan to the queue')
   assert.equal(last[2], 'review_cancelled')
 })
+
+// ── Stage 4c: a read that cannot answer says so, and a read never cancels ────────────────────────
+// Both cases come from the independent read-only probe (`audit/ui-review/read-only-probes`): a real
+// store that became unreadable while a queued plan existed was reported as `plans: 0, idle: true`,
+// and a settings snapshot taken while the config was already visible cancelled a running job.
+test('an unreadable queue is reported as unknown, never as an empty queue', async () => {
+  const auto = createAutoValidation({
+    engine: { autoPlans() { const error = new Error('invalid_store'); error.code = 'invalid_store'; throw error } },
+    context: () => null, route: () => null, callModel: async () => null,
+    enabled: () => true, busy: () => false })
+  const status = auto.status()
+  assert.equal(status.plans, null, 'a false zero is a false statement about work that exists')
+  assert.equal(status.queued, null)
+  assert.equal(status.idle, null, 'an unreadable queue is not idle')
+  assert.equal(status.queueError, 'invalid_store', "the core's own code travels to the surface")
+})
+
+test('an empty queue still reports REAL zeros and no error', async () => {
+  const auto = createAutoValidation({
+    engine: { autoPlans() { return [] } },
+    context: () => null, route: () => null, callModel: async () => null,
+    enabled: () => true, busy: () => false })
+  const status = auto.status()
+  assert.equal(status.plans, 0)
+  assert.equal(status.queued, 0)
+  assert.equal(status.idle, true)
+  assert.equal(status.queueError, null)
+})
+
+// ── Stage 4c: a READ never performs the permission transition ───────────────────────────────────
+// The DSH adapter's `sync()` is reached from read-only surfaces (`settings()`, the permission
+// callback). Before this fix it applied the whole transition from a read: with the saved config
+// already visible and the lifecycle notification not yet delivered, a plain settings read cancelled a
+// running automatic job and bumped the abort generation, while nothing on disk had changed. The
+// transition now belongs to the explicit lifecycle call; a read recomputes and REPORTS only.
+test('the lifecycle flag is what authorises a transition, and a read applies nothing', async () => {
+  const { readFileSync } = await import('node:fs')
+  const source = readFileSync(new URL('../adapters/dsh/index.mjs', import.meta.url), 'utf8')
+  // Every side effect of the transition sits behind `lifecycle`: none of them may run on the path a
+  // read takes. This is a structural assertion on purpose — the behaviour is exercised by the real
+  // host suites (`stage3d-pump`), while this pins the invariant that made it possible.
+  const raw = source.slice(source.indexOf('function sync('), source.indexOf('/**\n   * Does the queue hold work'))
+  // Comments describe the gate; only CODE counts.
+  const body = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gmu, '')
+  // ONE early return is what makes a read safe: it sits INSIDE the changed-policy branch, before the
+  // block that applies the transition, and it returns the recomputed reasons without touching the
+  // bridge, the jobs or the automatic queue.
+  // The CHANGED-POLICY early return is the one that hands back `reasons`; the other gate is the
+  // no-change branch, which is a different (harmless) site and must not be confused with this one.
+  const gate = body.search(/if \(!lifecycle\) \{\s*\n[\s\S]*?return reasons/)
+  assert.ok(gate > 0, 'the changed-policy branch must have its own early return for a read')
+  const applyBlock = body.slice(gate)
+  for (const effect of ['bridge.setEnabled', 'bridge.abortReflections', 'jobs.cancelAll']) {
+    assert.ok(applyBlock.includes(effect), `${effect} is applied by the lifecycle path`)
+  }
+  // No transition call appears BEFORE that early return, so a read can reach the return and nothing
+  // else. (`bridge.setEnabled` appears above it only inside the no-change branch, guarded by its own
+  // `if (lifecycle)`, which the per-site check above already covered.)
+  const beforeGate = body.slice(0, gate)
+  for (const effect of ['bridge.abortReflections', 'jobs.cancelAll']) {
+    assert.ok(!beforeGate.includes(effect), `${effect} must not run before the gate`)
+  }
+  const enabledCalls = [...beforeGate.matchAll(/bridge\.setEnabled\s*\(/gu)]
+  for (const call of enabledCalls) {
+    const line = beforeGate.slice(beforeGate.lastIndexOf("\n", call.index) + 1, call.index)
+    assert.match(line, /lifecycle/, `an earlier setEnabled must be lifecycle-guarded: ${line.trim()}`)
+  }
+})

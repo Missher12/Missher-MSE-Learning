@@ -58,16 +58,32 @@ const stopError = code => Object.assign(new Error(code), { code })
  * @param options.engine - the shared core; every state change goes through it.
  * @param options.context - a callable that builds the frozen scenario/criteria for a plan, or
  *   `null` when the lesson's own conditions cannot be turned into a bounded scenario yet.
+ * @param options.reviewAdmission - a read-only `(lesson) => { ok, reason }` that answers whether the
+ *   method belongs to the registered pack's domain at all. It is consulted BEFORE any reservation,
+ *   so an unrelated method waits with the predicate's own reason (`review_out_of_domain`) instead of
+ *   paying for a scenario it can never be credited against. Defaults to "no answer supplied", which
+ *   leaves the context callable as the only gate.
  * @param options.route - the trusted host route `{provider, model, reasoningEffort}` for a lesson,
  *   or `null` when the host cannot name one. Never invented here.
  * @param options.callModel - `(request, signal) => Promise<string>`; the only model entry point.
  * @param options.enabled - re-read before EVERY paid step, so an operator switch takes effect now.
+ * @param options.dueWork - an optional bounded pass that runs on the SAME wake-ups and under the same
+ *   serial guard as the queue work, and BEFORE the automatic switch is consulted. It exists for the
+ *   problem due-recovery pump: reflection has its own switch (`reflectionEnabled`) and its own rolling
+ *   allowance, so a device with automatic validation off must still recover a refused reflection. It
+ *   never runs beside a scan (the `scanning` guard is held) and never creates a second timer or a
+ *   second paid queue.
  * @param options.now - injectable clock (tests only).
+ * @param options.schedule - injectable repeating timer `(fn, ms) => handle`; the ONE wake-up timer
+ *   this scheduler owns is created through it, so a controlled verification drives the real timer
+ *   path instead of a test-only branch. Defaults to `setInterval`.
+ * @param options.cancelTimer - injectable cancellation for that handle. Defaults to `clearInterval`.
  * @param options.log - `(code, detail) => void`, reasoning codes only, never lesson text.
  */
 export function createAutoValidation({ engine, context, objectiveContext = () => null, route, callModel,
   source = () => ({}), permit = () => ({ ok: true }), enabled = () => true, now = Date.now, log = () => {},
-  busy = () => false, onAbort = null, slot = null }) {
+  busy = () => false, onAbort = null, slot = null, reviewAdmission = null, dueWork = null,
+  schedule = (fn, ms) => setInterval(fn, ms), cancelTimer = handle => clearInterval(handle) }) {
   let disposed = false
   let scanning = false
   /** The scheduler's single wake-up timer; owned here and cleared on dispose. */
@@ -281,17 +297,34 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
   /** Read-only view for the status card; never advances anything. */
   const status = () => {
     let plans = []
-    try { plans = engine.autoPlans() } catch { plans = [] }
+    // A READ that could not answer is reported as "unknown", never as an empty queue. An unreadable
+    // store (a corrupt document, a lock that could not be taken) used to be swallowed into `[]`, so
+    // the card said `plans: 0, idle: true` while the core's own read said `invalid_store` — a false
+    // zero is a false statement about work that really exists. The counts are `null` in that case and
+    // `queueError` carries the core's own code; a genuinely empty queue still reports real zeros.
+    let queueError = null
+    try { plans = engine.autoPlans() } catch (error) { plans = null; queueError = error?.code ?? 'auto_plans_unavailable' }
+    if (plans === null) {
+      return { plans: null, queued: null, running: null, done: null, blocked: null, failed: null,
+        interrupted: null, lastReason: null, abortGeneration: cancelEpoch, lastAbortReason,
+        idle: null, queueError, scans: events.length, lastEvent: events.slice(-1)[0] ?? null,
+        events: events.slice(-8).map(row => ({ ...row })), reviewTokens: REVIEW_TOKENS }
+    }
     const count = stage => plans.filter(plan => plan.stage === stage).length
     return { plans: plans.length, queued: count('queued'), running: count('running'), done: count('done'),
-      blocked: count('blocked'), failed: count('failed'), interrupted: count('interrupted'),
+      blocked: count('blocked'), failed: count('failed'), interrupted: count('interrupted'), queueError: null,
       // The newest reason is what an operator needs to see when nothing is moving.
       lastReason: plans.filter(plan => plan.reason).slice(-1)[0]?.reason ?? null,
       // Which cancellation generation is in force, and why the last one happened: a card that says
       // "waiting" is not the same statement as "stopped by a pause" or "yielded to a live turn".
       abortGeneration: cancelEpoch, lastAbortReason,
       idle: plans.every(plan => plan.stage !== 'running'),
-      scans: events.length, lastEvent: events.slice(-1)[0] ?? null, reviewTokens: REVIEW_TOKENS }
+      scans: events.length, lastEvent: events.slice(-1)[0] ?? null,
+      // The bounded recent reasons, newest last. One `lastEvent` is not enough to tell WHY a scan
+      // registered nothing: an operator (or an audit) needs the domain refusal beside the "no
+      // scenario yet" entry rather than only whichever of the two happened to be written last.
+      events: events.slice(-8).map(row => ({ ...row })),
+      reviewTokens: REVIEW_TOKENS }
   }
 
   /**
@@ -302,11 +335,31 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
    */
   const enqueue = (lessons, baseSource) => {
     let registered = 0
-    for (const lesson of lessons.slice(0, MAX_PLANS_PER_SCAN)) {
+    // The CORE is the only dedupe authority, and it keys on the FULL execution binding, not on a
+    // coarse (lesson, version, track) triple: a stored plan whose route, source, suite or criteria
+    // differ from the would-be registration hashes differently and must re-enter autoPlanRegister,
+    // which invalidates the old plan and registers the new binding (phase2-rev1 C/D). An IDENTICAL
+    // binding — including one whose outcome is already settled — hashes the same and stays
+    // untouched, so a paid result is never charged twice. `autoPlanIdentity` is the read-only twin
+    // of that hasher: comparing against it is cheap and needs no store write.
+    const plans = (() => { try { return engine.autoPlans() } catch { return [] } })()
+    const existing = new Map()
+    for (const plan of plans) existing.set(`${plan.lessonId}:${plan.version}:${plan.track}`, plan)
+    for (const lesson of lessons) {
       if (!enabled()) break
-      // The two tracks have independent contexts: a lesson whose REVIEW scenario cannot be built may
-      // still be a perfectly good objective candidate, and vice versa.
-      const scenario = context(lesson)
+      if (registered >= MAX_PLANS_PER_SCAN) break
+      // The two tracks have INDEPENDENT contexts and completions: a lesson whose REVIEW scenario
+      // cannot be built — or whose review already completed — may still be a perfectly good
+      // objective candidate, and vice versa (fair-queue design point 5).
+      //
+      // Domain admission is checked FIRST and reported on its own: an unrelated method must not be
+      // listed as "waiting for criteria" as if a fixture were still being prepared. The refusal is
+      // read-only and costs nothing — no plan, no ticket, no call.
+      const admitted = reviewAdmission === null ? null : (() => {
+        try { return reviewAdmission(lesson) } catch { return { ok: false, reason: 'domain_pack_unknown' } }
+      })()
+      if (admitted !== null && admitted.ok !== true) record(`review_out_of_domain:${admitted.reason ?? 'unknown'}`, lesson.id)
+      const scenario = admitted !== null && admitted.ok !== true ? null : context(lesson)
       if (scenario === null) record('review_missing_criteria', lesson.id)
       // The plan records WHERE the item came from and WHICH route its run must use. A candidate with
       // a source turn is bound to that turn; a historical one is bound to the verification session
@@ -314,31 +367,40 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
       const withScope = { ...baseSource,
         ...(typeof lesson.projectKey === 'string' && lesson.projectKey !== '' ? { projectKey: lesson.projectKey } : {}),
         ...sourceOf(lesson) }
-      if (scenario !== null) {
-        const plan = engine.autoPlanRegister({ lessonId: lesson.id, version: lesson.version,
-          environment: lesson.environment ?? 'default', track: 'review',
-          source: { ...withScope, route: withScope.route ?? undefined }, suite: scenario.suite,
-          criteria: scenario.criteria })
+      const registerFor = (track, suite, criteria) => engine.autoPlanRegister({ lessonId: lesson.id,
+        version: lesson.version, environment: lesson.environment ?? 'default', track,
+        source: { ...withScope, route: withScope.route ?? undefined }, suite, criteria })
+      const coveredByIdentity = (track, suite, criteria) => {
+        try {
+          const identity = engine.autoPlanIdentity({ lessonId: lesson.id, version: lesson.version,
+            environment: lesson.environment ?? 'default', track,
+            source: { ...withScope, route: withScope.route ?? undefined }, suite, criteria })
+          return identity?.ok === true
+            && existing.get(`${lesson.id}:${lesson.version}:${track}`)?.planHash === identity.planHash
+        } catch { return false }
+      }
+      // Register ONE track, bounded to the per-scan NEW-plan quota. The cap is checked BEFORE each
+      // possible registration (not once per lesson), so one lesson's two tracks can never push the
+      // scan's new registrations past MAX_PLANS_PER_SCAN (phase2-rev1 E). A duplicate or an
+      // already-settled identity does not consume the quota.
+      const registerTrack = (track, suite, criteria) => {
+        if (registered >= MAX_PLANS_PER_SCAN) return
+        const plan = registerFor(track, suite, criteria)
         if (plan.ok !== true) record(plan.code ?? 'auto_plan_rejected', lesson.id)
-        else if (plan.settled === true) record('review_settled', lesson.id)
+        else if (plan.settled === true) record(track === 'review' ? 'review_settled' : 'objective_settled', lesson.id)
         else if (plan.duplicate !== true) registered += 1
       }
-      // Already reviewed at this version? Then the plan does not need to exist: the lesson carries
-      // the outcome (and its plan hash), so evicting a finished plan cannot make the queue pay for
-      // the same comparison a second time.
-      const alreadyReviewed = lesson.review?.state === 'reviewed' && lesson.trial?.state === 'trial'
-      if (alreadyReviewed) continue
-      // The objective half: only a candidate the pack's own predicate admits may be sent down the
-      // promotion track, and it is a SEPARATE plan because it is a different execution.
+      // Already reviewed at this version? The lesson carries the outcome (and its plan hash), so a
+      // finished review plan is not re-paid — but the OBJECTIVE half must still be registered when
+      // the pack now admits this candidate. The two tracks are independent completions, so the old
+      // `reviewed && trial → continue` that skipped objective registration is gone (audit
+      // phase2-baseline "late-objective-after-review").
+      if (scenario !== null && !coveredByIdentity('review', scenario.suite, scenario.criteria)) {
+        registerTrack('review', scenario.suite, scenario.criteria)
+      }
       const objective = objectiveContext(lesson)
-      if (objective !== null) {
-        const plan = engine.autoPlanRegister({ lessonId: lesson.id, version: lesson.version,
-          environment: lesson.environment ?? 'default', track: 'objective',
-          source: { ...withScope, route: withScope.route ?? undefined },
-          suite: objective.suite, criteria: scenario?.criteria ?? [] })
-        if (plan.ok !== true) record(plan.code ?? 'auto_plan_rejected', lesson.id)
-        else if (plan.settled === true) record('objective_settled', lesson.id)
-        else if (plan.duplicate !== true) registered += 1
+      if (objective !== null && !coveredByIdentity('objective', objective.suite, scenario?.criteria ?? [])) {
+        registerTrack('objective', objective.suite, scenario?.criteria ?? [])
       }
     }
     return registered
@@ -424,9 +486,28 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
       return 'blocked'
     }
     const planView = engine.reviewPlan({ lessonId: plan.lessonId, projectKey: scope, maxTokens: REVIEW_TOKENS })
-    if (planView.allowed !== true) return parkTemporarily(plan, planView.reasons[0] ?? 'review_not_allowed')
+    if (planView.allowed !== true) {
+      // An expired licence whose renewal window has no new evidence behind it is a TERMINAL fact, not
+      // an allowance that may free up: parking it would ask again for ever for a run that must never
+      // be bought. It is blocked once, with its own reason, and the lesson keeps that outcome.
+      if (planView.reasons.includes('renewal_waiting_evidence')) {
+        engine.autoPlanUpdate({ queueKey: plan.queueKey, planHash: plan.planHash, stage: 'blocked',
+          ticket: null, reason: 'renewal_waiting_evidence' })
+        record('renewal_waiting_evidence', plan.lessonId)
+        return 'blocked'
+      }
+      return parkTemporarily(plan, planView.reasons[0] ?? 'review_not_allowed')
+    }
     const reservation = engine.reviewRequest({ lessonId: plan.lessonId, projectKey: scope, expectedVersion: plan.version,
       maxTokens: REVIEW_TOKENS, planHash: plan.planHash, queueKey: plan.queueKey,
+      // The pack identity travels WITH the reservation: the core freezes it, checks the method
+      // against the registered predicate, and refuses the submission if either moved on. A
+      // queue-driven review without it is refused outright (`domain_pack_required`),
+      // because the whole point of the frozen scenario is that a host-owned domain authorised it.
+      packId: scenario.suite?.packId ?? null, packVersion: scenario.suite?.version ?? null,
+      // The case is named, not asserted: the core derives the scenario and criteria identity from
+      // the registered pack itself and refuses anything that does not match what it derives.
+      caseId: scenario.caseId ?? null,
       scenarioHash: scenario.scenarioHash, criteriaHash: scenario.criteriaHash, criteria: scenario.criteria })
     if (reservation.ok !== true || reservation.ticket === undefined) {
       // A refused reservation is not a failure: the budget may free up later, so the plan stays
@@ -500,6 +581,11 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
         first: ordered[0].verdict.text, second: ordered[1].verdict.text,
         answers: { candidate: candidate.text, baseline: baseline.text },
         structuredPassed, criteria: scenario.criteria,
+        // The submission re-states the SAME identity the reservation froze. The core refuses a
+        // submission that names a different pack or version, so a caller can never re-declare the
+        // domain its answer is credited to.
+        packId: scenario.suite?.packId ?? null, packVersion: scenario.suite?.version ?? null,
+        caseId: scenario.caseId ?? null,
         scenarioHash: scenario.scenarioHash, criteriaHash: scenario.criteriaHash,
         route: decisionRoute, judge: `${decisionRoute.provider}/${decisionRoute.model}`, swapped,
         // Every step must have reported a real measurement for the cost to count as known, and a
@@ -509,6 +595,7 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
         shortAnswersAllowed: scenario.shortAnswersAllowed === true,
         source: 'auto', truncated: spend.truncated > 0 })
       if (verdict.ok !== true) {
+        record(`review_refused:${verdict.code ?? 'unknown'}`, plan.lessonId)
         engine.autoPlanUpdate({ queueKey: plan.queueKey, planHash: plan.planHash, stage: 'blocked', reason: verdict.code })
         return 'blocked'
       }
@@ -518,6 +605,15 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
       return 'done'
     } catch (error) {
       const code = error?.code ?? 'review_judge_failed'
+      // A renewal gate refusal happens BEFORE the reservation: no ticket was minted, so there is
+      // nothing to cancel and nothing to retry — the plan is blocked with its own reason and the
+      // spent evidence is never asked for again.
+      if (code === 'renewal_waiting_evidence') {
+        engine.autoPlanUpdate({ queueKey: plan.queueKey, planHash: plan.planHash, stage: 'blocked',
+          ticket: null, reason: code })
+        record(code, plan.lessonId)
+        return 'blocked'
+      }
       // Release the ticket. The core's cancel rule is deliberately one-way: the debit moves UP to
       // the larger of the reservation and what was actually measured, never down — an unknown
       // usage therefore keeps the conservative reservation instead of refunding a call that may
@@ -750,17 +846,53 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
   }
 
   const scan = async (lessons = []) => {
-    if (disposed || scanning || !enabled()) return { ok: false, code: disposed ? 'disposed' : 'busy' }
+    if (disposed || scanning) return { ok: false, code: disposed ? 'disposed' : 'busy' }
     scanning = true
-    // The candidate rows ARE the lesson facts an automatic run needs; a stripped {id, version}
-    // stub cannot describe a method, so the run looks its lesson up here.
-    // `lessons` is the full candidate feed (the caller must NOT pre-filter already-reviewed rows):
-    // a plan that is still queued needs its lesson facts, and dropping the row here parked it as
-    // `review_missing_criteria` — the starvation this fixes.
-    const byId = new Map(lessons.map(lesson => [lesson.id, lesson]))
-    const lessonOf = plan => byId.get(plan.lessonId) ?? null
     try {
-      const registered = enqueue(lessons, { kind: 'turn' })
+      // (0) THE PROBLEM DUE-RECOVERY PASS. It shares this one wake-up, this one serial guard and the
+      // one physical slot, but NOT the automatic-validation switch: a refused reflection must come
+      // back on its own even on a device that never turned automatic validation on. A failure here is
+      // recorded and never swallows the queue work that follows.
+      let problems = null
+      if (typeof dueWork === 'function') {
+        try { problems = await dueWork() } catch (error) { record(`problem_pump_failed:${error?.code ?? 'unknown'}`) }
+      }
+      if (!enabled()) return { ok: false, code: 'auto_disabled', problems }
+      // THE licence maintenance step, on the SAME real background wake-up as the queue work (a settings
+      // change, a turn end, the bounded timer, startup). A trial that expired naturally has to be
+      // recognised without the user asking again, and a pass with nothing to retire writes nothing —
+      // this is a write path, never a read: the status card and the settings page only call `status()`.
+      // A person's turn owns the session right now, so the pass stands down exactly as the paid work
+      // does; the next wake-up (the turn's own end, a settings change or the timer) runs it. A
+      // maintenance failure is recorded and does NOT swallow the queue work that follows.
+      let maintenance = null
+      if (!busy()) {
+        try { maintenance = engine.maintainLearning({}) }
+        catch (error) { record(`maintain_failed:${error?.code ?? 'unknown'}`) }
+      }
+      // A licence THIS pass retired means the caller's feed was built BEFORE the version moved: its row
+      // describes an edition that no longer exists, and registering a plan for it would be work for a
+      // version nobody can answer for. Those rows are dropped (the fresh rows arrive on the next
+      // wake-up), so a stale feed costs one deferred scan, never a stale registration or a retry loop.
+      const retired = new Set((maintenance?.rows ?? []).map(row => row.lessonId))
+      const current = retired.size === 0 ? lessons : lessons.filter(lesson => !retired.has(lesson.id))
+      // The candidate rows ARE the lesson facts an automatic run needs; a stripped {id, version}
+      // stub cannot describe a method, so the run looks its lesson up here.
+      // `lessons` is the full candidate feed (the caller must NOT pre-filter already-reviewed rows):
+      // a plan that is still queued needs its lesson facts, and dropping the row here parked it as
+      // `review_missing_criteria` — the starvation this fixes. The feed is a BOUNDED registration
+      // window, so a plan it did not carry can NEVER be advanced (or mis-parked) on a truncated set:
+      // facts for ANY live plan fall back to the core's complete per-id index (phase2-rev1 B).
+      const byId = new Map(current.map(lesson => [lesson.id, lesson]))
+      const lessonOf = plan => {
+        const known = byId.get(plan.lessonId)
+        if (known !== undefined && known !== null) return known
+        try {
+          const fetched = engine.autoCandidateFacts?.({ lessonId: plan.lessonId })
+          return fetched?.ok === true ? (fetched.row ?? null) : null
+        } catch { return null }
+      }
+      const registered = enqueue(current, { kind: 'turn' })
       let advanced = 0
       const plans = engine.autoPlans().filter(plan => AUTO_TRACKS.includes(plan.track)
         && (plan.stage === 'queued' || plan.stage === 'interrupted')
@@ -785,7 +917,15 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
         }
         advanced += 1
       }
-      return { ok: true, registered, advanced, status: status() }
+      // THE bounded persistent rotation record. This scan just considered `lessons.length` rows
+      // of the core's current feed, so the consideration cursor moves on — even when the wall
+      // clock did not move, and even when nothing was registered or advanced. The cursor lives in
+      // the core's durable store (survives restart) and is advanced modulo the eligible count
+      // (bounded). Marking a window "considered" is NOT a licence to re-pay: the next scan still
+      // has to pass the FULL planHash identity compare before any plan is created or paid.
+      try { if (current.length > 0) engine.autoConsiderAdvance?.({ step: current.length }) }
+      catch { record('consider_advance_failed') }
+      return { ok: true, registered, advanced, maintenance, problems, status: status() }
     } finally { scanning = false }
   }
 
@@ -797,10 +937,18 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
   const start = (lessonsProvider, { intervalMs = 60_000 } = {}) => {
     if (timer !== null || disposed) return { ok: false, code: 'already_started' }
     const tick = async () => {
-      if (disposed || !enabled()) return
+      if (disposed) return
+      // The automatic feed is only prepared when automatic validation is actually on. The due-recovery
+      // pass still runs through `scan` below: it answers to `reflectionEnabled`, not to this switch,
+      // and re-checking is what keeps a device that never enabled automatic validation able to
+      // recover a reflection its own rolling allowance refused.
+      const automatic = enabled()
       let lessons = []
-      try { lessons = (await lessonsProvider?.()) ?? [] } catch { lessons = [] }
+      if (automatic) {
+        try { lessons = (await lessonsProvider?.()) ?? [] } catch { lessons = [] }
+      }
       try { await scan(lessons) } catch { record('scan_failed') }
+      if (!automatic) return
       // A queued plan whose retry time has come is worth another look even when a foreground turn is
       // quiet; the scan itself re-checks every permission before a paid step.
       const due = engine.autoPlans().some(plan => (plan.stage === 'queued' || plan.stage === 'interrupted')
@@ -808,8 +956,8 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
       if (!due) return
       try { await scan(lessons) } catch { record('scan_failed') }
     }
-    timer = setInterval(() => { void tick() }, intervalMs)
-    if (typeof timer.unref === 'function') timer.unref()
+    timer = schedule(() => { void tick() }, intervalMs)
+    if (timer !== null && timer !== undefined && typeof timer.unref === 'function') timer.unref()
     void tick()
     return { ok: true, intervalMs }
   }
@@ -817,7 +965,7 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
   return { scan, enqueue, rearm, start, abort, status, drain: drainPending,
     dispose: async () => {
       disposed = true
-      if (timer !== null) { clearInterval(timer); timer = null }
+      if (timer !== null) { cancelTimer(timer); timer = null }
       abort('review_cancelled')
       await drainPending()
       currentRun = null

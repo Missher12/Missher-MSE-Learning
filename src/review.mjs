@@ -131,9 +131,15 @@ const MAX_REASON_CHARS = 200
 const MAX_SCENARIO_ID_CHARS = 64
 const MAX_SCENARIO_CHARS = 2000
 const MAX_PACK_ID_CHARS = 64
-const MAX_ARM_CHARS = 4000
+/**
+ * The bounded per-step sizes of a review, exported so the CORE can hand them to a host as the
+ * execution contract instead of a host inventing its own caps: one arm's answer, and one judge
+ * reply. `MAX_ARM_CHARS` is a CHARACTER bound (the prompt builder's own), `MAX_VERDICT_BYTES` a
+ * UTF-8 BYTE bound (the verdict parser's own), and the two are deliberately different units.
+ */
+export const MAX_ARM_CHARS = 4000
 const MAX_SEED_CHARS = 64
-const MAX_VERDICT_BYTES = 8192
+export const MAX_VERDICT_BYTES = 8192
 const MAX_SUGGESTION_CHARS = 4096
 const MAX_JSON_DEPTH = 8
 const MAX_JSON_KEYS = 64

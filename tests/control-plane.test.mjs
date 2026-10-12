@@ -396,7 +396,8 @@ test('an unfinished or routeless turn is refused with its own reason', async () 
   // Only a direct human prompt is a task; injected context is not someone's request.
   const injected = sessionOf([
     ev(0, 'turn/start', { turn: 1 }),
-    ev(1, 'user/message', { content: [{ type: 'text', text: '内部注入的上下文' }], source: { kind: 'plugin' } }),
+    ev(1, 'user/message', { content: [{ type: 'text', text: '内部注入的上下文' }],
+      source: { kind: 'plugin:mse-learning', form: 'instructions' } }),
     ev(2, 'turn/end', { turn: 1, reason: { kind: 'completed' } }),
   ])
   assert.deepEqual((await readTurns(queryOf(injected), 'session-1')).turns, [])

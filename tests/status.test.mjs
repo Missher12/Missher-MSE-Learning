@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { LearningEngine, RECALL_REASONS } from '../src/index.mjs'
-import { createHarnessBridge } from '../adapters/harness.mjs'
+import { createHarnessBridge, mseMessageSource } from '../adapters/harness.mjs'
 import { formatRecallStatus, formatDiagnosis, handleMseCommand, REASON_LABELS } from '../src/status.mjs'
 
 function fixture(t, options = {}) {
@@ -13,7 +13,7 @@ function fixture(t, options = {}) {
   const engine = options.engine ?? new LearningEngine({ stateRoot, adapterId: 'dsh' })
   let id = 0
   const bridge = createHarnessBridge({ engine,
-    createMessage: text => ({ id: `plugin-${++id}`, role: 'user', source: { kind: 'plugin', plugin: 'mse-learning' }, content: [{ type: 'text', text }] }),
+    createMessage: text => ({ id: `plugin-${++id}`, role: 'user', source: mseMessageSource('instructions'), content: [{ type: 'text', text }] }),
     ...options })
   const session = { id: 'status-session', header: {}, events: [] }
   const makeMessage = text => ({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] })

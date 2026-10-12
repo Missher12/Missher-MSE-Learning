@@ -5,6 +5,35 @@ const key = (session, turn) => JSON.stringify([session, String(turn)])
 /** Sessions arrive either as an object or as a bare id; both must behave identically. */
 const idOf = value => typeof value === 'string' ? value : value?.id
 /**
+ * MSE's own producer identity, in BOTH the released wrapper and the current producer-owned kind.
+ *
+ * The session document is format v4 now, and its admission rule is explicit: every message source
+ * must name a PRODUCER-OWNED kind, and the retired `{ kind: 'plugin', plugin: ... }` wrapper is
+ * refused on write (`format v4 message requires a producer-owned source kind`). The host's own
+ * V3→V4 converter lifts a released plugin wrapper into `plugin:<name>` and DROPS the `plugin`
+ * field, so `{ kind: 'plugin', plugin: 'mse-learning', form: 'instructions' }` becomes
+ * `{ kind: 'plugin:mse-learning', form: 'instructions' }`.
+ *
+ * Therefore the plugin WRITES only the producer-owned shape (`mseMessageSource`) and RECOGNISES
+ * both: a session written before the migration, an older controller still in memory, and a row the
+ * host has already converted all carry one of the two. This is structural identity, never a text
+ * heuristic: an unrelated `plugin:<other>` producer, a plain user message, or anything without that
+ * exact identity is never treated as MSE's own.
+ */
+export const MSE_PRODUCER_KIND = 'plugin:mse-learning'
+/** The released V3 wrapper's plugin name, as it appears in historical and not-yet-migrated rows. */
+const MSE_PLUGIN_NAME = 'mse-learning'
+/** The one source every message this plugin writes carries. */
+export function mseMessageSource(form) {
+  return form === undefined ? { kind: MSE_PRODUCER_KIND } : { kind: MSE_PRODUCER_KIND, form }
+}
+/** Is this message source MSE's own, in either shape? */
+export function isMseSource(source) {
+  if (source === null || typeof source !== 'object' || typeof source.kind !== 'string') return false
+  if (source.kind === MSE_PRODUCER_KIND) return true
+  return source.kind === 'plugin' && source.plugin === MSE_PLUGIN_NAME
+}
+/**
  * Internal work is recognised from trusted structure first: a non-user message
  * source, an explicit internal-review metadata flag, or an internal session origin.
  * As a defence-in-depth fallback for foreign/legacy controllers we also recognise
@@ -14,8 +43,18 @@ const idOf = value => typeof value === 'string' ? value : value?.id
 const INTERNAL_ENVELOPE = /^(?:\[\[mse-internal-review\]\]|Review the conversation above and (?:update the skill library|consider saving to memory))/iu
 const INTERNAL_ORIGINS = new Set(['subagent', 'internal', 'system'])
 function internalMetadata(messages) {
-  return (messages ?? []).some(message => (message?.source?.kind === 'plugin' && message.source?.form === 'internal-review')
-    || message?.metadata?.internalReview === true)
+  return (messages ?? []).some(message => {
+    if (message?.metadata?.internalReview === true) return true
+    const source = message?.source
+    if (source === null || typeof source !== 'object') return false
+    // The internal-review envelope, in the released universal wrapper AND in the producer-owned kinds
+    // that replace it (`plugin:<name>`, which is what the Host's converter maps a wrapper to). This
+    // stays a guard on the ENVELOPE, not an adoption claim: another producer's internal work being
+    // treated as internal work is the safe direction (less learning), while no user source is ever
+    // upgraded to an internal origin.
+    return source.form === 'internal-review' && typeof source.kind === 'string'
+      && (source.kind === 'plugin' || source.kind.startsWith('plugin:'))
+  })
 }
 const messageText = message => typeof message.content === 'string' ? message.content
   : (message.content ?? []).filter(p => p.type === 'text').map(p => p.text).join('\n')
@@ -24,6 +63,29 @@ function directText(messages) {
 }
 const STATUS_HISTORY = 8
 const STATUS_SESSIONS = 64
+/** Per-turn failure roster is bounded; overflow is dropped, never unbounded memory. */
+const FAILURE_ROSTER = 16
+/** Availability facts are not method evidence and never enter the roster (mirrors the core). */
+const AVAILABILITY_FAILURES = new Set(['cancelled', 'foreground_yield', 'provider_unavailable'])
+/**
+ * Record one host-verified failure for the turn. Memory-only, bounded, deduplicated on host
+ * identity: a stable call id keeps its one slot; without one the identity degrades to a
+ * per-turn per-tool per-class slot, so a flood of anonymous failures never looks like fresh
+ * independent evidence each time. The roster is later persisted by close() through
+ * `engine.observeProblem` — never here, so a reflection-request failure cannot write problems.
+ */
+function recordFailure(state, { eventId, toolName, failureCode }) {
+  const failures = state.failures ?? (state.failures = [])
+  if (failures.length >= FAILURE_ROSTER) return
+  const code = typeof failureCode === 'string' && failureCode.length > 0 && failureCode.length <= 40
+    ? failureCode : 'unknown_tool_failure'
+  if (AVAILABILITY_FAILURES.has(code)) return
+  const name = typeof toolName === 'string' && toolName.length > 0 && toolName.length <= 64 ? toolName : null
+  const identity = typeof eventId === 'string' && eventId.length > 0 && eventId.length <= 512
+    ? eventId : `degraded:${state.input?.turnId ?? '?'}:${name ?? 'tool'}:${code}`
+  if (failures.some(failure => failure.identity === identity)) return
+  failures.push({ identity, eventId: identity, toolName: name, failureCode: code })
+}
 
 /** Trusted host seam. None of its evidence callbacks are exposed as model-callable tools. */
 export function createHarnessBridge({ engine, createMessage, review, warn = () => {}, now = Date.now, environmentId,
@@ -160,11 +222,68 @@ export function createHarnessBridge({ engine, createMessage, review, warn = () =
         return current + ((settlementOptions.clockUnit ?? 'ms') === 'ms' ? remaining : remaining / 1000)
       } }
       : {}) })
+  /**
+   * Persist host-verified failure facts for one closed turn into the problem ledger, before
+   * settlement, so a settlement write can never mask what the host actually saw. Cancelled
+   * turns are skipped by the caller. Returns the problem reference (id + evidenceRevision +
+   * ready flag) of the LAST verified observation, or null when nothing verifiable happened.
+   */
+  const persistProblems = state => {
+    if (typeof engine.observeProblem !== 'function') return null
+    const base = { sessionId: state.input.sessionId, turnId: state.input.turnId,
+      ...(state.input.projectKey === undefined ? {} : { projectKey: state.input.projectKey }),
+      ...(state.input.environmentId === undefined ? {} : { environmentId: state.input.environmentId }),
+      // The TRUSTED route of this turn travels into the ledger as a bounded source binding: it is the
+      // route the host itself reported (agent options, or the provider/model a successful stream
+      // really used). It is what a later, independent process needs to resume a refused reflection on
+      // the SAME execution — a recovered attempt may never borrow another session or a default model.
+      // `undefined` binds nothing, and the recovery then says so instead of guessing.
+      ...(state.route === undefined || state.route === null ? {} : { route: state.route }) }
+    const observe = payload => { try { return engine.observeProblem(payload) } catch { return null } }
+    const result = { id: null, evidenceRevision: undefined, ready: false, failures: 0 }
+    const seen = new Set()
+    const adopt = outcome => {
+      if (outcome?.ok !== true || outcome.duplicate === true) return
+      result.failures += 1
+      // A READY observation locks the exact problem tuple (id + revision) for the review to bind.
+      // An unready observation is recorded but never overwrites a ready reference, so a later
+      // unready read cannot starve the bash problem that really crossed the threshold (rev4 #2).
+      if (outcome.ready === true) {
+        result.id = outcome.id
+        result.evidenceRevision = outcome.evidenceRevision ?? outcome.problem?.evidenceRevision
+        result.ready = true
+      } else if (result.ready === false && result.id === null) {
+        result.id = outcome.id
+        result.evidenceRevision = outcome.evidenceRevision ?? outcome.problem?.evidenceRevision
+      }
+    }
+    for (const failure of state.failures) {
+      if (seen.has(failure.eventId)) continue
+      seen.add(failure.eventId)
+      adopt(observe({ ...base, eventId: failure.eventId, kind: 'tool_failure', source: 'host_event',
+        toolName: failure.toolName ?? undefined, failureCode: failure.failureCode,
+        summary: `工具失败：${failure.toolName ?? '未知工具'}（${failure.failureCode}）` }))
+    }
+    // A failed verifier check is the host checker's own fact. Task-level failure is NOT
+    // synthesised here: a generic turn/end 'error' or agent error is a diagnostic, never method
+    // evidence, and a trusted task failure can only be reported by a real business checker
+    // (its own kind), so nothing is invented from an unknown Error object (native contract).
+    for (const check of state.checks.values()) {
+      if (check.passed || typeof check.checkId !== 'string' || !check.checkId) continue
+      adopt(observe({ ...base, eventId: `checker:${state.input.turnId}:${check.checkId}`,
+        kind: 'checker_failure', source: 'host_checker', taskClass: check.checkId,
+        summary: `宿主校验未通过：${check.checkId}` }))
+    }
+    return result.failures > 0 || result.id !== null ? result : null
+  }
   const close = (session, turn, cancelled = false) => {
     const sessionId = idOf(session), k = key(sessionId, turn), state = turns.get(k)
     if (!state) return
     const checks = [...state.checks.values()]
     const outcome = cancelled ? 'cancelled' : checks.some(x => !x.passed) ? 'failed' : checks.length ? 'verified' : 'unknown'
+    // Persist host-verified failures BEFORE settlement, so a settlement write can never mask
+    // what the host actually saw. Cancelled turns are skipped entirely.
+    const problemRef = cancelled ? null : persistProblems(state)
     // Freeze exactly one payload: identity, final outcome and the trusted check bindings.
     const payload = { ...state.input, outcome,
       ...(checks.length && !cancelled ? { evidence: { source: 'host_verifier', checkId: state.checkId,
@@ -209,14 +328,33 @@ export function createHarnessBridge({ engine, createMessage, review, warn = () =
       }
     }
     turns.delete(k)
-    if (!cancelled && active(state.generation) && review && (checks.length || state.taskFailed || state.tools >= 2) && state.resultSummary) {
+    // A review needs an assistant result summary to reflect on. When the host closed with
+    // verified failures and the assistant produced none (broke off, hard error, empty output),
+    // the failures THEMSELVES are evidence: synthesize a bounded, data-only summary from the
+    // trusted failure roster and reflect on that. Never reflects on cancellation.
+    const reflectable = !cancelled && active(state.generation) && review && !state.diagnosticError
+      && (checks.length || state.taskFailed || state.tools >= 2)
+    // A FAILURE-observed turn may only reflect through the problem ledger, bound to a problem
+    // that is REALLY ready. Reflecting a single partial fact on the generic path — even when an
+    // assistant summary exists — would mint a candidate that bypasses the independent-evidence
+    // gate (audit matrix rev4 #1). Success/supported turns with no failure evidence keep their
+    // historical reflection channel unchanged.
+    const hasFailure = state.failures.length > 0 || state.taskFailed
+    const blockedByProblem = hasFailure && (problemRef === null || problemRef.ready !== true)
+    if (!blockedByProblem && reflectable && !state.resultSummary && state.failures.length) {
+      const classes = [...new Set(state.failures.map(failure => failure.failureCode))].slice(0, 3).join('、')
+      state.resultSummary = `宿主验证收集到 ${state.failures.length} 条工具失败（${classes}），未收到助手总结，需要复盘失败条件`.slice(0, 1200)
+    }
+    if (!blockedByProblem && reflectable && state.resultSummary) {
       const controller = new AbortController()
       const job = { controller, sessionId, generation: state.generation, epoch: reflectionEpoch }
       reviews.add(job)
       Promise.resolve().then(() => {
         if (!active(job.generation) || controller.signal.aborted || job.epoch !== reflectionEpoch) return
         return review({ ...state.input, taskSummary: state.taskSummary, resultSummary: state.resultSummary,
-          outcome: state.taskFailed || outcome === 'failed' ? 'failed' : outcome === 'unknown' ? 'supported' : outcome },
+          outcome: state.taskFailed || outcome === 'failed' ? 'failed' : outcome === 'unknown' ? 'supported' : outcome,
+          ...(problemRef && problemRef.id && problemRef.ready
+            ? { problemId: problemRef.id, evidenceRevision: problemRef.evidenceRevision } : {}) },
         state.route, controller.signal)
       }).catch(() => { if (!controller.signal.aborted) warn('reflection_unavailable') }).finally(() => reviews.delete(job))
     }
@@ -308,7 +446,7 @@ export function createHarnessBridge({ engine, createMessage, review, warn = () =
         ...(environmentId === undefined ? {} : { environmentId }) },
         receipt: prepared.receipt, lessons: prepared.lessons, lessonVersions: prepared.lessonVersions ?? [],
         context: prepared.context, messageId: message?.id, accepted: false, checks: new Map(), taskFailed: false, tools: 0,
-        receiptExpiresAt: prepared.receiptExpiresAt ?? undefined,
+        failures: [], availabilityOnly: false, diagnosticError: false, receiptExpiresAt: prepared.receiptExpiresAt ?? undefined,
         generation: epoch, taskSummary: prompt.slice(0, 800), resultSummary: '', route: payload.agent.options })
       note(session, payload.turn, prepared.reason ?? RECALL_REASONS.notLearned, { projectKey,
         bytes: prepared.bytes ?? 0, lessons: prepared.lessons ?? [], sources: prepared.sources ?? [],
@@ -322,7 +460,10 @@ export function createHarnessBridge({ engine, createMessage, review, warn = () =
         ? [...turns.values()].filter(state => state.input.sessionId === options.sessionId) : []
       const candidates = scoped.filter(state => state.receipt && !state.accepted
         && (options.messages ?? []).some(message => message.id === state.messageId
-          && message.source?.kind === 'plugin' && message.source?.plugin === 'mse-learning'
+          // MSE's OWN producer identity, in the current producer-owned kind or the released wrapper:
+          // a user message, or another plugin's `plugin:<name>` producer, can never be credited as
+          // this plugin's injection even if it happens to carry the same text.
+          && isMseSource(message.source)
           && messageText(message) === state.context))
       for await (const chunk of next()) {
         if (chunk.type === 'finish' && ['stop', 'tool-calls', 'max-tokens'].includes(chunk.reason?.kind) && !options.signal?.aborted) {
@@ -347,7 +488,13 @@ export function createHarnessBridge({ engine, createMessage, review, warn = () =
       if (event.type === 'turn/end') {
         const state = turns.get(key(session.id, event.data.turn))
         const reason = typeof event.data.reason === 'string' ? event.data.reason : event.data.reason?.kind
-        if (state && reason === 'error') state.taskFailed = true
+        if (state && reason === 'error') {
+        // A trailing turn/end 'error' with NO trusted tool-failure evidence is a generic host
+        // error: it voids success credit but is not method evidence (rev4 #3 / native error
+        // contract). Real tool failures already set taskFailed through toolResult and are
+        // unaffected; an availability-only turn likewise never becomes a task failure.
+        if (!state.taskFailed && state.failures.length === 0) state.diagnosticError = true
+      }
         close(session.id, event.data.turn, reason !== 'completed' && reason !== 'error')
       }
       if (event.type === 'assistant/message') {
@@ -379,12 +526,30 @@ export function createHarnessBridge({ engine, createMessage, review, warn = () =
       }
       return result ?? { ok: false, code: 'artifact_check_unavailable' }
     },
-    toolResult({ sessionId, turnId, failed, readOnly = false }) {
+    toolResult({ sessionId, turnId, failed, readOnly = false, failureCode, cancelled = false, eventId, toolName, diagnostic = false }) {
       const state = turns.get(key(sessionId, turnId))
       if (!state) return
       state.tools += 1
       if (!readOnly || failed) state.checks.clear()
-      if (failed) state.taskFailed = true
+      // A GENERIC host/model error (no trusted tool-result structure) is a diagnostic, never
+      // method evidence: it voids any success credit for the turn but must not become a problem,
+      // mint a candidate, or be rewritten into a task failure by a trailing turn/end 'error'.
+      if (diagnostic === true) { state.diagnosticError = true; return }
+      if (failed) {
+        // A host cancellation / foreground yield / provider unavailability is an availability
+        // fact, not a method failure: it must not mark the task failed and must not become a
+        // problem observation later. The class is honoured whether the caller passed the flag or
+        // the failureCode, because DSH's agent/error callback only has the code (rev4).
+        if (cancelled === true || AVAILABILITY_FAILURES.has(failureCode ?? '')) {
+          // Remember the turn was ONLY availability-aborted, so a trailing host turn/end 'error'
+          // cannot rewrite it into a generic task failure (rev4 #3).
+          state.availabilityOnly = true
+          return
+        }
+        state.taskFailed = true
+        recordFailure(state, { eventId: eventId ?? null, toolName: toolName ?? null,
+          failureCode: failureCode ?? 'unknown_tool_failure' })
+      }
     },
     toolExecution(exec, result) {
       const session = exec.agent?.session
@@ -393,10 +558,21 @@ export function createHarnessBridge({ engine, createMessage, review, warn = () =
       for (let n = count - 1; n >= Math.max(0, count - 1000); n--) {
         const event = session.eventAt?.(n) ?? session.events?.[n]
         if (event?.type !== 'tool/call' || event.data.callId !== (exec.rootCallId ?? exec.callId)) continue
+        // Classify from trusted host STRUCTURE only: an abort is a cancellation (never taskFailed),
+        // a timeout, an error flag and a non-zero exit are real failures with restricted classes.
+        // A successful write (exitCode 0) is not a failure but STILL reaches toolResult: it must
+        // invalidate earlier verifier checks and count toward the turn's tool usage, exactly like
+        // the original wiring — a successful mutation after a verification voids that verification.
+        let failureCode = null
+        if (exec.signal?.aborted === true || result.value?.cancelled === true) failureCode = 'cancelled'
+        else if (result.value?.timedOut === true || result.value?.timeout === true) failureCode = 'tool_timeout'
+        else if (result.isError === true) failureCode = 'tool_error_flag'
+        else if (typeof result.value?.exitCode === 'number' && result.value.exitCode !== 0) failureCode = 'tool_nonzero_exit'
         bridge.toolResult({ sessionId: session.id, turnId: event.data.turn,
-          failed: result.isError === true || exec.signal?.aborted === true || result.value?.timedOut === true
-            || (typeof result.value?.exitCode === 'number' && result.value.exitCode !== 0),
-          readOnly: exec.name === 'read' || exec.name === 'read_image' })
+          failed: failureCode !== null && failureCode !== 'cancelled',
+          cancelled: failureCode === 'cancelled',
+          readOnly: exec.name === 'read' || exec.name === 'read_image',
+          failureCode, eventId: exec.rootCallId ?? exec.callId, toolName: exec.name })
         break
       }
     },

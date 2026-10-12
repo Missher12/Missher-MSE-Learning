@@ -11,6 +11,7 @@ import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { publicFiles } from './public-set.mjs'
 import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
@@ -51,7 +52,7 @@ const assertPortable = (archive, { requireEntries = [] } = {}) => {
 const strays = []
 const walk = directory => {
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    if (['node_modules', 'dist', '__pycache__', '.git'].includes(entry.name)) continue
+    if (['node_modules', 'dist', '__pycache__', '.git', '.probes'].includes(entry.name)) continue
     if (entry.name.startsWith('._') || entry.name === '.DS_Store' || entry.name === '__MACOSX') {
       strays.push(join(directory, entry.name)); continue
     }
@@ -61,12 +62,16 @@ const walk = directory => {
 walk(root)
 assert.deepEqual(strays, [], `source tree carries Mac metadata: ${strays.slice(0, 5).join(', ')}`)
 
-execFileSync('tar', ['-czf', target,
-  '--exclude', './dist', '--exclude', './node_modules', '--exclude', './.git',
-  '--exclude', './__pycache__', '--exclude', '*.pyc',
-  '--exclude', '*/._*', '--exclude', '._*', '--exclude', '*/.DS_Store', '--exclude', '.DS_Store',
-  '--exclude', '__MACOSX', '.'],
-{ cwd: root, env: { ...process.env, COPYFILE_DISABLE: '1' } })
+// THE ARCHIVE IS BUILT FROM THE EXPLICIT PUBLIC SET, never from `tar … .`. An allowlist is the only
+// shape that cannot leak: `.probes/` (private evidence), coordination notes and local scratch are
+// simply not members, instead of being excluded by names someone remembered to list.
+const published = publicFiles(root)
+assert.ok(published.includes('src/index.mjs') && published.length > 100,
+  'the public set must be a real source tree')
+assert.equal(published.some(relative => relative.startsWith('.')), false,
+  'the public set never carries a dot-directory')
+execFileSync('tar', ['-czf', target, '-C', root, ...published],
+{ env: { ...process.env, COPYFILE_DISABLE: '1' } })
 
 const sourceCheck = assertPortable(target, { requireEntries: ['src/index.mjs', 'package.json', 'tests/upgrade.test.mjs', 'scripts/pack-source.mjs'] })
 
@@ -82,6 +87,10 @@ for (const artifact of existsSync(join(dist, 'candidate-manifest.json'))
 }
 
 const report = { schema: 'mse-source-archive-v1', version: pkg.version, generatedAt: new Date().toISOString(),
+  // The archive's own membership is reported, so a reviewer can see WHAT was published without
+  // extracting it — and the manifest's list is generated from the same set.
+  publicSet: { count: published.length,
+    bytes: published.reduce((total, relative) => total + statSync(join(root, relative)).size, 0) },
   archive: { name, sha256: sha(target), bytes: statSync(target).size, ...sourceCheck },
   portable: true, runtimeArtifacts: runtime }
 writeFileSync(join(dist, 'source-archive.json'), JSON.stringify(report, null, 2) + '\n')

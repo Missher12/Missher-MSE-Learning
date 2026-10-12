@@ -18,6 +18,7 @@
  * The read-only `mseDetails` semantics stay in `details.mjs`; nothing here widens that surface.
  */
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { mseMessageSource } from '../harness.mjs'
 import { Remote, TypertRemoteService, remoteMethods } from '@deepseek-ai/dsh-typert-protocol'
 import { reflect, runEvaluation } from '../../src/index.mjs'
 import { DEFAULT_EVALUATION_POLICY } from '../../src/evaluation.mjs'
@@ -90,7 +91,7 @@ export async function readModel(ctx, { route, system, prompt, maxTokens, signal,
   const options = { provider: route.provider, model: route.model,
     ...(route.reasoningEffort !== undefined ? { reasoningEffort: route.reasoningEffort } : {}),
     messages: [createUserMessage({ content: [{ type: 'text', text: prompt }],
-      source: { kind: 'plugin', plugin: 'mse-learning', form: pluginForm } })],
+      source: mseMessageSource(pluginForm) })],
     system, maxTokens, signal: controller.signal }
   let output = '', usage = null, finished = false, truncated = false
 /** One failure exit for this function: whatever usage was measured travels with the error. */
@@ -147,7 +148,7 @@ function modelFailure(code, usage) {
  * the requests it started really have. This keeps the two statements separate instead of
  * claiming a strict single-request guarantee that only covered the logical job.
  */
-function requestTracker() {
+export function requestTracker() {
   const pending = new Set()
   return {
     track(promise) {

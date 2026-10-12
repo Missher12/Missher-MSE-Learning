@@ -4,15 +4,16 @@ import { fileURLToPath } from 'node:url'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { createHash } from 'node:crypto'
 import { LearningEngine, reflect, guardedAction, RECALL_REASONS } from '../../src/index.mjs'
-import { createHarnessBridge } from '../harness.mjs'
+import { createHarnessBridge, mseMessageSource } from '../harness.mjs'
 import { formatRecallLine, handleMseCommand } from '../../src/status.mjs'
 import { apply as applyDetails } from './details.mjs'
-import { apply as applyControl } from './control.mjs'
-import { JobQueue } from './jobs.mjs'
+import { apply as applyControl, readModel, REFLECTION_OUTPUT_BYTES } from './control.mjs'
+import { CALL_DEADLINE_MS, JobQueue } from './jobs.mjs'
 import { createAutoValidation } from './auto.mjs'
-import { readModel } from './control.mjs'
+import { PROBLEM_DEFER_PLAN_CODES } from '../../src/problems.mjs'
 import { latestRoute } from './session-digest.mjs'
-import { getDomainPack, packAdmits, packCases, packCriteriaHash, packScenarioHash, packSuiteId } from '../../src/domains.mjs'
+import { getDomainPack, packAdmits, packCaseCriteriaHash, packCases, packScenarioHash,
+  packSuiteId } from '../../src/domains.mjs'
 import { buildJudgePrompt, parseVerdict, REVIEW_REASONS } from '../../src/review.mjs'
 import { assessEvaluation, DEFAULT_EVALUATION_POLICY } from '../../src/evaluation.mjs'
 import { readVolatile, SETTINGS_DEFAULTS, CONTEXT_BYTES_MIN, CONTEXT_BYTES_MAX,
@@ -60,6 +61,46 @@ const REFLECTION_WINDOW_MS = 86_400_000
 const REFLECTION_COOLDOWN_MS = 30 * 60_000
 const REFLECTION_OUTPUT_TOKENS = 384
 const PACKAGE_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
+/**
+ * How many recoverable problems ONE host pass may consider.
+ *
+ * The window is what keeps a pass bounded: at most this many local checks and remote source reads,
+ * and at most this many attempts. Fairness past the window is the core's persistent rotation
+ * watermark, not a bigger window.
+ */
+const PROBLEM_PUMP_FEED_LIMIT = 8
+/** A bounded, non-secret request identity for one reflection attempt (kind + attempt sequence). */
+const reflectionRequestId = (prefix, identity, sequence) =>
+  `${prefix}-${createHash('sha256').update(String(identity)).digest('hex').slice(0, 16)}-${sequence}`
+/** One bounded code from anything a provider or the core threw. Never a message body. */
+const boundedCode = (value, fallback = 'reflection_failed') =>
+  typeof value === 'string' && value !== '' && !/[\r\n\u0000-\u001f\u007f]/u.test(value)
+    ? value.slice(0, 64) : fallback
+/**
+ * Consume a provider stream to its OWN end, whatever this side has already decided.
+ *
+ * The slot a reflection holds is a claim about the physical request, not about our JavaScript: a
+ * local refusal (an oversized answer, a broken protocol) or a cancellation must therefore WAIT for
+ * the request to end instead of returning while it may still be running. A stream that never ends
+ * keeps the slot deliberately — the job queue reports the job as draining, which is the truthful
+ * state, and only a provider that really settles frees it.
+ */
+async function drainProviderStream(iterator) {
+  try {
+    while (true) {
+      const step = await iterator.next()
+      if (step.done === true) return true
+    }
+  } catch { return false }
+}
+/** The one registered lifecycle pack both model tracks are bound to. */
+const LIFECYCLE_PACK_ID = 'mse-lifecycle-v1'
+/**
+ * The text the domain predicate reads for one method: the same words the core reads, so the
+ * adapter's admission and the core's promotion/recall admission can never disagree.
+ */
+const methodDomainText = lesson => [lesson?.instruction, lesson?.applicability, lesson?.exclusions]
+  .filter(value => typeof value === 'string' && value !== '').join(' ')
 
 function readVersion() {
   try {
@@ -95,53 +136,88 @@ export function apply(ctx, config = {}) {
   // into a narrower fingerprint. Changing the default would silently orphan every
   // validated method recorded by an older version of this plugin.
   const environmentId = typeof config.environmentId === 'string' ? config.environmentId : undefined
+  // Optional controlled-verification seams: an injected clock and timer let a host exercise the
+  // bounded settlement retry, the job deadlines AND the due-recovery timer without real sleeping.
+  // They are read here and by the ONE bounded scheduler below, so a controlled run drives the real
+  // production timer path instead of a test-only branch. Unset in normal use.
+  const verifiedNow = typeof config.now === 'function' ? config.now : null
   const engine = new LearningEngine({ stateRoot: ctx.dshHomePath('mse-learning'), adapterId: 'dsh',
     maxContextBytes: initial.maxContextBytes,
+    ...(verifiedNow === null ? {} : { now: verifiedNow }),
     evaluationTokensPerDay: initial.evaluationTokensPerDay, evaluationCallsPerDay: initial.evaluationCallsPerDay })
   const lifetime = new AbortController()
-  const jobs = new JobQueue({ onEvent: event => { if (event.kind === 'failed' || event.kind === 'cancelled') ctx.logger.warn('mse-learning: job %s %s', event.jobKind, event.code ?? '') } })
+  const jobs = new JobQueue({ ...(verifiedNow === null ? {} : { now: verifiedNow }),
+    ...(typeof config.schedule === 'function' ? { schedule: config.schedule } : {}),
+    ...(typeof config.cancelTimer === 'function' ? { cancelTimer: config.cancelTimer } : {}),
+    onEvent: event => { if (event.kind === 'failed' || event.kind === 'cancelled') ctx.logger.warn('mse-learning: job %s %s', event.jobKind, event.code ?? '') } })
   let disposed = false
   let legacyOwner = false
   // Identity of the last volatile snapshots seen. Volatile reads return a new frozen object per
   // committed write, so a reference change is exactly "the operator saved something".
   let seen = null
   let reasons = Object.freeze(['plugin_not_started'])
+  // THE HOST-FACT GENERATION, declared before ANY code path that can be reached from a wake-up.
+  //
+  // `automation.start` runs its first pass synchronously enough to reach the due-recovery pump, and
+  // the pump confirms the source through `factsEpoch` / `factsProveGone`. Leaving these bindings
+  // further down made that first pass throw a temporal-dead-zone ReferenceError which the pass'
+  // own catch reported as `problem_pump_failed:unknown` — a silent startup regression. Everything
+  // the pump can reach at any moment is therefore initialised here, and the timer itself is started
+  // only after the whole plugin (services, listeners, guards) is wired.
+  let hostFacts = null
+  let factsEpoch = 0
+  let factsPull = null
+  let factsPullDirty = false
+  /** Monotone in-process sighting order: never a wall clock (two events can share a millisecond). */
+  let factsClock = 0
+  /** hash -> the `factsClock` value at which that session was last evidenced to exist. */
+  const sessionSeen = new Map()
   const bridge = createHarnessBridge({ engine, environmentId,
     // Optional controlled-verification seams: an injected clock/timer lets a host exercise the
     // bounded settlement retry without real sleeping. Unset in normal use.
-    ...(config.now === undefined ? {} : { now: config.now }),
+    ...(verifiedNow === null ? {} : { now: verifiedNow }),
     ...(config.settlement === undefined ? {} : { settlement: config.settlement }),
+    // The source is the PRODUCER-OWNED kind the v4 session format admits: writing the released
+    // `{kind:'plugin', plugin:'mse-learning'}` wrapper again would make `ctx.sessions.flush` refuse
+    // the whole session (`format v4 message requires a producer-owned source kind`).
     createMessage: text => createUserMessage({ content: [{ type: 'text', text }],
-      source: { kind: 'plugin', plugin: 'mse-learning', form: 'instructions' } }),
+      source: mseMessageSource('instructions') }),
     warn: code => ctx.logger.warn('mse-learning: %s', code),
     // The callback is installed once and decides for itself, so closing "automatic reflection"
     // in the settings takes effect on the next qualifying turn *and* cancels what is already
     // queued — rebuilding the bridge to drop the callback would discard in-flight turns.
     review: (input, route, signal) => {
       if (!mayReflect()) return { ok: false, code: 'reflection_disabled' }
-      if (typeof route?.provider !== 'string' || typeof route?.model !== 'string') return { ok: false, code: 'route_unavailable' }
+      const bounded = boundedRoute(route)
+      // No route, no reflection: the request is only ever sent to the provider/model the host itself
+      // handed over for THIS turn, and a recovered one to the route its own source binding froze.
+      if (bounded === null) return { ok: false, code: 'route_unavailable' }
       // Remember exactly the route the host itself handed over, reasoning effort included: an
-      // automatic review may reuse it later, and nothing else may stand in for it.
-      rememberRoute(route)
-      return reflect(engine, input, async (request, signal_) => {
-        let text = '', finished = false
-        for await (const chunk of ctx.llm.stream({ provider: route.provider, model: route.model,
-          ...(route.reasoningEffort !== undefined ? { reasoningEffort: route.reasoningEffort } : {}),
-          messages: [createUserMessage({ content: [{ type: 'text', text: request.text }],
-            source: { kind: 'plugin', plugin: 'mse-learning', form: 'instructions' } })],
-          system: request.system, maxTokens: request.maxTokens, signal: signal_ })) {
-          if (chunk.type === 'text-delta') { text += chunk.text; if (Buffer.byteLength(text) > 2048) throw new Error('reflection_too_large') }
-          if (chunk.type === 'finish') { if (['error', 'aborted'].includes(chunk.reason.kind)) throw new Error('reflection_failed'); finished = true }
-        }
-        if (!finished) throw new Error('reflection_incomplete')
-        // Last line of defence, after the answer is already in hand and before the core is
-        // allowed to turn it into a lesson. A settings write and its subscription callback can
-        // both be delivered while this provider request is in flight, so a decision made before
-        // the call cannot be the one the result is committed under. Throwing settles the ticket
-        // in `reflect`'s own cleanup, so a late result has nothing left to write.
-        if (!mayReflect()) throw new Error('reflection_cancelled')
-        return text
-      }, AbortSignal.any([lifetime.signal, signal]))
+      // automatic review may reuse it later, and nothing else may stand in for it. This is the
+      // SCAN's cache for work that carries no route of its own — a problem recovery never reads it.
+      rememberRoute(bounded)
+      const identity = `${input.sessionId ?? ''}:${input.turnId ?? ''}`
+      // THE SAME SOURCE LICENCE AS A RECOVERY. An immediate reflection is not privileged: it binds
+      // the session the turn ran in, the route the host handed over and the trusted project the turn
+      // was prepared with, and every one of them is re-read after the provider returned and again in
+      // the final synchronous gate. A turn whose session moved project, changed model or was archived
+      // while the answer was in flight therefore commits NOTHING — and the signed ticket is still
+      // consumed, exactly as it is for a recovered attempt.
+      const turnCheck = typeof input.sessionId === 'string' && input.sessionId !== ''
+        ? createSourceCheck({ sessionId: input.sessionId, provider: bounded.provider, model: bounded.model,
+          reasoningEffort: bounded.reasoningEffort ?? null, projectKey: input.projectKey,
+          epoch: factsEpoch, controlGeneration: currentControlGeneration(), problem: null })
+        : null
+      return runReflectionInSlot({
+        requestId: reflectionRequestId('mseref', identity, reflectionSequence += 1),
+        fingerprint: `reflection:${identity}`,
+        label: 'MSE 即时复盘',
+        // The immediate turn is its own authority for the CONTENT: the core re-checks the ticket, the
+        // problem binding and the evidence revision inside `reflectionRequest`, so this is a plan to
+        // ASK, not a claim. The source licence above is what it does NOT get to skip.
+        prepare: () => ({ ok: true, recoverable: true, due: true, reflection: input, route: bounded }),
+        sourceCheck: turnCheck,
+        externalSignal: signal ?? null })
     } })
 
   let autoScheduled = false
@@ -163,9 +239,18 @@ export function apply(ctx, config = {}) {
    */
   async function loadAutoFeedRows() {
     await resolveBackfillRoute()
+    // The core's fair bounded feed: never-registered lessons oldest first, then live-planned rows,
+    // terminal-covered rows last (REGISTRATION order — a covered live/parked wall can never swallow
+    // new-work capacity). The feed itself stays capped (≤ 64 rows), so the route scan below is
+    // local and bounded — it never walks the whole library, and no session route is invented for a
+    // row that cannot name its source. A due plan whose facts the window did not carry is still
+    // advanced: the scheduler reads them from the core's complete per-id index.
     const rows = engine.autoCandidates({ limit: 32 }).rows ?? []
     routeForSession.clear()
-    for (const lesson of rows.slice(0, 8)) {
+    // Routes are resolved for the ACTUAL feed this scan will work on (fair-queue design point 4),
+    // not for an arbitrary first-8 slice: a terminal front row must never starve a later
+    // candidate of its own session route (audit phase2-baseline "production-feed-route-selection").
+    for (const lesson of rows) {
       const id = typeof lesson.sessionId === 'string' ? lesson.sessionId : ''
       if (id === '' || routeForSession.has(id)) continue
       const found = await latestRouteFor(id)
@@ -185,7 +270,7 @@ export function apply(ctx, config = {}) {
     autoScheduled = true
     Promise.resolve().then(async () => {
       try {
-        const pack = getDomainPack('mse-lifecycle-v1')
+        const pack = getDomainPack(LIFECYCLE_PACK_ID)
         if (pack === undefined) return
         // ONE preparation for every wake-up; the scan itself re-checks every permission per step.
         const candidates = await loadAutoFeedRows()
@@ -227,9 +312,7 @@ export function apply(ctx, config = {}) {
 
   /** Whether automatic reflection may run and may still be committed, re-read at both ends. */
   function mayReflect() {
-    if (disposed) return false
-    if (sync().length > 0) return false
-    return readPolicy().reflectionEnabled
+    return reflectionPermission().allowed === true
   }
 
   /**
@@ -272,15 +355,24 @@ export function apply(ctx, config = {}) {
     return cancelled
   }
 
-  function sync({ resume = false } = {}) {
+  function sync({ resume = false, lifecycle = false } = {}) {
     // NOTE: this function is also called by pure status reads, so it must NOT cancel anything. The
-    // explicit cancellation point is `applySettings`/`sync({resume:true})` below, where a real
-    // permission change is known; cancelling here killed the queue on every page refresh.
+    // explicit cancellation point is `sync({resume:true})`/`sync({lifecycle:true})`, where a REAL
+    // settings write or lifecycle notification is known; cancelling here killed the queue on every
+    // page refresh.
+    //
+    // Stage 4c (audit `read-only-probes`, second confirmed risk): the rule above only held for the
+    // `resume` branch. `settingsSnapshot()` — a READ — calls `sync()`, and with the saved config
+    // visible before the lifecycle notification arrives, that read still ran the two branches below
+    // (`cancelAutomaticJobs`, `bridge.setEnabled`, `abortReflections`, `jobs.cancelAll`). A page
+    // refresh could therefore cancel a running automatic job and bump the abort generation while the
+    // files on disk never changed. `lifecycle` is what separates the two uses: a read recomputes and
+    // REPORTS the permission, and only a real settings write or lifecycle event applies it.
     const p = readPolicy()
     // An explicit settings change that switches automatic validation OFF cancels what it started;
     // the running provider request is aborted through the job's own signal. Read-only callers never
     // reach this branch because they do not change the policy.
-    if (seen !== null && seen.autoValidationEnabled === true && p.autoValidationEnabled !== true) {
+    if (lifecycle && seen !== null && seen.autoValidationEnabled === true && p.autoValidationEnabled !== true) {
       cancelAutomaticJobs('auto_disabled')
     }
     // EVERY policy field that drives spending belongs in this comparison. `autoValidationEnabled`
@@ -294,9 +386,10 @@ export function apply(ctx, config = {}) {
       && seen.maxContextBytes === p.maxContextBytes && seen.evaluationTokensPerDay === p.evaluationTokensPerDay
       && seen.evaluationCallsPerDay === p.evaluationCallsPerDay && seen.legacy === legacyOwner
       && seen.disposed === disposed) {
-      // Nothing changed, but a read-only recompute must not swallow the explicit lifecycle moment
-      // that follows it: the enablement is re-applied so the queue can actually resume.
-      if (resume) bridge.setEnabled(reasons.length === 0, { resume: true })
+      // Nothing changed. A READ still recomputes and reports, but it applies nothing: with no
+      // lifecycle moment there is nothing to apply, and re-applying on a read is how a page refresh
+      // became a permission change.
+      if (lifecycle) bridge.setEnabled(reasons.length === 0, { resume: true })
       return reasons
     }
     seen = { ...p, legacy: legacyOwner, disposed }
@@ -309,6 +402,13 @@ export function apply(ctx, config = {}) {
     if (legacyOwner) next.push('legacy_controller')
     if (!p.enabled) next.push('user_paused')
     reasons = Object.freeze(next)
+    if (!lifecycle) {
+      // A READ observed a policy move the lifecycle has not been notified about yet. The permission
+      // is reported from `reasons` above (the caller decides from those), and NOTHING is applied:
+      // no enable/disable, no abort, no cancel. The next real settings write or lifecycle event
+      // performs the transition, so a refresh can never cancel work or trip the dispatch gate.
+      return reasons
+    }
     bridge.setEnabled(next.length === 0, { resume })
     // A closed reflection switch cancels queued and in-flight reviews immediately; a late
     // runner result lands on an already-settled ticket and cannot become a lesson.
@@ -440,6 +540,207 @@ export function apply(ctx, config = {}) {
   /** Is a provider call in progress? The scheduler yields to it rather than starting beside it. */
   const providerBusy = () => physicalBusy > 0
 
+  // ---------------------------------------------------------------- reflection through the slot
+  //
+  // The IMMEDIATE reflection (a turn that just ended) and the RECOVERED one (a problem that a
+  // budget/cooldown refusal left attemptable) are the same work with the same physics: one paid
+  // provider request that must run inside the ONE slot a manual review, a manual evaluation and an
+  // automatic plan also use. Before stage 3d the immediate callback called `ctx.llm.stream` directly
+  // and could therefore overlap any of them; now every reflection is submitted as an ordinary host
+  // job, so "one paid request at a time" is the queue's own property rather than a promise in a
+  // comment. A cancelled-but-unsettled request keeps the slot (the queue labels it `draining`): the
+  // provider's real exit, not the task state, is what frees it.
+
+  /**
+   * The host's own permission decision for a reflection, in the shape the job queue reads.
+   *
+   * Re-read at every gate — before the job starts, before the ticket, before the dispatch, and once
+   * more in the synchronous block right before the core may write — so a pause, a closed switch or a
+   * disposal that lands while a request is in flight wins over a permit read before it.
+   */
+  function reflectionPermission() {
+    if (disposed) return { allowed: false, code: 'plugin_disposed' }
+    const reasons_ = sync()
+    if (reasons_.length > 0) return { allowed: false, code: reasons_[0] }
+    if (!readPolicy().reflectionEnabled) return { allowed: false, code: 'reflection_disabled' }
+    return { allowed: true, code: null }
+  }
+
+  /**
+   * The facts that refuse a reflection BEFORE it is dispatched.
+   *
+   * A person's turn owns the provider right now: an automatic attempt stands down without consuming
+   * its revision (the problem stays attemptable and the next bounded wake-up comes back to it). A
+   * source that cannot be confirmed — archived, gone, unreadable — stands down for the same reason.
+   */
+  function reflectionDispatchRefusal(sourceCheck) {
+    if (disposed) return 'plugin_disposed'
+    const permission = reflectionPermission()
+    if (permission.allowed !== true) return permission.code
+    if (foregroundTurns.size > 0) return 'foreground'
+    return sourceCheck === null ? null : sourceCheck.assess()
+  }
+
+  /**
+   * The synchronous facts that refuse a COMMIT, read immediately before `reflectionResult`.
+   *
+   * A person's turn taking the provider while the answer was in flight refuses the WRITE — not the
+   * attempt: the ticket stays consumed (a paid attempt is never refunded) and the late answer must
+   * not become a candidate. "Not refunded" and "may still write a candidate" are two different
+   * statements, and this gate keeps them apart by re-reading EVERY fact the dispatch gate reads.
+   */
+  function reflectionCommitRefusal(sourceCheck, ticket = null) {
+    if (disposed) return 'plugin_disposed'
+    const permission = reflectionPermission()
+    if (permission.allowed !== true) return permission.code
+    if (foregroundTurns.size > 0) return 'foreground'
+    return sourceCheck === null ? null : sourceCheck.assess(ticket)
+  }
+
+  let reflectionSequence = 0
+  /**
+   * ONE reflection, executed inside the process-wide physical slot.
+   *
+   * `prepare()` is the caller's own identity/precondition reader (the immediate turn, or the core's
+   * recovery plan) and is called INSIDE the job: a plan read before the slot was free is not a
+   * licence to spend after it, and the core re-checks every fact again inside the ticket
+   * transaction. Nothing is consumed when this function returns `consumed: false`; a ticket that was
+   * issued is always consumed, whatever happens next.
+   */
+  async function runReflectionInSlot({ requestId, fingerprint, label, prepare, externalSignal = null,
+    sourceCheck = null }) {
+    // Whether a ticket was REALLY signed for this attempt. It is written in the same synchronous block
+    // that issues the ticket, because the queue nulls a non-`done` job's result — and the caller must
+    // report "attempted" only for a revision that was truly consumed (a core refusal or a yield before
+    // the ticket returns `false`, and nothing was spent).
+    const attempt = { ticketIssued: false }
+    const submitted = jobs.submit({ requestId, kind: 'review', fingerprint, label, total: 1,
+      gate: () => reflectionPermission(),
+      run: async context => {
+        const refused = code => ({ state: 'cancelled', code: boundedCode(code) })
+        let blocked = reflectionDispatchRefusal(sourceCheck)
+        if (blocked === 'host_state_unknown' && sourceCheck !== null) {
+          // The snapshot could not answer. ONE bounded, coalesced confirmation is performed here —
+          // before anything is dispatched and before any ticket exists — instead of refusing a
+          // reflection the host simply has not listed recently enough.
+          await sourceCheck.confirm()
+          blocked = reflectionDispatchRefusal(sourceCheck)
+        }
+        if (blocked === null && typeof context.allowed === 'function' && context.allowed() !== true) {
+          blocked = 'permission_revoked'
+        }
+        if (blocked !== null) return refused(blocked)
+        let planned = null
+        try { planned = prepare() } catch (error) { planned = { ok: false, recoverable: false, code: boundedCode(error?.code) } }
+        if (planned?.ok !== true || planned.recoverable !== true) {
+          return { state: 'done', code: null, result: { kind: 'reflection', status: 'waiting',
+            reason: boundedCode(planned?.code ?? 'not_recoverable') } }
+        }
+        if (planned.due === false) {
+          return { state: 'done', code: null, result: { kind: 'reflection', status: 'waiting', reason: 'not_due' } }
+        }
+        const input = planned.reflection
+        const route = boundedRoute(planned.route)
+        if (input === undefined || input === null || route === null) {
+          return { state: 'done', code: null, result: { kind: 'reflection', status: 'waiting',
+            reason: route === null ? 'source_route_unbound' : 'not_recoverable' } }
+        }
+        // ONE cancellation source for everything that can withdraw this attempt: the plugin lifetime,
+        // the queue's own controller (pause/disable/dispose/cancel), the per-request deadline, and the
+        // caller's signal (the turn whose review this is). It is assembled BEFORE the ticket, so an
+        // already-cancelled attempt consumes nothing.
+        const controller = new AbortController()
+        const signal = AbortSignal.any([lifetime.signal, context.signal, controller.signal,
+          ...(externalSignal === null ? [] : [externalSignal])])
+        if (signal.aborted) return refused('reflection_cancelled')
+        const prepared = engine.reflectionRequest(input)
+        const ticket = prepared?.ticket
+        if (typeof ticket === 'string') attempt.ticketIssued = true
+        if (typeof ticket !== 'string') {
+          // The core refused (rolling allowance, cooldown, duplicate turn, screening, stale revision):
+          // no ticket exists, so nothing was consumed and the row keeps whatever wait the core wrote.
+          return { state: 'done', code: null, result: { kind: 'reflection', status: prepared?.skipped === 'duplicate' ? 'duplicate' : 'skipped',
+            reason: boundedCode(prepared?.skipped ?? 'not_reflectable') } }
+        }
+        const timer = setTimeout(() => controller.abort(), CALL_DEADLINE_MS)
+        let text = '', finished = false, failure = null
+        try {
+          // The iterator is driven EXPLICITLY rather than through `for await`: a local refusal (an
+          // oversized answer, a broken protocol) must NOT abandon a request that may still be running
+          // — `break`/`throw` would hand the generator a `return()` whose settlement we do not own.
+          const iterator = ctx.llm.stream({ provider: route.provider, model: route.model,
+            ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: route.reasoningEffort }),
+            messages: [createUserMessage({ content: [{ type: 'text', text: prepared.request.text }],
+              source: mseMessageSource('instructions') })],
+            system: prepared.request.system, maxTokens: prepared.request.maxTokens, signal })[Symbol.asyncIterator]()
+          while (true) {
+            const step = await iterator.next()
+            if (step.done === true) break
+            const chunk = step.value
+            // A CANCELLED or timed-out request keeps DRAINING: the loop runs to the provider's real
+            // end (that is what keeps the slot honest) while an answer that no longer has a licence is
+            // never accumulated, so a late result cannot become a candidate.
+            if (signal.aborted) continue
+            if (chunk.type === 'text-delta') {
+              text += chunk.text
+              if (Buffer.byteLength(text) > REFLECTION_OUTPUT_BYTES) { failure = 'reflection_too_large'; break }
+            }
+            if (chunk.type === 'finish') {
+              if (['error', 'aborted'].includes(chunk.reason?.kind)) { failure = 'reflection_failed'; break }
+              finished = true
+            }
+          }
+          if (failure !== null) {
+            // TELL the provider to stop FIRST (a local refusal is a cancellation, not a request to keep
+            // running), and only then wait for it: the drain below is the queue's physical guarantee,
+            // not a 60-second grace period before the request is even asked to end.
+            try { controller.abort() } catch { /* already aborted */ }
+            await drainProviderStream(iterator)
+            throw new Error(failure)
+          }
+          if (!finished) throw new Error('reflection_incomplete')
+          if (sourceCheck !== null) {
+            // The last AWAITED re-confirmation: the source session and its route are read again after
+            // the provider returned, so a source that was archived or re-pointed while the request was
+            // in flight refuses here instead of being answered with the permission taken before it.
+            const verdict = await sourceCheck.revalidate(ticket)
+            if (verdict !== true) throw new Error(boundedCode(verdict, 'source_changed'))
+          }
+          // THE COMMIT GATE: the last synchronous block, with NO await between it and
+          // `reflectionResult`. EVERY cancellation source assembled above is re-read here — not just
+          // the queue's own signal — so a deadline or a caller abort that landed while the answer was
+          // still unwinding refuses the write instead of being missed by `context.allowed()`.
+          const lastBlocked = reflectionCommitRefusal(sourceCheck, ticket)
+          if (signal.aborted) throw new Error('reflection_cancelled')
+          if (lastBlocked !== null) throw new Error(lastBlocked)
+          if (typeof context.allowed === 'function' && context.allowed() !== true) throw new Error('permission_revoked')
+          const learned = engine.reflectionResult({ ticket, result: JSON.parse(text) })
+          const status = typeof learned?.id === 'string' && learned.id !== '' ? 'learned'
+            : learned?.skipped === 'abstained' ? 'abstained' : learned?.skipped ? 'skipped' : 'unknown'
+          return { state: 'done', code: null, result: { kind: 'reflection', status,
+            lessonId: typeof learned?.id === 'string' ? learned.id : null,
+            reason: boundedCode(learned?.skipped ?? 'reflection_result_unrecognised') } }
+        } catch (error) {
+          // A ticket that was issued is CONSUMED and never refunded: an interrupted, timed-out,
+          // cancelled, oversized or unparseable answer leaves the attempted revision in force, so the
+          // same evidence is never sent a second time — not after a restart, and not across a day.
+          try { engine.reflectionCancel({ ticket }) } catch { /* already settled */ }
+          return { state: 'failed', code: boundedCode(error?.code ?? error?.message) }
+        } finally { clearTimeout(timer) }
+      } })
+    if (submitted?.ok !== true) {
+      // The shared slot already holds somebody's work: this is a YIELD, not a failure — nothing was
+      // reserved and the caller may come back on its next bounded wake-up.
+      return { ok: false, consumed: false, state: 'refused', code: boundedCode(submitted?.code ?? 'job_refused') }
+    }
+    const view = await jobs.whenSettled(submitted.job.id)
+    // `consumed` is the TICKET, not the job: a refusal from the core (rolling allowance, cooldown,
+    // duplicate turn, stale revision) or a yield before the ticket leaves the revision untouched and
+    // must never be reported as an attempt.
+    return { ok: view?.state === 'done', consumed: attempt.ticketIssued === true, ticketIssued: attempt.ticketIssued === true,
+      state: view?.state ?? 'unknown', code: view?.code ?? null, result: view?.result ?? null }
+  }
+
   /** One host-reported route, bounded and copied. `undefined` when it cannot be used. */
   const boundedRoute = route => (route === null || route === undefined
     || typeof route.provider !== 'string' || typeof route.model !== 'string')
@@ -465,9 +766,29 @@ export function apply(ctx, config = {}) {
   /** The scope a run belongs to: the plan's own resolved scope, or the instance scope. */
   const scopeOf = lesson => (typeof lesson?.projectKey === 'string' && lesson.projectKey !== ''
     ? lesson.projectKey : undefined)
+  /**
+   * Is this method inside the registered pack's domain at all?
+   *
+   * The review track is a PAID call, so it needs the same domain admission the promotion does: a
+   * method the pack refuses cannot buy a scenario, a judge pass or a trial. The predicate is the
+   * registered one — the adapter contributes the method's own text and nothing else. A pack-less or
+   * out-of-domain verdict is reported as a WAIT with the predicate's own reason, never as a quiet
+   * "no scenario yet".
+   */
+  const reviewAdmission = lesson => {
+    const pack = getDomainPack(LIFECYCLE_PACK_ID)
+    if (pack === undefined) return { ok: false, reason: 'domain_pack_unknown' }
+    const admission = packAdmits(pack.packId, methodDomainText(lesson))
+    return admission.ok ? { ok: true, packId: pack.packId, version: pack.version }
+      : { ok: false, reason: admission.reason ?? `outside_${pack.packId}` }
+  }
   const reviewContextFor = lesson => {
-    const pack = getDomainPack('mse-lifecycle-v1')
+    const pack = getDomainPack(LIFECYCLE_PACK_ID)
     if (pack === undefined || typeof lesson?.instruction !== 'string' || lesson.instruction.trim() === '') return null
+    // Domain admission FIRST: an unrelated method never reaches a scenario, so the "if the method is
+    // unrelated, just answer normally" prompt can never manufacture an aligned review for a sorting
+    // or cooking method that the pack explicitly does not cover.
+    if (!packAdmits(pack.packId, methodDomainText(lesson)).ok) return null
     const [sample] = packCases(pack.packId).filter(row => row.family !== 'excluded_inputs')
     if (sample === undefined) return null
     const criteria = sample.criteria ?? []
@@ -502,8 +823,13 @@ export function apply(ctx, config = {}) {
     // demands. The flag travels context → reservation → verdict, so a submission cannot widen it.
     const shortAnswersAllowed = sample.checker.kind === 'text-exact-v1'
       && String(sample.checker.expected ?? '').replace(/\s/gu, '').length < 20
+    // The per-case criteria hash, not the pack-wide one: one reservation freezes ONE experiment, and
+    // a hash covering every case could never bind it. The core derives the same value from the same
+    // registry, so the two sides cannot drift.
     return { suite: { packId: pack.packId, version: pack.version }, suiteId: packSuiteId(pack), criteria,
-      scenarioHash: packScenarioHash(pack.packId, sample.caseId), criteriaHash: packCriteriaHash(pack.packId),
+      caseId: sample.caseId,
+      scenarioHash: packScenarioHash(pack.packId, sample.caseId),
+      criteriaHash: packCaseCriteriaHash(pack.packId, sample.caseId),
       scenario, arm, judge, shortAnswersAllowed }
   }
   /**
@@ -516,8 +842,8 @@ export function apply(ctx, config = {}) {
    */
   const objectiveContextFor = lesson => {
     if (lesson === undefined || lesson === null || typeof lesson.instruction !== 'string') return null
-    const pack = getDomainPack('mse-lifecycle-v1')
-    if (pack === undefined || !packAdmits(pack.packId, lesson.instruction).ok) return null
+    const pack = getDomainPack(LIFECYCLE_PACK_ID)
+    if (pack === undefined || !packAdmits(pack.packId, methodDomainText(lesson)).ok) return null
     const cases = packCases(pack.packId)
     return {
       packId: pack.packId, suiteId: packSuiteId(pack), cases,
@@ -558,6 +884,10 @@ export function apply(ctx, config = {}) {
   const automation = createAutoValidation({
     engine,
     context: reviewContextFor,
+    // The review track's domain admission, reported separately from "no scenario yet": an unrelated
+    // method must say WHICH domain refused it instead of looking like a fixture that is still being
+    // prepared. It is read before any reservation, so the refusal costs no call.
+    reviewAdmission,
     objectiveContext: objectiveContextFor,
     source: sourceFor,
     // The foreground (a user turn or a manual job) always wins: the automatic queue yields while one
@@ -653,6 +983,15 @@ export function apply(ctx, config = {}) {
     // The operator switch and the legacy owner are re-read before EVERY paid step, so closing the
     // switch stops the next call rather than the one after it.
     enabled: () => !disposed && sync().length === 0 && readPolicy().autoValidationEnabled === true,
+    // The problem due-recovery pass rides the SAME wake-ups and the SAME serial guard as the queue,
+    // but answers to the reflection switch instead of `autoValidationEnabled` (reflection is on by
+    // default; recovery must not require a second, unrelated switch).
+    dueWork: () => problemPass(),
+    // The controlled-verification seams land on the REAL timer path: when a verification injects a
+    // clock/scheduler, this is the same timer the production build uses, not a test-only branch.
+    ...(verifiedNow === null ? {} : { now: verifiedNow }),
+    ...(typeof config.schedule === 'function' ? { schedule: config.schedule } : {}),
+    ...(typeof config.cancelTimer === 'function' ? { cancelTimer: config.cancelTimer } : {}),
     log: (code, detail) => ctx.logger.info('mse-learning auto: %s %s', code, detail ?? '') })
   /** A stable, non-secret seed for the arm order: the plan's own identity, hashed. */
   function planHashSeed(lesson, caseId) {
@@ -662,6 +1001,14 @@ export function apply(ctx, config = {}) {
   // One startup pass over the automatic queue: anything that was `running` when the process stopped
   // is parked as `interrupted` (its reservation is NOT refunded — the call may have been paid for),
   // and its ticket is released so the serial slot is free again. Never called from a read.
+  try {
+    const problems = engine.recoverProblems({ limit: PROBLEM_PUMP_FEED_LIMIT })
+    if (problems.interrupted > 0) {
+      ctx.logger.info('mse-learning: released %d abandoned reflection attempt(s)', problems.interrupted)
+    }
+  } catch (error) {
+    ctx.logger.warn('mse-learning: problem recovery failed: %s', typeof error?.code === 'string' ? error.code : 'recovery_failed')
+  }
   try {
     const recovered = engine.recoverAutoPlans()
     if (recovered.interrupted > 0 || recovered.releasedTickets > 0) {
@@ -818,6 +1165,357 @@ export function apply(ctx, config = {}) {
     try { return (await query.listSessions()) ?? [] } catch { return [] }
   }
 
+  // ---------------------------------------------------------------- problem due-recovery pump
+  //
+  // A problem whose reflection was refused by the ROLLING ALLOWANCE or the COOLDOWN signed no
+  // ticket, so its revision is still attemptable — but nothing used to come back to it: the user had
+  // to say something else before the same evidence was asked again, and after the daily allowance ran
+  // out the row could even be parked in the PAST (a zero-delay retry over unchargeable evidence).
+  //
+  // This pump is the host's bounded answer. It runs on the SAME lifecycle the automatic queue already
+  // has — one `start()` pass, the one bounded timer, and a real settings/turn wake-up — under the same
+  // serial guard, and it uses the same physical slot. It never reads a UI, never waits for a new user
+  // message and never invents a route: it re-confirms the source the ledger recorded, and it spends
+  // only through the core's ordinary ticket path (3 per rolling 24h, 30-minute cooldown, 384 output
+  // tokens — all unchanged).
+
+  let problemPassBusy = false
+  let lastProblemPass = null
+
+  /**
+   * The bounded source facts one recovery attempt needs, resolved from the host's own truth.
+   *
+   * Every read carries ONE fact generation: the host's lifecycle invalidations (`api-session/removed`,
+   * a disposal, a settings change) bump it, and a read that crossed such an invalidation is void
+   * rather than evidence. An absence is only ever a DELETION when the host's own confirmed directory
+   * proves it (a listing that started after the last sighting); anything else is `unknown` and waits.
+   */
+  async function resolveRecoverySource(origin) {
+    if (origin === null || origin === undefined || typeof origin.sessionId !== 'string' || origin.sessionId === '') {
+      return { ok: false, code: 'source_unbound' }
+    }
+    // A binding without a frozen route cannot be recovered: the whole point of the binding is that
+    // the attempt runs on the SAME execution, and completing it from a default or a "latest" model is
+    // exactly what the audit forbids.
+    if (typeof origin.provider !== 'string' || typeof origin.model !== 'string') {
+      return { ok: false, code: 'source_route_unbound' }
+    }
+    const epoch = factsEpoch
+    // The archive flag is synchronous and in memory, so it is read live at every step rather than
+    // from the snapshot the pass started with. `null` means the fact could not be confirmed at all,
+    // and an unconfirmed fact refuses — it never means "still there".
+    const archived = archivedSessionNow(origin.sessionId)
+    if (archived === null) return { ok: false, code: 'host_state_unknown' }
+    if (archived) return { ok: false, code: 'source_archived' }
+    const query = (() => { try { return ctx.get('sessionQuery') } catch { return undefined } })()
+    if (query === undefined || typeof query.listSessions !== 'function'
+      || typeof query.readSession !== 'function') return { ok: false, code: 'host_state_unknown' }
+    let listed
+    try { listed = await query.listSessions() } catch { return { ok: false, code: 'host_state_unknown' } }
+    // A bounded or incomplete directory cannot prove a session is gone: the same honesty the
+    // settlement guard uses. It is `unknown`, never a permanent stop.
+    if (listed?.truncated === true || listed?.complete === false) return { ok: false, code: 'host_state_unknown' }
+    const rows = Array.isArray(listed) ? listed : Array.isArray(listed?.sessions) ? listed.sessions : null
+    if (rows === null) return { ok: false, code: 'host_state_unknown' }
+    const identity = hashId(origin.sessionId)
+    const present = rows.some(entry => (entry?.header?.id ?? entry?.id ?? entry?.sessionId) === origin.sessionId)
+    // THE HOST'S OWN CONFIRMED VIEW decides an absence — never this pass's listing alone.
+    //
+    // It is read with ONE bounded, coalesced pull whenever it cannot answer (`null`: never pulled,
+    // aged past its 30 s TTL, or a failed pull), because the product timer runs at 60 s: judging the
+    // `null` directly made every tick of a real host refuse with `host_state_unknown` and NOTHING ever
+    // recovered (native rev2 timer diagnostic). When the fresh listing and the confirmed snapshot
+    // DISAGREE, the snapshot is behind a real read, so exactly ONE chained re-confirmation is asked
+    // for and the verdict is taken from that. `null` after all that is still "unknown", never
+    // permission — and an absence claimed only by this pass's listing is never a deletion.
+    let verdict = await confirmedAbsence(identity)
+    if (verdict !== null && verdict === present) {
+      await refreshHostFacts().catch(() => null)
+      verdict = factsProveGone(identity)
+    }
+    if (verdict === null) return { ok: false, code: 'host_state_unknown' }
+    if (!present && verdict === false) return { ok: false, code: 'host_state_unknown' }
+    if (!present && verdict === true) return { ok: false, code: 'source_unavailable' }
+    if (present && verdict === true) return { ok: false, code: 'host_state_unknown' }
+    // The session's route must still be the FROZEN one. A session that changed model is a different
+    // execution: the answer would belong to another provider, so the attempt waits instead.
+    const current = boundedRoute(await latestRouteFor(origin.sessionId))
+    if (current === null) return { ok: false, code: 'source_route_unavailable' }
+    if (current.provider !== origin.provider || current.model !== origin.model
+      || (current.reasoningEffort ?? null) !== (origin.reasoningEffort ?? null)) {
+      return { ok: false, code: 'source_route_changed' }
+    }
+    // The PROJECT comes from the source session's own header — never from the row's scope hash, which
+    // is one-way by design. The core then decides whether it still matches the stored scope.
+    let snapshot
+    try { snapshot = await query.readSession(origin.sessionId) } catch { return { ok: false, code: 'host_state_unknown' } }
+    const header = snapshot?.session
+    if (header === undefined || header === null || header.id !== origin.sessionId) {
+      return { ok: false, code: 'source_unavailable' }
+    }
+    const cwd = typeof header.cwd === 'string' && header.cwd.length > 0 && header.cwd.length <= 512 ? header.cwd : undefined
+    // THE SECOND READING of the synchronous facts, after the awaits above: an archive, a deletion or
+    // any other invalidation that landed while the directory was being read must void this licence
+    // instead of being answered with the permission taken before it.
+    const archivedAfter = archivedSessionNow(origin.sessionId)
+    if (archivedAfter === null) return { ok: false, code: 'host_state_unknown' }
+    if (archivedAfter) return { ok: false, code: 'source_archived' }
+    if (factsEpoch !== epoch) return { ok: false, code: 'host_state_unknown' }
+    return { ok: true, code: null, sessionId: origin.sessionId, projectKey: cwd, epoch,
+      controlGeneration: currentControlGeneration(),
+      route: { provider: origin.provider, model: origin.model,
+        ...(typeof origin.reasoningEffort === 'string' ? { reasoningEffort: origin.reasoningEffort } : {}) } }
+  }
+
+  /**
+   * The source binding of ONE reflection, shared by the dispatch gate, the post-answer recheck and
+   * the final synchronous commit gate — for the IMMEDIATE turn-end reflection and for a recovered
+   * one alike.
+   *
+   * `problem` is `null` for the immediate path (the binding is the turn's own record: the session it
+   * ran in and the trusted project it was prepared with) and `{ problemId, evidenceRevision }` for a
+   * recovery (the durable ledger binding is re-read from the core). `assess(ticket)` never awaits, so
+   * it is safe in the last block before the core is asked to write; `revalidate(ticket)` re-reads the
+   * directory, the route and the project after the provider returned; `confirm()` performs the ONE
+   * bounded coalesced directory pull a missing snapshot needs before anyone judges.
+   */
+  function createSourceCheck({ sessionId, provider, model, reasoningEffort = null, projectKey = undefined,
+    epoch, controlGeneration = null, problem = null }) {
+    const declaredProjectKey = projectKey === undefined ? undefined : projectKey
+    let verifiedProjectKey = declaredProjectKey
+    let verifiedEpoch = epoch
+    const planArgs = extra => ({ problemId: problem === null ? undefined : problem.problemId,
+      ...(verifiedProjectKey === undefined ? {} : { projectKey: verifiedProjectKey }),
+      ...(environmentId === undefined ? {} : { environmentId }), ...extra })
+    const assess = (ticket = null) => {
+      if (disposed) return 'plugin_disposed'
+      if (factsEpoch !== verifiedEpoch) return 'host_state_unknown'
+      if (Number.isSafeInteger(controlGeneration)) {
+        const current = currentControlGeneration()
+        if (current === null) return 'host_state_unknown'
+        if (current !== controlGeneration) return 'control_changed'
+      }
+      const archived = archivedSessionNow(sessionId)
+      if (archived === null) return 'host_state_unknown'
+      if (archived) return 'source_archived'
+      const gone = factsProveGone(hashId(sessionId))
+      if (gone === null) return 'host_state_unknown'
+      if (gone === true) return 'source_unavailable'
+      if (problem === null) return null
+      let planned = null
+      try {
+        planned = ticket === null ? engine.problemRecoveryPlan(planArgs())
+          : engine.problemRecoveryPlan(planArgs({ ticket, evidenceRevision: problem.evidenceRevision }))
+      } catch (error) { return boundedCode(error?.code) }
+      if (planned?.recoverable !== true) return planned?.code ?? 'not_recoverable'
+      return null
+    }
+    /** ONE bounded, coalesced confirmation of the host's own directory, then judge again. */
+    const confirm = async () => {
+      const opened = factsEpoch
+      if (factsProveGone(hashId(sessionId)) === null) await refreshHostFacts().catch(() => null)
+      if (factsEpoch !== opened) return 'host_state_unknown'
+      return assess()
+    }
+    /**
+     * Re-read the source AFTER the provider returned: a fresh directory, a fresh session header and a
+     * fresh route, each captured under one generation, so an invalidation that landed mid-read refuses
+     * instead of being answered from the snapshot taken before it.
+     */
+    const revalidate = async (ticket = null) => {
+      const opened = factsEpoch
+      const query = (() => { try { return ctx.get('sessionQuery') } catch { return undefined } })()
+      if (query === undefined || typeof query.listSessions !== 'function'
+        || typeof query.readSession !== 'function') return 'host_state_unknown'
+      let listed
+      try { listed = await query.listSessions() } catch { return 'host_state_unknown' }
+      if (listed?.truncated === true || listed?.complete === false) return 'host_state_unknown'
+      const rows = Array.isArray(listed) ? listed : Array.isArray(listed?.sessions) ? listed.sessions : null
+      if (rows === null) return 'host_state_unknown'
+      const identity = hashId(sessionId)
+      const present = rows.some(entry => (entry?.header?.id ?? entry?.id ?? entry?.sessionId) === sessionId)
+      // A delete is conservative: this read is enough to refuse. A PRESENCE, however, must be agreed
+      // by the host's confirmed snapshot before the synchronous gate reads it, or a session that came
+      // back would be refused by a snapshot the host has already superseded.
+      if (!present) return 'source_unavailable'
+      if (factsProveGone(identity) === true) await refreshHostFacts().catch(() => null)
+      const current = boundedRoute(await latestRouteFor(sessionId))
+      if (current === null) return 'source_route_unavailable'
+      if (current.provider !== provider || current.model !== model
+        || (current.reasoningEffort ?? null) !== reasoningEffort) return 'source_route_changed'
+      let snapshot
+      try { snapshot = await query.readSession(sessionId) } catch { return 'host_state_unknown' }
+      const header = snapshot?.session
+      if (header === undefined || header === null || header.id !== sessionId) return 'source_unavailable'
+      const cwd = typeof header.cwd === 'string' && header.cwd.length > 0 && header.cwd.length <= 512
+        ? header.cwd : undefined
+      // The reads above are evidence only while nothing invalidated them: a deletion notice, a
+      // disposal or a settings change during the read makes this a stale snapshot, NOT a licence.
+      if (factsEpoch !== opened) return 'host_state_unknown'
+      if (problem === null) {
+        // The IMMEDIATE reflection binds the turn's own record. The project the host reports must
+        // still be the project that turn was prepared in; a moved session is a different execution,
+        // and the candidate must not be filed under a scope the source no longer claims.
+        if (cwd !== declaredProjectKey) return 'scope_mismatch'
+      } else {
+        verifiedProjectKey = cwd
+      }
+      // A snapshot that cannot answer is confirmed ONCE (bounded, coalesced) before the commit gate
+      // reads it synchronously: a paid answer must not be discarded for a TTL that merely expired.
+      if (factsProveGone(identity) === null) await refreshHostFacts().catch(() => null)
+      if (factsEpoch !== opened) return 'host_state_unknown'
+      verifiedEpoch = factsEpoch
+      const verdict = assess(ticket)
+      return verdict === null ? true : verdict
+    }
+    return { sessionId, assess, confirm, revalidate,
+      plan: problem === null ? null : () => engine.problemRecoveryPlan(planArgs()) }
+  }
+
+  /**
+   * One bounded pass over the core's due feed.
+   *
+   * Bounded three ways: at most `PROBLEM_PUMP_FEED_LIMIT` rows are considered, at most one job exists
+   * at a time (the shared queue owns that), and the pass stops at the first yield to a person's turn,
+   * a closed switch or a slot somebody else holds. A row that is not due yet is skipped WITHOUT a
+   * write, so a parked problem cannot become a hot scan.
+   */
+  async function problemPass() {
+    if (disposed) return { ok: false, code: 'plugin_disposed' }
+    if (problemPassBusy) return { ok: false, code: 'busy' }
+    problemPassBusy = true
+    try {
+      // (0) Release the attempts a DEAD process left in flight, so a crash cannot strand a problem
+      //     for ever (the ticket is never refunded and the revision is never replayed; only genuinely
+      //     new evidence may open a new attempt). A pass with nothing abandoned writes nothing.
+      let abandoned = 0
+      try {
+        const recovery = engine.recoverProblems({ limit: PROBLEM_PUMP_FEED_LIMIT })
+        abandoned = Number.isSafeInteger(recovery?.interrupted) ? recovery.interrupted : 0
+        if (abandoned > 0) ctx.logger.info('mse-learning: %d abandoned reflection attempt(s) released', abandoned)
+      } catch { /* recovery is best-effort; the pass below still runs */ }
+      let feed = null
+      try { feed = engine.problemDueFeed({ limit: PROBLEM_PUMP_FEED_LIMIT }) } catch { feed = null }
+      const rows = Array.isArray(feed?.rows) ? feed.rows : []
+      const pass = { ok: true, abandoned, considered: rows.length,
+        due: Number.isSafeInteger(feed?.due) ? feed.due : 0,
+        dueTotal: Number.isSafeInteger(feed?.dueTotal) ? feed.dueTotal : 0,
+        attempted: 0, recovered: 0, deferred: 0, skipped: 0, yielded: 0, codes: [],
+        consideredIds: rows.map(row => row.id) }
+      const note = code => { if (typeof code === 'string' && code !== '' && pass.codes.length < 8
+        && !pass.codes.includes(code)) pass.codes.push(code) }
+      for (const row of rows) {
+        if (disposed) break
+        if (row.due !== true) continue
+        const permission = reflectionPermission()
+        if (permission.allowed !== true) { pass.yielded += 1; note(permission.code); break }
+        if (foregroundTurns.size > 0) { pass.yielded += 1; note('foreground'); break }
+        const outcome = await attemptProblemRecovery(row)
+        if (outcome.slot === 'ran') {
+          pass.attempted += 1
+          if (outcome.code === 'learned' || outcome.code === 'abstained') pass.recovered += 1
+        } else if (outcome.slot === 'deferred') pass.deferred += 1
+        else if (outcome.slot === 'skipped') pass.skipped += 1
+        else if (outcome.slot === 'yielded') { pass.yielded += 1; note(outcome.code); break }
+        note(outcome.code)
+      }
+      // THE PERSISTENT FAIRNESS WATERMARK. It must move whenever this pass CONSIDERED work, not only
+      // when it managed to attempt some:
+      //   • a row that was confirmed and then skipped (a scope/environment drift, a terminal race)
+      //     still occupied a window slot, and a prefix of such rows would otherwise pin the window at
+      //     the same offset for ever and never reach a legal row behind it (independent host probe
+      //     `host-rev1/scope-drift-prefix-starves-valid-tail`);
+      //   • a window that is all parked can still have DUE work outside it, so `dueTotal` (the whole
+      //     ranking, not the window) also moves the watermark.
+      // A pass that really had nothing to do — no recoverable row, or none due anywhere and no row
+      // acted on — writes NOTHING, so an idle process never rewrites its own document on a timer.
+      const worked = pass.attempted + pass.deferred + pass.skipped > 0
+      if (rows.length > 0 && (worked || pass.dueTotal > 0)) {
+        try { engine.problemConsiderAdvance({ step: rows.length }) } catch { note('consider_advance_failed') }
+      }
+      lastProblemPass = { ...pass, at: Date.now() }
+      return pass
+    } finally { problemPassBusy = false }
+  }
+
+  /**
+   * ONE due row: confirm its source, then let the core plan and the shared slot run the reflection.
+   *
+   * The core's read-only plan decides whether this is still the same revision and the same
+   * project/environment; the host decides whether the SOURCE still exists unchanged. A refusal from
+   * either side parks the row with an explicit reason and a positive wait — nothing is consumed and
+   * no provider, route or project is borrowed to compensate.
+   */
+  async function attemptProblemRecovery(row) {
+    const resolved = await resolveRecoverySource(row.origin ?? null)
+    if (resolved.ok !== true) {
+      try {
+        engine.problemDefer({ problemId: row.id, evidenceRevision: row.evidenceRevision, code: resolved.code })
+      } catch { /* a stale defer is not an error: the row moved on by itself */ }
+      return { slot: 'deferred', code: resolved.code }
+    }
+    // ONE binding for the whole attempt: the verified project, the fact generation the source was
+    // confirmed under, the durable control generation, and the revision this attempt is for. The same
+    // object is consulted before the dispatch, after the provider returns and in the final
+    // synchronous block before the core may write.
+    const sourceCheck = createSourceCheck({ sessionId: resolved.sessionId,
+      provider: resolved.route.provider, model: resolved.route.model,
+      reasoningEffort: resolved.route.reasoningEffort ?? null, projectKey: resolved.projectKey,
+      epoch: resolved.epoch, controlGeneration: resolved.controlGeneration,
+      problem: { problemId: row.id, evidenceRevision: row.evidenceRevision } })
+    let planned = null
+    try { planned = sourceCheck.plan() } catch (error) { planned = { code: boundedCode(error?.code) } }
+    if (planned?.recoverable !== true) {
+      const code = planned?.code ?? 'not_recoverable'
+      if (PROBLEM_DEFER_PLAN_CODES.includes(code)) {
+        // A WAIT, not a terminal fact: the source session now reports another project/environment, or
+        // the row cannot name the execution at all. It is parked with a positive wait and a visible
+        // reason — which is also what lets the fair watermark move past it instead of a silent wall.
+        try {
+          engine.problemDefer({ problemId: row.id, evidenceRevision: row.evidenceRevision, code })
+        } catch { /* a stale defer is not an error: the row moved on by itself */ }
+        return { slot: 'deferred', code }
+      }
+      // Everything else is a race with a decision already taken (the revision was attempted, the row
+      // was closed, another pass is holding its ticket): nothing is written and nothing is spent.
+      return { slot: 'skipped', code }
+    }
+    if (planned.due !== true) return { slot: 'skipped', code: 'not_due' }
+    const outcome = await runReflectionInSlot({
+      requestId: reflectionRequestId('mserec', `${row.id}:${row.evidenceRevision}`, reflectionSequence += 1),
+      fingerprint: `problem:${row.id}:${row.evidenceRevision}`,
+      label: 'MSE 问题恢复复盘',
+      // Re-planned INSIDE the job: the facts read before the slot was free are not a licence, and the
+      // ticket transaction re-checks them once more (it is the same synchronous core binding).
+      prepare: () => sourceCheck.plan(),
+      sourceCheck })
+    if (outcome.state === 'refused') return { slot: 'yielded', code: outcome.code }
+    if (outcome.consumed !== true) {
+      // NO TICKET: nothing was spent, and the revision stays exactly as attemptable as it was. A
+      // withdrawn permission or a person's turn is a YIELD (the pass stands down), while a core
+      // refusal is a plain skip (the row already carries whatever wait the core wrote).
+      const code = outcome.code ?? outcome.result?.reason ?? 'not_attempted'
+      const yielded = outcome.state === 'cancelled' && ['foreground', 'reflection_disabled', 'plugin_disposed',
+        'permission_revoked', 'user_paused', 'legacy_controller'].includes(code)
+      return { slot: yielded ? 'yielded' : 'skipped', code }
+    }
+    const status = outcome.result?.status ?? null
+    return { slot: 'ran', code: status ?? outcome.code ?? outcome.state }
+  }
+
+  /** Read-only view of the recovery pass: what it last did, never a way to run it. */
+  function problemPumpStatus() {
+    let feed = null
+    try { feed = engine.problemDueFeed({ limit: PROBLEM_PUMP_FEED_LIMIT }) } catch { feed = null }
+    return { feedLimit: PROBLEM_PUMP_FEED_LIMIT, considered: lastProblemPass?.considered ?? 0,
+      due: Number.isSafeInteger(feed?.due) ? feed.due : 0,
+      eligible: Number.isSafeInteger(feed?.eligible) ? feed.eligible : 0,
+      nextDueAt: feed?.nextDueAt ?? null, cursor: feed?.cursor ?? 0,
+      lastPass: lastProblemPass === null ? null : { attempted: lastProblemPass.attempted,
+        recovered: lastProblemPass.recovered, deferred: lastProblemPass.deferred,
+        yielded: lastProblemPass.yielded, codes: [...lastProblemPass.codes], at: lastProblemPass.at } }
+  }
+
   const service = { version, engine, bridge, environmentId, jobs, capabilities: bridge.capabilities,
     settings: () => settingsSnapshot(), permissions, resolveScope, scopeHashFor: shortHash,
     observedTurns: () => bridge.trackedSessions(),
@@ -838,6 +1536,12 @@ export function apply(ctx, config = {}) {
     diagnose: input => bridge.diagnose(input),
     /** Read-only automatic-validation status for the settings card; never triggers a scan. */
     autoValidation: () => automation.status(),
+    /** Read-only problem-recovery view (feed bound, fairness watermark, last pass); never runs it. */
+    problemPump: () => problemPumpStatus(),
+    /** Explicit host entry point for ONE bounded recovery pass; a status read never reaches it. */
+    runProblemPump: () => problemPass(),
+    /** Read-only due feed, for a controlled verification that wants to observe the window itself. */
+    problemDueFeed: input => engine.problemDueFeed(input ?? {}),
     /** Abort whatever the automatic queue has in flight right now (pause, close, unload). */
     abortAutoValidation: reason => automation.abort(reason),
     /** Wait until every provider call this plugin started has really settled. */
@@ -854,9 +1558,6 @@ export function apply(ctx, config = {}) {
   // A second, stale feed here was what parked a 25-hour timer scan as `review_missing_criteria`.
   // The host timer draws its candidates from the SAME feed the settings/turn-end path uses; it no
   // longer schedules a side effect and returns an empty list.
-  automation.start(async () => {
-    try { return await loadAutoFeedRows() } catch { return [] }
-  })
   // The Settings surfaces are separate Cordis services beside the core. `mseDetails` only reads;
   // `mseControl` is the human, authenticated write path and is never a model tool.
   applyDetails(ctx)
@@ -888,7 +1589,7 @@ export function apply(ctx, config = {}) {
     // A saved settings document is an explicit lifecycle moment.
     invalidateHostFacts()
     void refreshHostFacts().catch(() => {})
-    sync({ resume: true })
+    sync({ resume: true, lifecycle: true })
     const wanted = !(volatileSettings().enabled ?? SETTINGS_DEFAULTS.enabled)
     // A settings NOTIFICATION is not a control change. `lastControlPaused` starts as `null` in every
     // new process, and comparing `wanted` with `null` made the first settings event of every start
@@ -1000,15 +1701,128 @@ export function apply(ctx, config = {}) {
    * which refuses — it is never evidence that a session still exists.
    */
   const FACTS_TTL_MS = 30_000
-  let hostFacts = null
-  let factsEpoch = 0
+  /**
+   * ONE pull at a time — but never an out-of-date one.
+   *
+   * A caller shares the in-flight listing only while NOTHING has been evidenced since that listing
+   * STARTED: a listing that began before a session appeared cannot prove that session gone, so the
+   * moment a new sighting lands the pending result is marked stale and exactly ONE follow-up pull is
+   * chained behind it (a burst of new sessions costs one extra listing, never one per event).
+   */
   const invalidateHostFacts = () => { hostFacts = null; factsEpoch += 1 }
   const currentFacts = () => {
     if (hostFacts === null) return null
     if (Date.now() - hostFacts.at > FACTS_TTL_MS) return null
     return hostFacts
   }
-  const refreshHostFacts = async () => {
+  /**
+   * WHEN this process last really saw a session the host named, hashed the way the directory is.
+   *
+   * The directory snapshot is a POINT-IN-TIME fact: a session created after it is simply absent from
+   * it. Absence therefore only means "gone" when the snapshot is NEWER than the last time the session
+   * was seen — a fixed 30-second TTL is not that proof, and treating a new session as deleted refused
+   * its own settlement (the native flow's `session_deleted` on a live session).
+   *
+   * Bounded: only recent sightings are kept, and only sessions the host has actually named are in it.
+   */
+  const SEEN_SESSIONS_MAX = 512
+  /**
+   * A process-local MONOTONE order: one increment per trusted sighting of a session, and one per
+   * directory pull START. Wall clocks are not an order — two events can share a millisecond and a
+   * clock can move backwards — while "was the directory sampled after this session was last seen?"
+   * is exactly an order question. It is answered with this counter and nothing else.
+   */
+  /** hash -> the `factsClock` value at which that session was last evidenced to exist. */
+  const rememberSeen = (hash, at) => {
+    sessionSeen.delete(hash)
+    sessionSeen.set(hash, at)
+    if (sessionSeen.size > SEEN_SESSIONS_MAX) {
+      for (const [key] of [...sessionSeen.keys()].slice(0, sessionSeen.size - SEEN_SESSIONS_MAX)) {
+        sessionSeen.delete(key)
+      }
+    }
+  }
+  const noteSessionSeen = value => {
+    const id = typeof value === 'string' ? value : value?.id ?? value?.header?.id
+    if (typeof id !== 'string' || id === '') return
+    factsClock += 1
+    rememberSeen(hashId(id), factsClock)
+  }
+  /**
+   * Does the CONFIRMED directory prove this identity is gone?
+   *
+   * @returns `true` (confirmed missing from a snapshot newer than the last sighting), `false` (present
+   *   in the confirmed directory) or `null` (not provable — refresh and refuse FOR NOW, never allow
+   *   and never declare deleted). Deletion, archiving and a failed query all still refuse; only the
+   *   "a new session is not in an older snapshot" case stops pretending to be a deletion.
+   */
+  const factsProveGone = identity => {
+    const facts = currentFacts()
+    if (facts === null) {
+      // No confirmed directory (never pulled, aged out, or the last pull failed): ask for one. The
+      // retry that follows this refusal is the settlement-recovery entry point, and without the
+      // request a single failed pull would hold the queue at `host_state_unknown` for ever.
+      void refreshHostFacts().catch(() => {})
+      return null
+    }
+    if (facts.known.has(identity)) return false
+    const seen = sessionSeen.get(identity)
+    // The listing STARTED before this session was last evidenced: it says nothing about it (the
+    // session may simply have appeared while the listing was in flight). Ask for a fresh listing —
+    // chained, so it cannot fan out — and refuse FOR NOW. Only a listing that began strictly AFTER
+    // the last sighting, and that still does not contain the session, is a deletion.
+    if (seen === undefined || !Number.isSafeInteger(facts.startedAt) || facts.startedAt <= seen) {
+      void refreshHostFacts().catch(() => {})
+      return null
+    }
+    return true
+  }
+  /**
+   * The host's own confirmed verdict about ONE session, with one bounded coalesced pull when the
+   * snapshot cannot answer.
+   *
+   * @returns `true` (provably gone: a confirmed listing that started after the last sighting does not
+   *   hold it), `false` (present in the confirmed directory) or `null` (still unknown — never
+   *   permission, and never a deletion either).
+   */
+  async function confirmedAbsence(identity) {
+    if (factsProveGone(identity) !== null) return factsProveGone(identity)
+    const opened = factsEpoch
+    await refreshHostFacts().catch(() => null)
+    // A refresh that landed after the world moved authorises nothing: the epoch is compared across
+    // the await exactly as the pull itself does.
+    if (factsEpoch !== opened) return null
+    return factsProveGone(identity)
+  }
+
+  /**
+   * A lifecycle moment where the directory may be out of date: refresh when the snapshot is absent or
+   * stale, AND when the session the host just named is not in it — that is exactly the new-session
+   * case a fixed TTL gets wrong. Bounded: the shared pull means a burst of events costs one listing.
+   */
+  const refreshFactsFor = value => {
+    const facts = currentFacts()
+    const id = typeof value === 'string' ? value : value?.id ?? value?.header?.id
+    if (facts !== null && typeof id === 'string' && id !== '' && facts.known.has(hashId(id))) return
+    void refreshHostFacts().catch(() => {})
+  }
+  const refreshHostFacts = () => {
+    if (factsPull !== null) {
+      if (factsPull.startedAt < factsClock) factsPullDirty = true
+      return factsPull.promise
+    }
+    const startedAt = ++factsClock
+    const promise = pullHostFacts(startedAt).finally(() => {
+      factsPull = null
+      if (factsPullDirty && !disposed) {
+        factsPullDirty = false
+        void refreshHostFacts().catch(() => {})
+      }
+    })
+    factsPull = { promise, startedAt }
+    return promise
+  }
+  const pullHostFacts = async startedAt => {
     const epoch = factsEpoch
     let facts = null
     try {
@@ -1030,12 +1844,16 @@ export function apply(ctx, config = {}) {
         if (typeof id !== 'string' || id.length === 0) return null
         known.add(createHash('sha256').update(id).digest('hex'))
       }
-      facts = { ok: true, archived, known, at: Date.now() }
+      facts = { ok: true, archived, known, startedAt, at: Date.now() }
     } catch { return null }
     // A refresh that lands after the world moved must not authorise anything: the epoch is
     // compared across the await, so a disposal or a settings change discards the result.
     if (epoch !== factsEpoch || disposed) return null
     hostFacts = facts
+    // The host's OWN directory is evidence too: a session it listed existed when the listing was
+    // produced. Recording that as a baseline sighting (at the pull's start) is what lets a LATER
+    // listing prove an absence — including across a restart, where no live event has happened yet.
+    for (const hash of known) if (!sessionSeen.has(hash)) rememberSeen(hash, startedAt)
     return facts
   }
 
@@ -1079,9 +1897,10 @@ export function apply(ctx, config = {}) {
       : record.sessionId !== undefined ? hashId(record.sessionId) : null
     if (identity === null) return false
     if (record.reason === 'archived') return archived.has(identity)
-    const facts = currentFacts()
-    if (facts === null) return false
-    return !archived.has(identity) && !facts.known.has(identity)
+    // The same provable-absence rule as the commit gate: a session the snapshot merely predates is
+    // never stopped on stale evidence — the record is dropped instead, while the gate keeps refusing
+    // the settlement until a fresher directory really confirms the session is gone.
+    return !archived.has(identity) && factsProveGone(identity) === true
   }
 
   const submitStop = record => {
@@ -1179,8 +1998,10 @@ export function apply(ctx, config = {}) {
     let stopped = 0
     let failed = 0
     for (const entry of status.pending ?? []) {
+      // `archived` is synchronous in-memory truth; a DELETION needs the same provable absence the
+      // guard demands, so a session the snapshot simply predates is never stopped by mistake.
       const reason = facts.archived.has(entry.sessionHash) ? 'archived'
-        : facts.known.has(entry.sessionHash) ? null : 'session_deleted'
+        : factsProveGone(entry.sessionHash) === true ? 'session_deleted' : null
       if (reason === null) continue
       // Addressed by the acknowledged handle: the raw id may no longer exist to name.
       const outcome = requestPermanentStop('entry:' + entry.key, { key: entry.key, payloadHash: entry.payloadHash,
@@ -1249,7 +2070,7 @@ export function apply(ctx, config = {}) {
   // dependence on the user opening settings or running a read-only command.
   ctx.inject(['sessionQuery', 'workspaceRegistry'], child => child.effect(() => {
     // Services becoming available is an explicit readiness moment.
-    sync({ resume: true })
+    sync({ resume: true, lifecycle: true })
     // The services can appear long after this plugin is applied, so the refresh is driven by
     // their arrival — not by the user opening settings or running a read-only command.
     refreshAndRecover().catch(error => ctx.logger.warn('mse-learning: settlement recover: %s',
@@ -1274,17 +2095,22 @@ export function apply(ctx, config = {}) {
       archivedNow = new Set([...ids].map(id => createHash('sha256').update(String(id)).digest('hex')))
     } catch { return { ok: false, reason: 'host_state_unknown' } }
     if (archivedNow.has(entry.sessionHash)) return { ok: false, reason: 'session_archived' }
-    // Existence comes from the awaited directory snapshot, which cannot be read here.
-    const facts = currentFacts()
-    if (facts === null) return { ok: false, reason: 'host_state_unknown' }
-    if (!facts.known.has(entry.sessionHash)) return { ok: false, reason: 'session_deleted' }
+    // Existence comes from the awaited directory snapshot, which cannot be read here. Absence from a
+    // snapshot is only a DELETION when the snapshot is newer than the last time this process saw the
+    // session; otherwise it is `host_state_unknown` — refused for now, refreshed, and retried, never
+    // a refusal that pretends a live session is gone.
+    const gone = factsProveGone(entry.sessionHash)
+    if (gone === null) return { ok: false, reason: 'host_state_unknown' }
+    if (gone) return { ok: false, reason: 'session_deleted' }
     return { ok: true }
   })
   ctx.on('agent/pre-step', (payload, next) => {
-    // An explicit turn boundary is a lifecycle moment: it may resume scheduling, and it is also
-    // the refresh entry point that keeps the directory snapshot from ageing out with no way back.
-    if (currentFacts() === null) void refreshHostFacts().catch(() => {})
-    sync({ resume: true })
+    // An explicit turn boundary is a lifecycle moment: it may resume scheduling, and it is also the
+    // refresh entry point that keeps the directory snapshot from ageing out with no way back — and
+    // that learns about a session created after the last snapshot instead of finding it "deleted".
+    noteSessionSeen(payload?.agent?.session)
+    refreshFactsFor(payload?.agent?.session)
+    sync({ resume: true, lifecycle: true })
     // An explicit turn boundary is the only place a failed control write is retried.
     if (payload.step === 1) {
       retrySettlementControl()
@@ -1296,13 +2122,18 @@ export function apply(ctx, config = {}) {
   ctx.on('session/event', (session, event) => {
     if (event.type === 'turn/start') {
       const id = session?.id ?? session?.header?.id
+      // A turn starting is a real sighting of this session, and a session the confirmed directory does
+      // not hold yet is a NEW one: refresh then, so the settlement guard never sees a live session as
+      // deleted. A known session costs nothing here.
+      noteSessionSeen(session)
+      refreshFactsFor(session)
       if (typeof id === 'string' && id !== '') foregroundTurns.add(id)
       // A person's turn takes the provider NOW: the automatic run in flight is aborted (its own
       // provider request included) and its plan returns to the queue. Nothing is charged to the
       // plan's retry budget — the run was not a failed comparison, it was pre-empted. Work resumes
       // from the `turn/end` wake-up below, once the foreground is quiet again.
       if (foregroundTurns.size > 0) cancelAutomaticJobs('foreground')
-      sync({ resume: true })
+      sync({ resume: true, lifecycle: true })
     }
     if (event.type === 'turn/end') {
       const id = session?.id ?? session?.header?.id
@@ -1347,10 +2178,33 @@ export function apply(ctx, config = {}) {
       bridge.closeSession(sessionId)
     })
   }))
-  ctx.on('tools/result', (exec, result) => bridge.toolExecution(exec, result))
-  ctx.on('agent/error', payload => bridge.toolResult({ sessionId: payload.agent.session.id,
-    turnId: payload.turn, failed: true }))
+  ctx.on('tools/result', (exec, result) => {
+    noteSessionSeen(exec?.agent?.session)
+    return bridge.toolExecution(exec, result)
+  })
+  ctx.on('agent/error', payload => {
+    // A generic agent/model error is a DIAGNOSTIC, not method evidence. The real host error
+    // contract does NOT guarantee parseable code strings (an unknown Error, or official LlmError
+    // codes like AUTH / QUOTA / SERVER / TRANSPORT / TIMEOUT / INVALID_CREDENTIAL), so no mapping
+    // from code text to a trust class is attempted (native classification contract). It voids any
+    // success credit for the turn; only a real tools/result structure, a trusted checker or an
+    // explicit user correction may drive method learning. A trailing turn/end 'error' keeps this
+    // classification instead of rewriting it into a generic task failure.
+    bridge.toolResult({ sessionId: payload.agent.session.id, turnId: payload.turn, failed: false,
+      diagnostic: true })
+  })
   sync()
+  // THE BOUNDED WAKE-UPS START LAST.
+  //
+  // `start` runs one pass immediately and then only when a plan's own retry time has come due. Every
+  // wake-up runs the SAME preparation as a settings change or a turn end — and, before the queue
+  // work, the bounded problem due-recovery pass. Starting it BEFORE the host-fact generation, the
+  // control dispatch and the service wiring were initialised was the startup-order regression the
+  // independent snapshot found: the first pass reached a binding that did not exist yet. Nothing
+  // above depends on the timer, so starting it here costs nothing and removes the ordering hazard.
+  automation.start(async () => {
+    try { return await loadAutoFeedRows() } catch { return [] }
+  })
   // The disposer is async so the automatic queue's drain is really awaited before the process is
   // considered stopped. Cordis accepts a disposer promise and awaits it.
   ctx.effect(() => async () => {

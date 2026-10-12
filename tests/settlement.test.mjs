@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { LearningEngine } from '../src/index.mjs'
 import { SettlementQueue, deadlineFromReceipt, isTransient } from '../src/settlement.mjs'
-import { createHarnessBridge } from '../adapters/harness.mjs'
+import { createHarnessBridge, mseMessageSource } from '../adapters/harness.mjs'
 
 /** Deterministic clock + scheduler: no real sleeping, every timer is inspectable. */
 function fakeClock() {
@@ -142,7 +142,7 @@ function fixture(t, options = {}) {
   let id = 0
   const bridge = createHarnessBridge({ engine, now: clock.now,
     settlement: { schedule: clock.schedule, cancel: clock.cancel, maxAgeMs: 5 * 60_000, ...options.settlement },
-    createMessage: text => ({ id: `m-${++id}`, role: 'user', source: { kind: 'plugin', plugin: 'mse-learning' }, content: [{ type: 'text', text }] }),
+    createMessage: text => ({ id: `m-${++id}`, role: 'user', source: mseMessageSource('instructions'), content: [{ type: 'text', text }] }),
     ...options })
   const session = { id: 'settle-session', header: {}, events: [] }
   const message = { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '导出金额并排序' }] }

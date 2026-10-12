@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { LearningEngine, reflect } from '../src/index.mjs'
-import { createHarnessBridge } from '../adapters/harness.mjs'
+import { createHarnessBridge, mseMessageSource } from '../adapters/harness.mjs'
 import { handleMseCommand } from '../src/status.mjs'
 
 function fixture(t, options = {}) {
@@ -13,7 +13,7 @@ function fixture(t, options = {}) {
   const engine = new LearningEngine({ stateRoot, adapterId: 'dsh' })
   const lesson = engine.record({ eventId: 'correction', source: 'direct_user', kind: 'correction', instruction: '以后导出金额前先转换为数值，再按金额排序' })
   let id = 0
-  const bridge = createHarnessBridge({ engine, createMessage: text => ({ id: `plugin-${++id}`, role: 'user', source: { kind: 'plugin', plugin: 'mse-learning' }, content: [{ type: 'text', text }] }), ...options })
+  const bridge = createHarnessBridge({ engine, createMessage: text => ({ id: `plugin-${++id}`, role: 'user', source: mseMessageSource('instructions'), content: [{ type: 'text', text }] }), ...options })
   // The core refuses to settle under unknown host permission, which is the safe default; these
   // tests are about the bridge, so they state the permission explicitly.
   bridge.setTrustedGuard(() => true)
@@ -99,7 +99,12 @@ test('pause cancels a queued review even if the controller resumes before its mi
   let calls = 0
   const { bridge, payload, next, session, end } = fixture(t, { review: async () => { calls += 1 } })
   await bridge.preStep(payload, next)
-  bridge.toolResult({ sessionId: session.id, turnId: 1, failed: true })
+  // Two independent host-verified failures reach the independent-evidence threshold: the turn is
+  // failure-observed and the review is only ever queued against a READY problem.
+  bridge.toolResult({ sessionId: session.id, turnId: 1, failed: true, eventId: 'call-1', toolName: 'bash',
+    failureCode: 'tool_nonzero_exit' })
+  bridge.toolResult({ sessionId: session.id, turnId: 1, failed: true, eventId: 'call-2', toolName: 'bash',
+    failureCode: 'tool_nonzero_exit' })
   bridge.sessionEvent(session, { type: 'assistant/message', data: { turn: 1, content: '金额被当作字符串排序，需要复查数据类型' } })
   end()
   bridge.setEnabled(false); bridge.setEnabled(true)
@@ -116,7 +121,10 @@ test('pause cancels an in-flight review and prevents a late candidate after resu
     return reflect(f.engine, input, async () => { started(); return response }, abort)
   } })
   await f.bridge.preStep(f.payload, f.next)
-  f.bridge.toolResult({ sessionId: f.session.id, turnId: 1, failed: true })
+  f.bridge.toolResult({ sessionId: f.session.id, turnId: 1, failed: true, eventId: 'call-1', toolName: 'bash',
+    failureCode: 'tool_nonzero_exit' })
+  f.bridge.toolResult({ sessionId: f.session.id, turnId: 1, failed: true, eventId: 'call-2', toolName: 'bash',
+    failureCode: 'tool_nonzero_exit' })
   f.bridge.sessionEvent(f.session, { type: 'assistant/message', data: { turn: 1, content: '金额被当作字符串排序，需要复查数据类型' } })
   f.end()
   await ready
@@ -173,7 +181,10 @@ test('reflection follows the successful request route after a host model overrid
     provider: 'selected-provider', model: 'selected-model', reasoningEffort: 'high' }, async function* () {
     yield { type: 'finish', reason: { kind: 'stop' } }
   })) {}
-  f.bridge.toolResult({ sessionId: f.session.id, turnId: 1, failed: true })
+  f.bridge.toolResult({ sessionId: f.session.id, turnId: 1, failed: true, eventId: 'call-1', toolName: 'bash',
+    failureCode: 'tool_nonzero_exit' })
+  f.bridge.toolResult({ sessionId: f.session.id, turnId: 1, failed: true, eventId: 'call-2', toolName: 'bash',
+    failureCode: 'tool_nonzero_exit' })
   f.bridge.sessionEvent(f.session, { type: 'assistant/message', data: { turn: 1, content: '金额被当作字符串排序，需要复查数据类型' } })
   f.end()
   await settled()
@@ -240,7 +251,10 @@ test('the reviewed turn keeps one environment identity from turn to review to me
   const reviews = []
   const f = fixture(t, { environmentId: 'toolchain-b', review: async input => { reviews.push(input) } })
   await f.bridge.preStep(f.payload, f.next)
-  f.bridge.toolResult({ sessionId: f.session.id, turnId: 1, failed: true })
+  f.bridge.toolResult({ sessionId: f.session.id, turnId: 1, failed: true, eventId: 'call-1', toolName: 'bash',
+    failureCode: 'tool_nonzero_exit' })
+  f.bridge.toolResult({ sessionId: f.session.id, turnId: 1, failed: true, eventId: 'call-2', toolName: 'bash',
+    failureCode: 'tool_nonzero_exit' })
   f.bridge.sessionEvent(f.session, { type: 'assistant/message', data: { turn: 1, content: '金额被当作字符串排序，需要复查数据类型' } })
   f.end()
   await settled()
@@ -289,7 +303,10 @@ test('closing one session cancels its queued and in-flight reviews without touch
   } })
   const other = { id: 'other-session', header: {}, events: [] }
   await f.bridge.preStep(f.payload, f.next)
-  f.bridge.toolResult({ sessionId: f.session.id, turnId: 1, failed: true })
+  f.bridge.toolResult({ sessionId: f.session.id, turnId: 1, failed: true, eventId: 'call-1', toolName: 'bash',
+    failureCode: 'tool_nonzero_exit' })
+  f.bridge.toolResult({ sessionId: f.session.id, turnId: 1, failed: true, eventId: 'call-2', toolName: 'bash',
+    failureCode: 'tool_nonzero_exit' })
   f.bridge.sessionEvent(f.session, { type: 'assistant/message', data: { turn: 1, content: '金额被当作字符串排序，需要复查数据类型' } })
   f.end()
   await ready
@@ -304,7 +321,10 @@ test('closing one session cancels its queued and in-flight reviews without touch
   let queuedCalls = 0
   const g = fixture(t, { review: async () => { queuedCalls += 1 } })
   await g.bridge.preStep(g.payload, g.next)
-  g.bridge.toolResult({ sessionId: g.session.id, turnId: 1, failed: true })
+  g.bridge.toolResult({ sessionId: g.session.id, turnId: 1, failed: true, eventId: 'g-call-1', toolName: 'bash',
+    failureCode: 'tool_nonzero_exit' })
+  g.bridge.toolResult({ sessionId: g.session.id, turnId: 1, failed: true, eventId: 'g-call-2', toolName: 'bash',
+    failureCode: 'tool_nonzero_exit' })
   g.bridge.sessionEvent(g.session, { type: 'assistant/message', data: { turn: 1, content: '金额被当作字符串排序，需要复查数据类型' } })
   g.end()
   g.bridge.closeSession(g.session.id)
@@ -318,7 +338,10 @@ test('closing one session cancels its queued and in-flight reviews without touch
     messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '请导出金额并进行排序' }] }],
     signal: new AbortController().signal }
   await h.bridge.preStep(h.payload, h.next)
-  h.bridge.toolResult({ sessionId: h.session.id, turnId: 1, failed: true })
+  h.bridge.toolResult({ sessionId: h.session.id, turnId: 1, failed: true, eventId: 'h-call-1', toolName: 'bash',
+    failureCode: 'tool_nonzero_exit' })
+  h.bridge.toolResult({ sessionId: h.session.id, turnId: 1, failed: true, eventId: 'h-call-2', toolName: 'bash',
+    failureCode: 'tool_nonzero_exit' })
   h.bridge.sessionEvent(h.session, { type: 'assistant/message', data: { turn: 1, content: '金额被当作字符串排序，需要复查数据类型' } })
   h.end()
   await settled(); await settled()

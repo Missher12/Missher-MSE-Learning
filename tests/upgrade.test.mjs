@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { LearningEngine } from '../src/index.mjs'
-import { createHarnessBridge } from '../adapters/harness.mjs'
+import { createHarnessBridge, mseMessageSource } from '../adapters/harness.mjs'
 
 /**
  * Upgrade tests run against stores produced by real older engines
@@ -56,7 +56,7 @@ test('the DSH bridge default recalls a legacy store without any environment conf
   const engine = new LearningEngine({ stateRoot: root, adapterId: 'dsh' })
   let id = 0
   const bridge = createHarnessBridge({ engine,
-    createMessage: text => ({ id: `m-${++id}`, role: 'user', source: { kind: 'plugin', plugin: 'mse-learning' }, content: [{ type: 'text', text }] }) })
+    createMessage: text => ({ id: `m-${++id}`, role: 'user', source: mseMessageSource('instructions'), content: [{ type: 'text', text }] }) })
   const session = { id: 'legacy-session', header: {}, events: [] }
   const message = { id: 'u-1', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: methodInstruction(engine) }] }
   const decision = await bridge.preStep({ agent: { session }, step: 1, turn: 1, messages: [message],

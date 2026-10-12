@@ -1,5 +1,7 @@
 # MSE Learning
 
+> 当前源码版本为 **0.9.0-alpha.19**。本次新增的 DSH / Hermes 自动调度、取消记账与交付边界见 [当前交付说明](https://github.com/Missher12/Missher-MSE-Learning/blob/main/PUBLICATION.md)。下方 alpha.18 的版本、下载示例和验收表保留为历史记录；新版本的 Git、Release、各平台安装状态分别核验。
+
 中文 | [English](README.en.md) · [桌面端与下载](https://github.com/Missher12/Missher-DeepseekHarness-Desktop)
 
 为 DSH 保存按项目隔离的用户纠错与方法候选，在相关任务中限额召回，并记录可信宿主确认的采用和验证结果。它不训练模型权重，也不保证模型永不犯错。

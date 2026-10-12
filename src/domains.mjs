@@ -462,6 +462,23 @@ export function packCriteriaHash(packId) {
 }
 
 /**
+ * Hash of ONE case's review criteria, bound to the pack version.
+ *
+ * This is the identity a review reservation freezes. {@link packCriteriaHash} deliberately covers
+ * every case of the pack, which is the right identity for "which criteria document is this" but
+ * cannot bind a single experiment: a caller holding that one hash could put it on any scenario.
+ * The pair (scenario, criteria) therefore has to be per case.
+ */
+export function packCaseCriteriaHash(packId, caseId) {
+  const pack = getDomainPack(packId)
+  if (pack === undefined) return null
+  const testCase = pack.cases.find(row => row.caseId === caseId)
+  if (testCase === undefined) return null
+  return sha256(canonicalJson({ packId: pack.packId, version: pack.version, caseId: testCase.caseId,
+    criteria: testCase.criteria }))
+}
+
+/**
  * Hash of one case's scoreable scenario: task, oracle and exclusions, plus the pack version it
  * belongs to.
  *

@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { publicFiles } from './public-set.mjs'
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -29,24 +30,22 @@ if (!dshOnly) {
   try {
     const plugin = join(stage, 'mse-learning')
     mkdirSync(join(plugin, 'runtime'), { recursive: true })
-    for (const name of ['__init__.py', 'bridge.py', 'plugin.yaml']) cpSync(join(root, 'adapters/hermes', name), join(plugin, name))
+    for (const name of ['__init__.py', 'bridge.py', 'driver.py', 'plan.py', 'plugin.yaml']) cpSync(join(root, 'adapters/hermes', name), join(plugin, name))
     cpSync(join(root, 'src'), join(plugin, 'runtime/src'), { recursive: true })
     for (const name of ['README.md', 'LICENSE']) cpSync(join(root, name), join(plugin, name))
     run('tar', ['-czf', join(dist, hermesName), '-C', stage, 'mse-learning'])
   } finally { rmSync(stage, { recursive: true, force: true }) }
 }
 
-function sources(dir, prefix = '') {
-  return readdirSync(dir).sort().flatMap(name => {
-    if (['.git', 'node_modules', 'dist', '__pycache__'].includes(name) || name.endsWith('.pyc')) return []
-    const path = join(dir, name), relative = prefix + name
-    return statSync(path).isDirectory() ? sources(path, relative + '/') : [{ path: relative, sha256: digest(path) }]
-  })
-}
+// The manifest's source list is the SAME public set the source archive carries (`public-set.mjs`), so
+// the two artifacts can never disagree about what was published — and private material (`.probes/`,
+// coordination notes, caches, local scratch) can no longer ride into a public manifest.
+const sources = () => publicFiles(root).map(relative => ({
+  path: relative, sha256: digest(join(root, relative)) }))
 const artifacts = [packed.filename, ...(dshOnly ? [] : [hermesName])].map(name => ({ name, sha256: digest(join(dist, name)), bytes: statSync(join(dist, name)).size }))
 const baseCommit = process.env.MSE_SOURCE_COMMIT ?? run('git', ['rev-parse', 'HEAD']).trim()
 if (!/^[a-f0-9]{40}$/u.test(baseCommit)) throw new Error('invalid_source_commit')
 const manifest = { version: pkg.version, targets: dshOnly ? ['dsh'] : ['dsh', 'hermes'], generatedAt: new Date().toISOString(),
-  baseCommit, sourceState: 'uncommitted candidate', artifacts, sources: sources(root) }
+  baseCommit, sourceState: 'uncommitted candidate', artifacts, sources: sources() }
 writeFileSync(join(dist, 'candidate-manifest.json'), JSON.stringify(manifest, null, 2) + '\n')
 console.log(JSON.stringify({ version: pkg.version, artifacts }, null, 2))

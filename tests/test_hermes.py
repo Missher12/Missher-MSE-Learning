@@ -171,9 +171,13 @@ class HermesTests(unittest.TestCase):
         def review(request, model, cancel_event):
             self.hooks.dispose()
             return json.dumps({"instruction": "导出金额时先检查数据类型，再按数值排序"})
-        self.hooks.review = review
+        self.hooks.set_review(review)
+        # Stage 4a: a failure-observed reflection is only attempted for a problem that really
+        # crossed the independent-evidence gate, so the direct call carries that binding.
+        problem = self.mature_problem(self.hooks, "late", reflect_now=False)
         self.hooks._reflect({"base": {"sessionId": "late", "turnId": "1"},
-                             "task_summary": "根据金额列进行排序并导出", "result_summary": "金额列被错误地当成字符串进行排序", "model": "unused"}, "failed")
+                             "task_summary": "根据金额列进行排序并导出", "result_summary": "金额列被错误地当成字符串进行排序", "model": "unused"}, "failed",
+                            self.hooks._reflection_job("late", problem))
         self.assertEqual(self.hooks.call("status", {})["counts"]["candidate"], 0)
 
 
@@ -212,6 +216,42 @@ class HermesTests(unittest.TestCase):
         self.assertEqual(self.hooks.call("status", {})["adopted"], 0)
         self.assertEqual(self.hooks.call("status", {})["failed"], 0)
 
+    def mature_problem(self, hooks, session, reflect_now=True):
+        """A REAL ready problem for this session, produced by the production hook chain.
+
+        Stage 4a only reflects on a failure that crossed the independent-evidence gate AND whose
+        source route the core can re-confirm, so the direct `_reflect` tests need a real problem
+        rather than a fabricated id — a fabricated one is refused by design, which would make these
+        tests pass for the wrong reason.
+
+        `reflect_now=False` builds the problem WITHOUT letting the production path reflect on it, so
+        a caller can drive the one reflection it wants to control. The default also waits for any
+        production reflection to finish, so a direct call is never blocked by a live job.
+        """
+        prompt = "导出报表金额并核对排序结果"
+        turn = hooks.call("problemStatus", {"limit": 1}).get("total", 0)
+        turn_id = str(int(turn) + 1)
+        hooks.pre_llm_call(session_id=session, turn_id=turn_id, user_message=prompt)
+        hooks.pre_api_request(session_id=session, turn_id=turn_id, api_request_id="req-%s-%s" % (session, turn_id),
+                              provider="deepseek-official", model="deepseek-flash", api_mode="chat_completions",
+                              request_messages=[{"role": "user", "content": prompt}])
+        for call_id in ("mature-1", "mature-2"):
+            hooks.post_tool_call(session_id=session, turn_id=turn_id, tool_call_id=call_id, tool_name="terminal",
+                                 args={"command": "false"}, result="[TOOL_ERROR] boom", duration_ms=5,
+                                 status="error", error_type="tool_error", error_message="command failed",
+                                 api_request_id="req-%s-%s" % (session, turn_id))
+        hooks.post_llm_call(session_id=session, turn_id=turn_id, completed=True, failed=False, interrupted=False,
+                            assistant_response="" if not reflect_now else "工具反复失败，未完成导出")
+        for _ in range(200):
+            if not hooks.jobs:
+                break
+            time.sleep(0.02)
+        row = next(candidate for candidate in hooks.call("problemStatus", {"limit": 5})["rows"]
+                   if candidate["reason"] in (None, "ready_for_reflection")
+                   and candidate["recoverable"] is True)
+        return {"id": row["id"], "ready": True, "evidenceRevision": row["evidenceRevision"],
+                "base": {"sessionId": session, "turnId": turn_id}}
+
     def test_pause_and_resume_during_review_cancels_ticket_and_late_candidate(self):
         started, release = threading.Event(), threading.Event()
         signals = []
@@ -221,8 +261,10 @@ class HermesTests(unittest.TestCase):
             release.wait(5)
             return json.dumps({"instruction": "导出金额时先检查数值类型，再核对排序结果"})
         hooks = module.Hooks(config=self.config, review=review)
+        problem = self.mature_problem(hooks, "late", reflect_now=False)
         worker = threading.Thread(target=hooks._reflect, args=({"base": {"sessionId": "late", "turnId": "1"},
-            "task_summary": "根据金额列进行排序并导出", "result_summary": "金额列被错误地当成字符串进行排序", "model": "unused"}, "failed"))
+            "task_summary": "根据金额列进行排序并导出", "result_summary": "金额列被错误地当成字符串进行排序", "model": "unused"}, "failed",
+            hooks._reflection_job("late", problem)))
         worker.start()
         self.assertTrue(started.wait(5))
         hooks.set_enabled(False)
@@ -241,8 +283,10 @@ class HermesTests(unittest.TestCase):
             self.assertTrue(cancel_event.is_set())
             return json.dumps({"instruction": "导出金额时先检查数值类型，再核对排序结果"})
         hooks = module.Hooks(config=self.config, review=review)
+        problem = self.mature_problem(hooks, "old", reflect_now=False)
         worker = threading.Thread(target=hooks._reflect, args=({"base": {"sessionId": "old", "turnId": "1"},
-            "task_summary": "根据金额列进行排序并导出", "result_summary": "金额列被错误地当成字符串进行排序", "model": "unused"}, "failed"))
+            "task_summary": "根据金额列进行排序并导出", "result_summary": "金额列被错误地当成字符串进行排序", "model": "unused"}, "failed",
+            hooks._reflection_job("old", problem)))
         worker.start()
         self.assertTrue(started.wait(5))
         hooks.on_session_reset(old_session_id="old", new_session_id="new")
@@ -560,7 +604,9 @@ class SettlementRetryTests(unittest.TestCase):
 
     def test_retries_never_restart_a_review(self):
         reviews = []
-        self.hooks.review = lambda request, model, cancel=None: reviews.append(model) or None
+        # Stage 4a: the production default has NO reflection driver (`capability_waiting`), so a
+        # reviewer is installed through the supported seam before a review can be attempted at all.
+        self.hooks.set_review(lambda request, model, cancel=None: reviews.append(model) or None)
         self.failures = 1
         # Run the review thread inline so the count is deterministic; the retry path is
         # exercised exactly as in production, it just cannot race the assertion.
