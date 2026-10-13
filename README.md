@@ -4,7 +4,7 @@
 
 为 DSH 保存按项目隔离的用户纠错与方法候选，在相关任务中限额召回，并记录可信宿主确认的采用和验证结果。它不训练模型权重，也不保证模型永不犯错。
 
-包名：`@missher/dsh-mse-learning`。当前版本 **0.9.0** 包含自动评审、有限试用、限定领域的客观验证、预算档位和跨窗口续跑。[正式下载与校验和](https://github.com/Missher12/Missher-MSE-Learning/releases/tag/v0.9.0) · [交付范围](PUBLICATION.md) · [验证记录](VALIDATION.md)。下载或更新源码不会自动升级你正在使用的插件。
+包名：`@missher/dsh-mse-learning`。当前版本 **0.9.1** 包含自动评审、有限试用、限定领域的客观验证、预算档位和跨窗口续跑。0.9.1 修正设置页用量读取，分别显示保守预算占用与已测 Token，缺失数据保持“未上报”。[正式下载与校验和](https://github.com/Missher12/Missher-MSE-Learning/releases/tag/v0.9.1) · [交付范围](PUBLICATION.md) · [验证记录](VALIDATION.md)。下载或更新源码不会自动升级你正在使用的插件。
 
 alpha.17 的宿主会话标题选择器继续保留。标题仅用于显示，不改变经验归属、召回身份或预算。本轮共享学习核心发生变化，DSH 的自动调度不等于其他 Agent 已具备同样的宿主接线。它与历史产品 `dsh-missher-evolution` 不同，不读取或迁移后者的数据。
 
@@ -32,7 +32,7 @@ alpha.17 的宿主会话标题选择器继续保留。标题仅用于显示，�
 
 ## 下载与安装
 
-从 [0.9.0 正式 Release](https://github.com/Missher12/Missher-MSE-Learning/releases/tag/v0.9.0) 下载 `missher-dsh-mse-learning-0.9.0.tgz` 并核对 SHA256SUMS。备份学习库和配置，在 DSH 的插件管理中添加或更新该包，完成活动任务后按宿主提示正常重启，再检查版本、加载状态和设置。Hermes 使用独立的 `mse-learning-hermes-0.9.0.tar.gz`，按其宿主安装要求另行安装；两种宿主不可共享同一个可写学习库。
+从 [0.9.1 正式 Release](https://github.com/Missher12/Missher-MSE-Learning/releases/tag/v0.9.1) 下载 `missher-dsh-mse-learning-0.9.1.tgz` 并核对 SHA256SUMS。备份学习库和配置，在 DSH 的插件管理中添加或更新该包，完成活动任务后按宿主提示正常重启，再检查版本、加载状态和设置。Hermes 使用独立的 `mse-learning-hermes-0.9.1.tar.gz`，按其宿主安装要求另行安装；两种宿主不可共享同一个可写学习库。
 
 ## 开始使用自动验证
 
@@ -47,13 +47,13 @@ alpha.17 的宿主会话标题选择器继续保留。标题仅用于显示，�
 
 | 环境 | 证据与边界 |
 | --- | --- |
-| 当前 0.9.0：最终冻结包 | 14 个真实 DSH Host 服务完成隔离自动链与独立进程冷重建，47 次合成请求、0 次真实供应商请求；最终源码独立检查 36/36。早期核心/DSH 108/108 及 Hermes 21/21 保留各自证据范围。详见 [PUBLICATION](PUBLICATION.md) 和 [VALIDATION](VALIDATION.md)。 |
+| 当前 0.9.1：用量显示修复 | 最终包组件/契约检查 30/30，独立预算档位检查 2/2。后端与 0.9.0 逐字节一致，复用其 14 个真实 DSH Host 服务、47 次合成请求、独立进程冷重建及 36 项源码检查；这些隔离验收的真实供应商请求为 0。详见 [PUBLICATION](PUBLICATION.md) 和 [VALIDATION](VALIDATION.md)。 |
 | alpha.18 Intel Mac 历史候选 | 303/303 Node、125/125 离线适配器、189/189 受控 UI，以及 4 次真实评审调用都只属于历史候选。不能将其作为当前候选、日常安装或本轮真实 provider 证据。 |
 | 纯官方 DSH、后续 DSH 版本、Windows、Ubuntu | 本次不宣称完整通过；宽松 peer `*` 只表示不锁宿主版本，不等于接口兼容。 |
-| Hermes 0.21.1 | 当前 Hermes 适配器与真实核心的 Stage 4c 离线集成 21/21；含 20K 窗口、重建 driver/pass 和原 session 可信路由事件。不是新的原生 PluginManager 或真实供应商测试。 |
+| Hermes 0.21.1 | 复用未变字节的 Hermes 适配器与真实核心 Stage 4c 离线集成 21/21；含 20K 窗口、重建 driver/pass 和原 session 可信路由事件。不是新的原生 PluginManager 或真实供应商测试。 |
 | 其他 Agent | 可使用 Node SDK/JSON CLI，但需要编写可信生命周期适配；不是安装后自动适配所有 Agent，也不是浏览器 SDK。 |
 
-维护目标是支持合理的宿主版本范围并持续适配最新版。测试记录中的版本是验证基线，不表示只能使用该版本；最低接口要求、已验证范围和已知限制分别记录。最终 0.9.0 包的自动链、冷重建与源码复验见 [PUBLICATION](PUBLICATION.md)。
+维护目标是支持合理的宿主版本范围并持续适配最新版。测试记录中的版本是验证基线，不表示只能使用该版本；最低接口要求、已验证范围和已知限制分别记录。0.9.1 的验收与后端证据复用见 [PUBLICATION](PUBLICATION.md)。
 
 DSH 必须提供 Cordis、LLM、Typert、Schemastery 与 commands/settings 等服务。完整设置页还需要 `@deepseek-ai/dsh-client-ui-primitives` 静态模块和对应设置扩展点；当前已测组合是 Missher 桌面版。官方依赖由宿主提供，本包不内嵌另一套宿主或兼容包。缺少能力时请附宿主版本及脱敏加载错误反馈，不用版本豁免代替验证。
 
@@ -69,7 +69,7 @@ dsh plugin --profile web remove @missher/dsh-mse-learning
 
 插件没有卸载删除数据的脚本；包卸载不会主动清除学习库。要删除个人数据，须先停止相关宿主，并由你自行处理备份及该目录。不要删除整个 DSH 数据根或其他插件目录。DSH 与 Hermes 不共用正在写入的学习库；检测到旧 `missherEvolutionCore` 时，新控制器会暂停。
 
-历史 alpha.15/alpha.16→alpha.17 同属 schema 2、无需迁移。0.9.0 继续使用 schema 2 的可选字段；正式升级时仍应先保留完整新鲜备份。schema 1 必须显式迁移；降级到不支持持久结算的旧包前，应先让待结算项结束，或同时恢复对应旧包与升级前的完整备份。详见[数据与回退契约](docs/BEHAVIOR.zh.md#数据升级与回退)。
+历史 alpha.15/alpha.16→alpha.17 同属 schema 2、无需迁移。0.9.1 继续使用 schema 2 的可选字段；正式升级时仍应先保留完整新鲜备份。schema 1 必须显式迁移；降级到不支持持久结算的旧包前，应先让待结算项结束，或同时恢复对应旧包与升级前的完整备份。详见[数据与回退契约](docs/BEHAVIOR.zh.md#数据升级与回退)。
 
 ## 开发与验证
 
@@ -86,7 +86,7 @@ node scripts/verify-package.mjs
 
 [行为细节](docs/BEHAVIOR.zh.md) · [适配协议](docs/ADAPTER_PROTOCOL.md) · [持久结算](docs/DURABLE_SETTLEMENT_OUTBOX.md) · [召回规则](docs/RECALL_2026-09-30.md)
 
-任意自由中文条件尚不能可靠解释，会保守不召回；单元/隔离测试、设置页可读和计数增长均不证明长期真实模型收益。本轮没有真实 provider 调用；alpha.18 的历史真实评审不属于 0.9.0。日常安装与原生窗口状态需要在各目标环境单独核验，不能用下载成功或隔离测试替代。
+任意自由中文条件尚不能可靠解释，会保守不召回；单元/隔离测试、设置页可读和计数增长均不证明长期真实模型收益。本轮隔离验收没有真实 provider 调用；alpha.18 的历史真实评审不属于 0.9.1。日常安装与原生窗口状态需要在各目标环境单独核验，不能用下载成功或隔离测试替代。
 
 ## 许可证与来源
 

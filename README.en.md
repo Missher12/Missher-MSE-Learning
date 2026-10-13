@@ -4,7 +4,7 @@ English | [中文](README.md) · [Desktop and downloads](https://github.com/Miss
 
 Persists scoped user corrections and method candidates for DSH, recalls relevant lessons within a byte budget, and records adoption and verification established by the trusted host. It does not train model weights or guarantee that a model will never repeat a mistake.
 
-Package: `@missher/dsh-mse-learning`. Version **0.9.0** provides automatic review, limited trials, domain-bound objective validation, budget presets and rolling-window resume. [Formal downloads and checksums](https://github.com/Missher12/Missher-MSE-Learning/releases/tag/v0.9.0) · [Delivery scope](PUBLICATION.md) · [Validation record](VALIDATION.md). Downloading or updating source does not update an installed plugin.
+Package: `@missher/dsh-mse-learning`. Version **0.9.1** provides automatic review, limited trials, domain-bound objective validation, budget presets and rolling-window resume. Version 0.9.1 fixes the settings usage projection, separates conservative reserved budget from measured tokens, and preserves explicit unknown states. [Formal downloads and checksums](https://github.com/Missher12/Missher-MSE-Learning/releases/tag/v0.9.1) · [Delivery scope](PUBLICATION.md) · [Validation record](VALIDATION.md). Downloading or updating source does not update an installed plugin.
 
 The host-title session pickers from alpha.17 remain. Titles are display-only and do not alter scope, recall identity or budgets. This upgrade changes the shared core; DSH scheduling does not establish equivalent lifecycle integration for every Agent. The historical `dsh-missher-evolution` package is a separate product; this plugin does not read or migrate its data.
 
@@ -32,7 +32,7 @@ At most **one trial per turn** can use the existing **total 2-lesson/default 768
 
 ## Download and installation
 
-Download `missher-dsh-mse-learning-0.9.0.tgz` from the [0.9.0 formal Release](https://github.com/Missher12/Missher-MSE-Learning/releases/tag/v0.9.0) and verify SHA256SUMS. Back up the learning store and settings, add or update the package through DSH plugin management, finish active work and restart normally when the host requests it. Check the installed version, loading state and settings. Hermes uses the separate `mse-learning-hermes-0.9.0.tar.gz` archive and its own installation process; the two hosts must not share one live writable learning store.
+Download `missher-dsh-mse-learning-0.9.1.tgz` from the [0.9.1 formal Release](https://github.com/Missher12/Missher-MSE-Learning/releases/tag/v0.9.1) and verify SHA256SUMS. Back up the learning store and settings, add or update the package through DSH plugin management, finish active work and restart normally when the host requests it. Check the installed version, loading state and settings. Hermes uses the separate `mse-learning-hermes-0.9.1.tar.gz` archive and its own installation process; the two hosts must not share one live writable learning store.
 
 ## Start automatic validation
 
@@ -47,13 +47,13 @@ Defaults remain **automatic validation off, token allowance 0 and task allowance
 
 | Environment | Evidence and limits |
 | --- | --- |
-| Current 0.9.0: final frozen packages | The isolated automatic flow and cold process rebuild passed with 14 real DSH Host services: 47 synthetic requests and 0 real-provider calls. Final source checks passed 36/36. Earlier core/DSH 108/108 and Hermes 21/21 retain their original scope. See [PUBLICATION](PUBLICATION.md) and [VALIDATION](VALIDATION.md). |
+| Current 0.9.1: usage display fix | Final-package component/contract checks passed 30/30; independent budget checks passed 2/2. Backend bytes are unchanged from 0.9.0, so its 14 real DSH Host services, 47 synthetic requests, cold-process rebuild and 36 source checks are reused. Real-provider calls were zero in those isolated checks. See [PUBLICATION](PUBLICATION.md) and [VALIDATION](VALIDATION.md). |
 | Historical alpha.18 Intel Mac candidate | The earlier 303/303 Node, 125/125 offline adapter, 189/189 controlled UI and four real review calls belong only to that historical candidate. They are not current-candidate or daily-install evidence. |
 | Unmodified official DSH, later DSH versions, Windows and Ubuntu | Full compatibility is not claimed. Permissive `*` peers do not prove the required interfaces exist. |
-| Hermes 0.21.1 | Current adapter/core offline Stage 4c integration passed 21/21, including 20K window recovery, rebuilt driver/pass and trusted source-session route event. This is not a new native PluginManager or real-provider run. |
+| Hermes 0.21.1 | Unchanged adapter/core bytes reuse the 21/21 offline Stage 4c integration, including 20K window recovery, rebuilt driver/pass and trusted source-session route event. This is not a new native PluginManager or real-provider run. |
 | Other Agents | A host-independent Node SDK and JSON CLI are available, but a trusted lifecycle adapter is required. This is not automatic support for every Agent or a browser SDK. |
 
-Maintenance aims to support a reasonable range of host versions and keep pace with the latest release. Tested versions identify evidence baselines, not the only usable versions. Minimum capabilities, verified targets and known limits are recorded separately. See [PUBLICATION](PUBLICATION.md) for the final 0.9.0 automatic-flow, cold-rebuild and source checks.
+Maintenance aims to support a reasonable range of host versions and keep pace with the latest release. Tested versions identify evidence baselines, not the only usable versions. Minimum capabilities, verified targets and known limits are recorded separately. See [PUBLICATION](PUBLICATION.md) for the final 0.9.1 automatic-flow, cold-rebuild and source checks.
 
 DSH must provide Cordis, LLM, Typert, Schemastery, commands/settings and related services. The complete settings UI also requires the static `@deepseek-ai/dsh-client-ui-primitives` module and matching settings extension points; the tested combination is Missher Desktop. Official packages are host-provided peers, not a bundled replacement host. Report the host version and redacted loading error when interfaces are missing; a version exemption is not a compatibility test.
 
@@ -69,7 +69,7 @@ dsh plugin --profile web remove @missher/dsh-mse-learning
 
 There is no uninstall data-deletion script; removing the package does not actively erase its learning store. If you want to erase personal data, first stop the relevant host, then manage that directory and its backups yourself. Do not delete the entire DSH data root or another plugin's directory. DSH and Hermes must not share a live writable learning store. A detected legacy `missherEvolutionCore` pauses the new controller.
 
-The historical alpha.15/alpha.16→alpha.17 upgrade stayed on schema 2. Version 0.9.0 continues using optional schema-2 fields; retain a fresh complete backup before a formal upgrade. Schema 1 needs explicit migration. Before downgrading to a package without durable settlement support, drain/retire pending settlements, or restore both the corresponding old package and the complete pre-upgrade backup. See the [durable settlement contract](docs/DURABLE_SETTLEMENT_OUTBOX.md).
+The historical alpha.15/alpha.16→alpha.17 upgrade stayed on schema 2. Version 0.9.1 continues using optional schema-2 fields; retain a fresh complete backup before a formal upgrade. Schema 1 needs explicit migration. Before downgrading to a package without durable settlement support, drain/retire pending settlements, or restore both the corresponding old package and the complete pre-upgrade backup. See the [durable settlement contract](docs/DURABLE_SETTLEMENT_OUTBOX.md).
 
 ## Development and verification
 
@@ -86,7 +86,7 @@ Use a fresh source copy or output directory for each build; packers reject exist
 
 [Adapter protocol](docs/ADAPTER_PROTOCOL.md) · [Durable settlement](docs/DURABLE_SETTLEMENT_OUTBOX.md) · [Detailed behavior, Chinese](docs/BEHAVIOR.zh.md)
 
-Arbitrary free-form Chinese conditions are not reliably understood; unclear conditions conservatively block recall. Unacknowledged work and manual model jobs do not have a cross-crash durability guarantee. Tests, readable settings and growing counters do not establish long-term model improvement. Version 0.9.0 made no real-provider calls during acceptance; real review evidence from alpha.18 remains historical. Daily installation and native-window behavior require separate verification on each target environment.
+Arbitrary free-form Chinese conditions are not reliably understood; unclear conditions conservatively block recall. Unacknowledged work and manual model jobs do not have a cross-crash durability guarantee. Tests, readable settings and growing counters do not establish long-term model improvement. Version 0.9.1 made no real-provider calls during acceptance; real review evidence from alpha.18 remains historical. Daily installation and native-window behavior require separate verification on each target environment.
 
 ## License and attribution
 

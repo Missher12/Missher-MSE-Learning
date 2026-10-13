@@ -29,7 +29,7 @@ function loadClient() {
   const primitives = Object.fromEntries(['Button', 'Input', 'Switch', 'SegmentedTabs', 'Tag', 'StateDot',
     'DisclosureRow', 'Checkbox', 'Menu', 'IconChevronRightOutlineRegular', 'IconChevronsUpDownOutlineRegular']
     .map(name => [name, primitive(name)]))
-  return { id: registration.id, module: registration.factory(spec => spec === 'react' ? react
+  return { id: registration.id, registration, module: registration.factory(spec => spec === 'react' ? react
     : spec === '@deepseek-ai/dsh-client-ui-primitives' ? primitives : undefined) }
 }
 
@@ -340,6 +340,48 @@ test('a ready writable form renders the settings rows and a disabled save', asyn
   const discard = controls('Button').find(node => labelOf(node) === '取消')
   assert.ok(discard !== undefined)
   assert.equal(discard.props.disabled, true, 'discarding an unmodified draft is disabled')
+})
+
+test('the budget usage disclosure reads the paidBudget projection from control status', async () => {
+  const { registration, module: mod } = loadClient()
+  const markerTime = Date.UTC(2030, 0, 2, 3, 4)
+  // This is synthetic data with the public status response shape; no private receipt values enter
+  // the test. paidBudget is a sibling of budget in settingsSnapshot(), not a child of budget.
+  const paidBudget = { state: 'cost_unknown', window: 'rolling_24h', coversTasks: ['model_review', 'objective_evaluation'],
+    tokensPerDay: 50_000, callsPerDay: 5, tokensReserved: 12_345, tokensKnown: 9_876,
+    callsUsed: 2, requestsUsed: 7, tasksUnknown: 1, jobsOpen: 1, nextAvailableAt: markerTime,
+    known: false, remainingTokens: 37_655, remainingCalls: 3 }
+  const status = { ok: true, code: null, version: '0.9.1-test', generatedAt: markerTime,
+    settings: { budget: { evaluationTokensPerDay: 50_000, evaluationCallsPerDay: 5 }, paidBudget,
+      review: { usedLast24h: 1, perDay: 3 } },
+    runtime: { jobs: [{}] } }
+  const call = async method => ({ ok: true, value: method === 'overview'
+    ? { ok: true, version: 'test', runtime: 'dsh', budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 },
+      counts: {}, store: { readable: true, schema: 2 } }
+    : { ok: true, sessions: [] } })
+  const control = async method => ({ ok: true, value: method === 'status' ? status : { ok: true } })
+  const tree = await renderPanel(registration, { locale: 'zh', initialTab: 'budget', call, control, form: RENDER_FORM })
+  const disclosure = elementsOf(tree).find(node => node.type === 'details' && node.props['data-mse-disclosure'] === 'usage')
+  assert.ok(disclosure, 'the usage and calculation disclosure is rendered')
+  const rendered = JSON.stringify(disclosure)
+  for (const value of ['12345', '9876', '2 次', '7 次', '1', mod.__test.formatTime(markerTime, 'zh'), '费用未知']) {
+    assert.ok(rendered.includes(value), `the control projection value ${value} is rendered`)
+  }
+  assert.ok(rendered.includes('预算已占用（保守）'), 'reserved budget is labelled separately from measured usage')
+  assert.ok(rendered.includes('已测 token'), 'measured usage keeps its own label')
+  assert.ok(rendered.includes('1'), 'the unknown task count is visible')
+
+  const incomplete = { ...status, settings: { ...status.settings,
+    paidBudget: { ...paidBudget, tokensKnown: null, nextAvailableAt: null } } }
+  const incompleteControl = async method => ({ ok: true, value: method === 'status' ? incomplete : { ok: true } })
+  const incompleteTree = await renderPanel(registration, { locale: 'zh', initialTab: 'budget', call,
+    control: incompleteControl, form: RENDER_FORM })
+  const incompleteDisclosure = elementsOf(incompleteTree)
+    .find(node => node.type === 'details' && node.props['data-mse-disclosure'] === 'usage')
+  assert.ok(JSON.stringify(incompleteDisclosure).includes(mod.__test.zh.notReported),
+    'a missing measured-use field stays unreported instead of becoming zero')
+  assert.ok(JSON.stringify(incompleteDisclosure).includes(mod.__test.zh.notRecorded),
+    'a missing next-available timestamp stays unrecorded')
 })
 
 test('a read failure is reported as unknown, never as paused or as a zero', async () => {

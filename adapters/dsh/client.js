@@ -357,7 +357,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     evalBudgetTitle: '模型评测额度',
     evalBudgetHint: '这里仅限制自动经验评审/客观评测，不含正常聊天或自动复盘（每日最多 3 次、每次输出 384 tokens）。档位按滚动 24 小时计算；耗尽后等待到最早一笔额度到期。已用/预留与实测分开显示，未知费用不会按 0 处理。',
     evalUsageTitle: '当前用量与计算说明',
-    evalTokensUsed: '评测 token 已用',
+    evalTokensUsed: '预算已占用（保守）',
     evalCallsUsed: '评测任务已用',
     evalRequestsUsed: '物理请求已用',
     evalJobsOpen: '进行中的评测作业',
@@ -663,7 +663,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     evalBudgetTitle: 'Model evaluation budget',
     evalBudgetHint: 'This cap covers automatic experience review and objective evaluation only. It excludes normal chat and automatic reflection (up to 3 per day, 384 output tokens each). The window rolls over 24 hours; exhausted work waits for the earliest reservation to expire. Reserved and measured usage are shown separately; unknown cost is never treated as zero.',
     evalUsageTitle: 'Current usage and how it is computed',
-    evalTokensUsed: 'Evaluation tokens used',
+    evalTokensUsed: 'Budget reserved (conservative)',
     evalCallsUsed: 'Evaluation tasks used',
     evalRequestsUsed: 'Physical requests sent',
     evalJobsOpen: 'Evaluation jobs in flight',
@@ -2284,7 +2284,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const draftTier = draft === null ? null : budgetTiers.find(tier =>
       Number(draft.values.evaluationTokensPerDay) === tier.tokens
       && Number(draft.values.evaluationCallsPerDay) === tier.calls) ?? null
-    const paidBudget = settings?.budget?.paidBudget ?? null
+    const paidBudget = settings?.paidBudget ?? null
     const budgetPanel = h('div', { key: 'budget', className: 'mse-pane' }, [
       sectionTitle('c', dict.contextBudgetTitle),
       row('t', dict.turnBudget, dict.turnBudgetHint, formatBytes(overview?.budget?.turnBytes)),
