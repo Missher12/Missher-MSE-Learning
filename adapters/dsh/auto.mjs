@@ -27,7 +27,9 @@ const YIELD_RETRY_MS = 30_000
 /** How long one review run may take before it is treated as failed and its ticket released. */
 const RUN_TIMEOUT_MS = 120_000
 /** Reserved tokens per review run: two arm answers plus the judge, bounded. */
-const REVIEW_TOKENS = 4_000
+const STEP_OUTPUT_TOKENS = 128
+const JUDGE_OUTPUT_TOKENS = 256
+const REVIEW_TOKENS = 2
 /** Both tracks share the queue; the scheduler must never silently skip one of them. */
 const AUTO_TRACKS = Object.freeze(['review', 'objective'])
 /**
@@ -83,9 +85,29 @@ const stopError = code => Object.assign(new Error(code), { code })
 export function createAutoValidation({ engine, context, objectiveContext = () => null, route, callModel,
   source = () => ({}), permit = () => ({ ok: true }), enabled = () => true, now = Date.now, log = () => {},
   busy = () => false, onAbort = null, slot = null, reviewAdmission = null, dueWork = null,
+  // The ALREADY-REGISTERED checker path. It is the host's own `evaluateRegistered`: a registered
+  // method is scored against its frozen fixtures, with NO model call, NO provider and NO budget. This
+  // is the first thing tried for a candidate whose domain has no official scenario, because it is
+  // real objective evidence that already exists — not a second evidence engine.
+  registeredCheck = null,
+  // The BOUNDED EVIDENCE TRIAL: the trusted host grants a temporary, explicitly unverified licence
+  // from real host-observed failures, so a candidate with no official scenario can at least be
+  // OFFERED once and earn real evidence on a real turn. It validates nothing and spends nothing; a
+  // grant the core refuses (no evidence, a covered domain, a registered checker, an expired or
+  // withdrawn licence) comes back as a bounded code the pass reports.
+  evidenceTrial = null,
   schedule = (fn, ms) => setInterval(fn, ms), cancelTimer = handle => clearInterval(handle) }) {
   let disposed = false
   let scanning = false
+  /** Bounded per-scan counters: candidates settled by their own registered checker, and candidates
+   *  waiting for an applicable validator. Both are READABLE in the scan audit and the status. */
+  let finishedByChecker = 0
+  let waitingValidator = 0
+  /** Bounded per-scan counts of the evidence trial: newly granted, and already held. */
+  let evidenceTrialsGranted = 0
+  let evidenceTrialsExisting = 0
+  /** The last completed pass's own audit, or null before the first one. Read-only state. */
+  let lastScan = null
   /** The scheduler's single wake-up timer; owned here and cleared on dispose. */
   let timer = null
   /**
@@ -159,7 +181,8 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
     // attempt count is written back UNCHANGED. Incrementing it here (even with the stage left
     // `queued`) still exhausted the scan's `attempts < MAX_ATTEMPTS` filter and parked the plan for
     // ever, which is exactly the bug this replaces.
-    engine.autoPlanUpdate({ queueKey: plan.queueKey, planHash: plan.planHash, stage: 'queued', ticket: null,
+    engine.autoPlanUpdate({ queueKey: plan.queueKey, planHash: plan.planHash, stage: 'queued',
+      ...(plan.ticket === undefined ? { ticket: null } : { ticket: plan.ticket }),
       attempts: plan.attempts, reason, nextAttemptAt: now() + delay })
     return 'queued'
   }
@@ -212,10 +235,13 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
     let timer = null
     const timeout = new Promise(resolve => { timer = setTimeout(() => { run.timedOut = true; controller.abort(); resolve(null) }, RUN_TIMEOUT_MS) })
     const started = Promise.resolve()
-      .then(() => { if (run.outstanding !== undefined) run.outstanding(1); return callModel({ ...request, signal: controller.signal }, ticket) })
+      .then(() => { if (run.outstanding !== undefined) run.outstanding(1); return callModel({
+        ...request, maxTokens: request.stepKey?.startsWith('review:judge:')
+          ? JUDGE_OUTPUT_TOKENS : STEP_OUTPUT_TOKENS, signal: controller.signal }, ticket) })
       // A provider that reported usage and THEN aborted still reported usage: the count travels on
       // the error so the ledger keeps it instead of discarding it as unknown.
       .catch(error => ({ text: '', tokens: Number.isSafeInteger(error?.tokens) ? error.tokens : null,
+        physicalDispatch: error?.physicalDispatch !== false,
         // The host aborted this request (a pause, the switch, the foreground, disposal): whatever the
         // provider reported afterwards is a CONSEQUENCE of that stop, so the run is cancelled rather
         // than counted as a failed comparison. A provider that really failed on its own keeps its own
@@ -241,8 +267,15 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
       // to wait here: a cancellation must return promptly. The core is never spoken to again until
       // `drainPending()` has seen every in-flight call finish.
       const settled = started.then(answer => {
-        if (answer !== null && Number.isSafeInteger(answer?.tokens) && answer.tokens > 0) spend.known += answer.tokens
-        else if (answer !== null && answer.failed === undefined) spend.unknown += 1
+        // A checkpoint is a previously paid response, not a physical call charged to this ticket.
+        // Likewise, a refusal before ticketStepStart never reached the provider and cannot make
+        // this ticket's usage unknown. Only a dispatched request contributes to this run's spend.
+        if (answer?.resumed !== true && answer?.physicalDispatch !== false) {
+          if (answer !== null && Number.isSafeInteger(answer?.tokens) && answer.tokens > 0) spend.known += answer.tokens
+          else if (answer !== null && !Number.isSafeInteger(answer?.tokens)) spend.unknown += 1
+          try { engine.ticketUsage({ ticket, spent: spend.known,
+            usage: { known: spend.unknown === 0, tokens: spend.known } }) } catch { /* final settlement preserves unknown */ }
+        }
         return answer
       }).finally(() => pending.delete(settled))
       pending.add(settled)
@@ -318,6 +351,13 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
       // Which cancellation generation is in force, and why the last one happened: a card that says
       // "waiting" is not the same statement as "stopped by a pause" or "yielded to a live turn".
       abortGeneration: cancelEpoch, lastAbortReason,
+      // What the LAST pass did about candidates that have no official scenario: how many were settled
+      // by their own registered checker (zero-cost objective evidence) and how many are waiting for an
+      // applicable validator. `null` until a pass has run, so "not yet known" is not reported as 0.
+      registeredChecker: lastScan === null ? null : lastScan.registeredChecker,
+      waitingValidator: lastScan === null ? null : lastScan.waitingValidator,
+      evidenceTrialsGranted: lastScan === null ? null : lastScan.evidenceTrialsGranted,
+      evidenceTrialsExisting: lastScan === null ? null : lastScan.evidenceTrialsExisting,
       idle: plans.every(plan => plan.stage !== 'running'),
       scans: events.length, lastEvent: events.slice(-1)[0] ?? null,
       // The bounded recent reasons, newest last. One `lastEvent` is not enough to tell WHY a scan
@@ -358,7 +398,61 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
       const admitted = reviewAdmission === null ? null : (() => {
         try { return reviewAdmission(lesson) } catch { return { ok: false, reason: 'domain_pack_unknown' } }
       })()
-      if (admitted !== null && admitted.ok !== true) record(`review_out_of_domain:${admitted.reason ?? 'unknown'}`, lesson.id)
+      // ── (A) THE REGISTERED CHECKER, BEFORE ANYTHING PAID ─────────────────────────────────────────
+      // A method that carries a registered `methodId` has a frozen, host-owned checker. Settling it
+      // costs nothing and is objective evidence, so it is tried FIRST — including for a method no
+      // official scenario admits. Its outcome is the core's own verdict; this layer never calls the
+      // method validated itself, and never falls back to a model when the checker says no.
+      if (registeredCheck !== null) {
+        let checked = null
+        try { checked = registeredCheck(lesson) } catch (error) { checked = { ok: false, code: error?.code ?? 'registered_check_failed' } }
+        if (checked?.ok === true) {
+          record(checked.state === 'accepted' ? 'registered_checker_validated' : `registered_checker_${checked.state ?? 'settled'}`, lesson.id)
+          finishedByChecker += 1
+          continue
+        }
+        if (checked?.attempted === true) {
+          // The checker RAN and refused (or reported a bounded reason): that is a terminal fact about
+          // this edition, and it must not be retried as a paid review.
+          record(`registered_checker_refused:${checked.code ?? 'unknown'}`, lesson.id)
+          continue
+        }
+        // `attempted` is false for "this method has no registered checker": fall through to the
+        // domain path below, which is the right home for a method that belongs to an official pack.
+      }
+      if (admitted !== null && admitted.ok !== true) {
+        // ── (B) NO APPLICABLE VALIDATOR: AN EXPLICIT WAITING STATE, NOT AN ERROR ──────────────────
+        // Ordinary development experience with no official scenario and no registered checker is
+        // parked as a READABLE WAIT: `waiting_validator_evidence` is reported, counted, and surfaced
+        // in the effective state, so the user sees "waiting for applicable evidence" instead of a
+        // stuck queue or a fake zero. Nothing is promoted from here — the only things that move it
+        // are a registered checker or real task evidence the host really produced.
+        // The RELEASED code shape is kept: `review_out_of_domain:<predicate reason>` already means
+        // exactly "no official domain admits this method", and the predicate's own refusal travels in
+        // it (`domain_forbidden:排序`, `domain_mechanism_missing:1`, …). The NEW facts are additive and
+        // live in the counters and the effective state (`waitingValidator`, `evidenceTrialsGranted`),
+        // so a bounded event ring is not crowded with two codes for one candidate.
+        record(`review_out_of_domain:${admitted.reason ?? 'unknown'}`, lesson.id)
+        // THE BOUNDED EVIDENCE TRIAL. Without a licence the row can never be OFFERED, so no real turn
+        // can ever use it and the host can never check it: an ordinary candidate would wait for ever
+        // however the switches and the budget are set. The core grants the licence ONLY from real
+        // host-observed failures in the lesson's own scope and environment, and refuses it outright
+        // when an official domain or a registered checker covers the row. Nothing is promoted here and
+        // nothing is spent; every refusal is a bounded code the pass reports.
+        let trial = null
+        try { trial = evidenceTrial === null ? null : evidenceTrial(lesson) } catch (error) {
+          trial = { ok: false, code: error?.code ?? 'evidence_trial_failed' }
+        }
+        if (trial?.ok === true) {
+          if (trial.duplicate === true) evidenceTrialsExisting += 1
+          else evidenceTrialsGranted += 1
+          record('evidence_trial_granted', lesson.id)
+        } else {
+          waitingValidator += 1
+          record(`evidence_trial_refused:${trial?.code ?? 'unavailable'}`, lesson.id)
+        }
+        continue
+      }
       const scenario = admitted !== null && admitted.ok !== true ? null : context(lesson)
       if (scenario === null) record('review_missing_criteria', lesson.id)
       // The plan records WHERE the item came from and WHICH route its run must use. A candidate with
@@ -444,18 +538,22 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
    *    cadence, and again not counted as a failed attempt.
    *  • failed — a REAL provider-side failure, which is exactly what the retry budget is for.
    */
-  const settleStoppedPlan = (plan, code) => {
+  const settleStoppedPlan = (plan, code, ticket = null) => {
     const cancelled = CANCELLED_CODES.includes(code)
     const yielded = YIELD_CODES.includes(code)
     const unknown = UNKNOWN_FACT_CODES.includes(code)
+    const waitingBudget = ['evaluation_budget', 'evaluation_budget_calls', 'review_budget', 'review_budget_calls',
+      'review_budget_tokens', 'review_budget_disabled'].includes(code)
     const transient = TRANSIENT_CODES.includes(code)
     const attempts = plan.attempts + 1
-    const keepAttempts = cancelled || yielded || unknown
+    const keepAttempts = cancelled || yielded || unknown || waitingBudget
     const stage = keepAttempts ? 'queued' : transient && attempts < MAX_ATTEMPTS ? 'queued' : 'blocked'
     const nextAttemptAt = cancelled || yielded ? now() + YIELD_RETRY_MS
-      : unknown ? now() + BUDGET_RETRY_MS
+      : unknown || waitingBudget ? now() + BUDGET_RETRY_MS
       : now() + BACKOFF_MS[Math.min(Math.max(attempts - 1, 0), BACKOFF_MS.length - 1)]
-    engine.autoPlanUpdate({ queueKey: plan.queueKey, planHash: plan.planHash, stage, ticket: null,
+    const resumable = ['evaluation_budget', 'evaluation_budget_calls', 'review_budget'].includes(code)
+    engine.autoPlanUpdate({ queueKey: plan.queueKey, planHash: plan.planHash, stage,
+      ticket: resumable ? ticket : null,
       attempts: keepAttempts ? plan.attempts : attempts, reason: code, nextAttemptAt })
     return stage
   }
@@ -485,7 +583,15 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
         reason: 'scope_unresolved' })
       return 'blocked'
     }
-    const planView = engine.reviewPlan({ lessonId: plan.lessonId, projectKey: scope, maxTokens: REVIEW_TOKENS })
+    const existing = typeof plan.ticket === 'string'
+      ? engine.ticketContinuation({ ticket: plan.ticket, kind: 'review' }) : null
+    if (existing?.code === 'ticket_usage_unknown') {
+      engine.autoPlanUpdate({ queueKey: plan.queueKey, planHash: plan.planHash, stage: 'blocked', ticket: null,
+        reason: 'ticket_usage_unknown' })
+      return 'blocked'
+    }
+    const planView = existing?.ok === true ? { allowed: true, reasons: [] }
+      : engine.reviewPlan({ lessonId: plan.lessonId, projectKey: scope, maxTokens: REVIEW_TOKENS })
     if (planView.allowed !== true) {
       // An expired licence whose renewal window has no new evidence behind it is a TERMINAL fact, not
       // an allowance that may free up: parking it would ask again for ever for a run that must never
@@ -498,8 +604,8 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
       }
       return parkTemporarily(plan, planView.reasons[0] ?? 'review_not_allowed')
     }
-    const reservation = engine.reviewRequest({ lessonId: plan.lessonId, projectKey: scope, expectedVersion: plan.version,
-      maxTokens: REVIEW_TOKENS, planHash: plan.planHash, queueKey: plan.queueKey,
+    const reservation = existing?.ok === true ? { ok: true, ticket: plan.ticket } : engine.reviewRequest({ lessonId: plan.lessonId, projectKey: scope, expectedVersion: plan.version,
+      maxTokens: REVIEW_TOKENS, stepwiseBudget: true, planHash: plan.planHash, queueKey: plan.queueKey,
       // The pack identity travels WITH the reservation: the core freezes it, checks the method
       // against the registered predicate, and refuses the submission if either moved on. A
       // queue-driven review without it is refused outright (`domain_pack_required`),
@@ -515,7 +621,7 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
       return parkTemporarily(plan, reservation.skipped ?? reservation.code ?? 'review_budget')
     }
     engine.autoPlanUpdate({ queueKey: plan.queueKey, planHash: plan.planHash, stage: 'running',
-      ticket: reservation.ticket, attempts: plan.attempts + 1 })
+      ticket: reservation.ticket, attempts: plan.attempts + (existing?.ok === true ? 0 : 1) })
     // Known spend is accumulated the moment a call returns: a cancellation, a failed judge or a
     // crash must not throw away token counts the provider already told us about.
     // Known spend is accumulated the moment a call returns, and the QUALITY of the run is tracked
@@ -525,11 +631,11 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
     try {
       // Two isolated answers, same route, no shared context: the arms must not see each other.
       if (!stillPermitted()) throw stopError('review_cancelled')
-      const candidate = await paidCall({ ...scenario.arm('candidate'), route: decisionRoute }, reservation.ticket, run, spend)
+      const candidate = await paidCall({ ...scenario.arm('candidate'), route: decisionRoute, stepKey: 'review:candidate' }, reservation.ticket, run, spend)
       // The switch may have been closed while that answer was in flight: the NEXT call must not be
       // issued just because the first one was.
       if (!stillPermitted()) throw stopError('review_cancelled')
-      const baseline = await paidCall({ ...scenario.arm('baseline'), route: decisionRoute }, reservation.ticket, run, spend)
+      const baseline = await paidCall({ ...scenario.arm('baseline'), route: decisionRoute, stepKey: 'review:baseline' }, reservation.ticket, run, spend)
       if (candidate === null || baseline === null) throw stopError('review_interrupted')
       // Two judge passes over the SAME two answers with the labels swapped. The ledger returned with
       // each prompt says which label the candidate carried in that pass, so the pair can be handed
@@ -537,9 +643,9 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
       const firstPass = scenario.judge(candidate.text, baseline.text, 0)
       const secondPass = scenario.judge(candidate.text, baseline.text, 1)
       if (!stillPermitted()) throw stopError('review_cancelled')
-      const firstJudged = await paidCall({ ...firstPass, route: decisionRoute }, reservation.ticket, run, spend)
+      const firstJudged = await paidCall({ ...firstPass, route: decisionRoute, stepKey: 'review:judge:0' }, reservation.ticket, run, spend)
       if (!stillPermitted()) throw stopError('review_cancelled')
-      const secondJudged = await paidCall({ ...secondPass, route: decisionRoute }, reservation.ticket, run, spend)
+      const secondJudged = await paidCall({ ...secondPass, route: decisionRoute, stepKey: 'review:judge:1' }, reservation.ticket, run, spend)
       const judged = [firstJudged, secondJudged]
       if (judged[0] === null || judged[1] === null) throw stopError('review_interrupted')
       const ordered = [firstPass, secondPass]
@@ -621,9 +727,13 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
       // that is still in flight, and the spend is settled exactly once, here.
       try {
         await drainPending()
-        engine.evaluationCancel({ ticket: reservation.ticket, spent: spend.known > 0 ? spend.known : undefined })
+        // A budget-window refusal happened before the next physical request. Keep this same open
+        // ticket so the plan can resume its completed checkpoints when the rolling allowance frees.
+        if (!['evaluation_budget', 'evaluation_budget_calls', 'review_budget'].includes(code)) {
+          engine.evaluationCancel({ ticket: reservation.ticket, spent: spend.known > 0 ? spend.known : undefined })
+        }
       } catch { record('review_cancel_failed', plan.lessonId) }
-      const settled = settleStoppedPlan(plan, code)
+      const settled = settleStoppedPlan(plan, code, reservation.ticket)
       record(code, plan.lessonId)
       return settled
     } finally {
@@ -656,14 +766,22 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
     // Foreground first, before the reservation: a person's turn owns the provider, and a yield must
     // cost neither a ticket nor one of the plan's bounded attempts.
     if (busy()) return yieldToForeground(plan)
-    const reserved = pack.cases.length * OBJECTIVE_TOKENS_PER_CASE
-    const prepared = engine.evaluationRequest({ lessonId: plan.lessonId, projectKey: pack.projectKey,
-      expectedVersion: plan.version, suiteId: pack.suiteId, cases: pack.cases, maxTokens: reserved })
+    const reserved = 2
+    const existing = typeof plan.ticket === 'string'
+      ? engine.ticketContinuation({ ticket: plan.ticket, kind: 'evaluation' }) : null
+    if (existing?.code === 'ticket_usage_unknown') {
+      engine.autoPlanUpdate({ queueKey: plan.queueKey, planHash: plan.planHash, stage: 'blocked', ticket: null,
+        reason: 'ticket_usage_unknown' })
+      return 'blocked'
+    }
+    const prepared = existing?.ok === true ? { ok: true, ticket: plan.ticket } : engine.evaluationRequest({ lessonId: plan.lessonId, projectKey: pack.projectKey,
+      expectedVersion: plan.version, suiteId: pack.suiteId, cases: pack.cases, maxTokens: reserved,
+      stepwiseBudget: true, planHash: plan.planHash, queueKey: plan.queueKey })
     if (prepared.ok !== true || prepared.ticket === undefined) {
       return parkTemporarily(plan, prepared.skipped ?? prepared.code ?? 'review_budget')
     }
     engine.autoPlanUpdate({ queueKey: plan.queueKey, planHash: plan.planHash, stage: 'running',
-      ticket: prepared.ticket, attempts: plan.attempts + 1 })
+      ticket: prepared.ticket, attempts: plan.attempts + (existing?.ok === true ? 0 : 1) })
     const answers = {}, usage = {}
     const spend = { known: 0, unknown: 0, truncated: 0 }
     const run = newRun(plan, runContext)
@@ -674,7 +792,8 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
         if (now() - started > OBJECTIVE_DEADLINE_MS) throw stopError('review_interrupted')
         const pair = {}, measured = { baseline: null, candidate: null }
         for (const arm of ['baseline', 'candidate']) {
-          const answer = await paidCall({ ...pack.arm(arm, testCase), route: decisionRoute }, prepared.ticket, run, spend)
+          const answer = await paidCall({ ...pack.arm(arm, testCase), route: decisionRoute,
+            stepKey: `objective:${testCase.caseId}:${arm}` }, prepared.ticket, run, spend)
           if (answer === null) throw stopError('review_interrupted')
           pair[arm] = answer.text
           // A cut-off arm is stated to the pack, which refuses to score it as a pass.
@@ -718,9 +837,11 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
       const code = error?.code ?? 'review_judge_failed'
       try {
         await drainPending()
-        engine.evaluationCancel({ ticket: prepared.ticket, spent: spend.known > 0 ? spend.known : undefined })
+        if (!['evaluation_budget', 'evaluation_budget_calls', 'review_budget'].includes(code)) {
+          engine.evaluationCancel({ ticket: prepared.ticket, spent: spend.known > 0 ? spend.known : undefined })
+        }
       } catch { record('objective_cancel_failed', plan.lessonId) }
-      const stage = settleStoppedPlan(plan, code)
+      const stage = settleStoppedPlan(plan, code, prepared.ticket)
       record(code, plan.lessonId)
       return stage
     } finally {
@@ -848,6 +969,11 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
   const scan = async (lessons = []) => {
     if (disposed || scanning) return { ok: false, code: disposed ? 'disposed' : 'busy' }
     scanning = true
+    // Per-SCAN counters: the audit describes this pass, not the process's lifetime.
+    finishedByChecker = 0
+    waitingValidator = 0
+    evidenceTrialsGranted = 0
+    evidenceTrialsExisting = 0
     try {
       // (0) THE PROBLEM DUE-RECOVERY PASS. It shares this one wake-up, this one serial guard and the
       // one physical slot, but NOT the automatic-validation switch: a refused reflection must come
@@ -925,7 +1051,13 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
       // has to pass the FULL planHash identity compare before any plan is created or paid.
       try { if (current.length > 0) engine.autoConsiderAdvance?.({ step: current.length }) }
       catch { record('consider_advance_failed') }
-      return { ok: true, registered, advanced, maintenance, problems, status: status() }
+      const audit = { ok: true, registered, advanced, maintenance, problems,
+        // The two new facts travel with every scan, so an operator can tell "nothing to do" from
+        // "settled by its own checker" and from "waiting for an applicable validator".
+        registeredChecker: finishedByChecker, waitingValidator,
+        evidenceTrialsGranted, evidenceTrialsExisting }
+      lastScan = audit
+      return { ...audit, status: status() }
     } finally { scanning = false }
   }
 

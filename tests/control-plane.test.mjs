@@ -447,7 +447,8 @@ test('an expired evaluation ticket stops blocking the plan as well as the reques
   assert.equal(typeof lesson.version, 'number')
   const cases = Array.from({ length: 12 }, (_, index) => ({ caseId: `case-${index}`, family: `f${index % 2}`,
     split: index % 3 === 0 ? 'holdout' : 'development' }))
-  const first = engine.evaluationRequest({ lessonId: lesson.id, expectedVersion: lesson.version, suiteId: 's', cases, maxTokens: 1024 })
+  const first = engine.evaluationRequest({ lessonId: lesson.id, expectedVersion: lesson.version, suiteId: 's', cases,
+    maxTokens: 1024, inputChars: 1, stepOutputTokens: 1 })
   assert.equal(typeof first.ticket, 'string')
   const blocked = engine.evaluationPlan({ lessonId: lesson.id, expectedVersion: lesson.version, maxTokens: 1024 })
   assert.equal(blocked.allowed, false)
@@ -457,7 +458,8 @@ test('an expired evaluation ticket stops blocking the plan as well as the reques
   const reopened = engine.evaluationPlan({ lessonId: lesson.id, expectedVersion: lesson.version, maxTokens: 1024 })
   assert.equal(reopened.allowed, true, 'an expired ticket no longer blocks a new one')
   assert.deepEqual(reopened.reasons, [])
-  const second = engine.evaluationRequest({ lessonId: lesson.id, expectedVersion: lesson.version, suiteId: 's', cases, maxTokens: 1024 })
+  const second = engine.evaluationRequest({ lessonId: lesson.id, expectedVersion: lesson.version, suiteId: 's', cases,
+    maxTokens: 1024, inputChars: 1, stepOutputTokens: 1 })
   assert.equal(typeof second.ticket, 'string')
 }))
 

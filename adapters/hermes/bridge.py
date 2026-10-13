@@ -1062,14 +1062,15 @@ class Hooks:
                 "pre_api": {"provider": provider, "model": model, "base_url": base_url,
                             "api_mode": api_mode, "request": {"method": "POST", "body": body}},
                 "base": dict(row.get("base") or {"sessionId": session}), "source_session": session,
-                "problem": {}, "ticket": None, "queueKey": plan.get("queueKey"),
+                "problem": {}, "ticket": plan.get("ticket"), "queueKey": plan.get("queueKey"),
                 "planHash": plan.get("planHash"), "lessonId": plan.get("lessonId"),
                 "version": plan.get("version"), "projectKey": self._plan_project(plan),
                 "environmentId": plan.get("environment"), "planTrack": plan.get("track"),
                 "source": {"revision": source.get("revision"), "bindingHash": source.get("bindingHash"),
                            "controlGeneration": self._control_generation()},
                 "review": {"maxTokens": REVIEW_TOKENS_BOUND},
-                "objective": {"maxTokens": OBJECTIVE_TOKENS_BOUND, "cursor": 0}}
+                "objective": {"maxTokens": OBJECTIVE_TOKENS_BOUND, "cursor": 0,
+                              "progress": plan.get("progress")}}
 
     def row_for_plan(self, plan):
         """The turn row a plan's attempt belongs to, or `None` when this process has no such row.

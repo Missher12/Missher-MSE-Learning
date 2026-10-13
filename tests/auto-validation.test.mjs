@@ -70,7 +70,7 @@ test('an explicit zero budget refuses every paid step and still reports the reas
     const plan = f.engine.reviewPlan({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000 })
     assert.equal(plan.allowed, false)
     assert.ok(plan.reasons.includes('review_budget_disabled'), plan.reasons.join(','))
-    const requested = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000,
+    const requested = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000, stepwiseBudget: true, steps: 1, inputChars: 1, stepOutputTokens: 1,
       planHash: planHash({ lessonId: lesson.id, version: lesson.version, environment: 'default', track: 'review' }) })
     assert.equal(requested.skipped, 'evaluation_budget')
     assert.equal(f.engine.autoPlans().length, 0)
@@ -84,14 +84,14 @@ test('a review reservation is serial: one job at a time, and only up to the dail
   try {
     const lesson = candidate(f)
     const binding = planHash({ lessonId: lesson.id, version: lesson.version, environment: 'default', track: 'review' })
-    const first = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000, planHash: binding })
+    const first = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000, stepwiseBudget: true, steps: 1, inputChars: 1, stepOutputTokens: 1, planHash: binding })
     assert.equal(typeof first.ticket, 'string')
     // A second reservation while one is open is refused: two arms may not double-spend one call.
-    const second = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000, planHash: binding })
+    const second = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000, stepwiseBudget: true, steps: 1, inputChars: 1, stepOutputTokens: 1, planHash: binding })
     assert.equal(second.skipped, 'evaluation_budget')
     const status = f.engine.status()
     assert.equal(status.evaluationJobsOpen, 1)
-    assert.equal(status.evaluationCallsLast24h, 1, 'the reservation counts as a paid call')
+    assert.equal(status.evaluationCallsLast24h, 0, 'an unsigned step has not consumed a task slot')
   } finally { f.cleanup() }
 })
 
@@ -100,7 +100,7 @@ test('a late review for a version that moved on is refused, never credited', () 
   try {
     const lesson = candidate(f)
     const binding = planHash({ lessonId: lesson.id, version: lesson.version, environment: 'default', track: 'review' })
-    const reservation = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000, planHash: binding })
+    const reservation = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000, stepwiseBudget: true, steps: 1, inputChars: 1, stepOutputTokens: 1, planHash: binding })
     // The lesson moves on (its version really changes) while the reviewer is still thinking: a
     // suspension is one of the transfers that invalidates the old evidence.
     f.engine.suspend({ lessonId: lesson.id, projectKey: f.projectKey })
@@ -120,7 +120,7 @@ test('an aligned blind review starts an unproven trial, never a validation', () 
     const lesson = candidate(f)
     const criteria = packCases('mse-lifecycle-v1')[0].criteria
     const binding = planHash({ lessonId: lesson.id, version: lesson.version, environment: 'default', track: 'review' })
-    const reservation = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000, planHash: binding })
+    const reservation = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000, stepwiseBudget: true, steps: 1, inputChars: 1, stepOutputTokens: 1, planHash: binding })
     const verdict = f.engine.reviewResult({ ticket: reservation.ticket, planHash: binding, projectKey: f.projectKey,
       first: '{"winner":"A"}', second: '{"winner":"B"}', criteria, swapped: true,
       answers: { candidate: '先记录代次，迟到结果按代次丢弃，并说明如何处理。',
@@ -151,7 +151,7 @@ test('an unknown cost or a vacuous tie keeps the lesson a candidate', () => {
     try {
       const lesson = candidate(f)
       const binding = planHash({ lessonId: lesson.id, version: lesson.version, environment: 'default', track: 'review' })
-      const reservation = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000, planHash: binding })
+      const reservation = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000, stepwiseBudget: true, steps: 1, inputChars: 1, stepOutputTokens: 1, planHash: binding })
       const verdict = f.engine.reviewResult({ ticket: reservation.ticket, planHash: binding, projectKey: f.projectKey, criteria,
         first: '{"winner":"tie"}', second: '{"winner":"tie"}', swapped: true, ...claims })
       assert.notEqual(verdict.state, 'reviewed', label)
@@ -169,7 +169,7 @@ test('a trial is offered as an unverified reference, at most once, after everyth
     const lesson = candidate(f)
     const criteria = packCases('mse-lifecycle-v1')[0].criteria
     const binding = planHash({ lessonId: lesson.id, version: lesson.version, environment: 'default', track: 'review' })
-    const ticket = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000, planHash: binding }).ticket
+    const ticket = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000, stepwiseBudget: true, steps: 1, inputChars: 1, stepOutputTokens: 1, planHash: binding }).ticket
     f.engine.reviewResult({ ticket, planHash: binding, projectKey: f.projectKey, first: '{"winner":"A"}', second: '{"winner":"B"}',
       criteria, swapped: true, structuredPassed: true,
       answers: { candidate: '先记录代次，迟到结果按代次丢弃，并说明如何处理。', baseline: '直接处理即可，不需要额外记录任何东西，也不用记代次。' } })
@@ -192,7 +192,7 @@ test('withdrawing a trial (or suspending the lesson) ends the offer', () => {
     const lesson = candidate(f)
     const criteria = packCases('mse-lifecycle-v1')[0].criteria
     const binding = planHash({ lessonId: lesson.id, version: lesson.version, environment: 'default', track: 'review' })
-    const ticket = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000, planHash: binding }).ticket
+    const ticket = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000, stepwiseBudget: true, steps: 1, inputChars: 1, stepOutputTokens: 1, planHash: binding }).ticket
     f.engine.reviewResult({ ticket, planHash: binding, projectKey: f.projectKey, first: '{"winner":"A"}', second: '{"winner":"B"}',
       criteria, swapped: true, structuredPassed: true,
       answers: { candidate: '先记录代次，迟到结果按代次丢弃，并说明如何处理。', baseline: '直接处理即可，不需要额外记录任何东西，也不用记代次。' } })
@@ -284,7 +284,7 @@ test('a review reservation carries the queue identity and the frozen criteria te
     const binding = plan.plan.planHash
     // A queue-driven reservation names the REGISTERED case and the identity the registry derives for
     // it: the core refuses self-declared hashes and criteria for a pack-backed review.
-    const ticket = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000,
+    const ticket = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000, stepwiseBudget: true, steps: 1, inputChars: 1, stepOutputTokens: 1,
       planHash: binding, queueKey: plan.plan.queueKey, criteria, packId: 'mse-lifecycle-v1',
       caseId: sample.caseId, scenarioHash: packScenarioHash('mse-lifecycle-v1', sample.caseId),
       criteriaHash: packCaseCriteriaHash('mse-lifecycle-v1', sample.caseId) }).ticket
@@ -310,7 +310,7 @@ test('criteria text cannot be swapped under the same declared hash', () => {
     const lesson = candidate(f)
     const criteria = packCases('mse-lifecycle-v1')[0].criteria
     const binding = planHash({ lessonId: lesson.id, version: lesson.version, environment: 'default', track: 'review' })
-    const ticket = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000,
+    const ticket = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000, stepwiseBudget: true, steps: 1, inputChars: 1, stepOutputTokens: 1,
       planHash: binding, criteria }).ticket
     // The same hash string, different sentences: the frozen TEXT is what decides.
     const swapped = criteria.map(row => ({ ...row, statement: '完全不同的准则正文' }))
@@ -328,7 +328,7 @@ test('a restart voids every ticket, not only the expired ones', () => {
     const lesson = candidate(f)
     const criteria = packCases('mse-lifecycle-v1')[0].criteria
     const binding = planHash({ lessonId: lesson.id, version: lesson.version, environment: 'default', track: 'review' })
-    const ticket = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000,
+    const ticket = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000, stepwiseBudget: true, steps: 1, inputChars: 1, stepOutputTokens: 1,
       planHash: binding, criteria }).ticket
     // One minute later — far inside the 30-minute window — the process restarts.
     f.advance(60_000)
@@ -344,7 +344,8 @@ test('a restart voids every ticket, not only the expired ones', () => {
     assert.equal(late.ok, false)
     assert.equal(late.code, 'ticket_voided')
     // The reservation stays spent: the call may have been paid for.
-    assert.equal(f.engine.status().evaluationCallsLast24h, 1)
+    assert.equal(f.engine.status().evaluationCallsLast24h, 0,
+      'restart recovery of a never-dispatched ticket does not count a paid task')
   } finally { f.cleanup() }
 })
 
@@ -353,7 +354,7 @@ test('a cancelled run keeps the usage that already came back', () => {
   try {
     const lesson = candidate(f)
     const binding = planHash({ lessonId: lesson.id, version: lesson.version, environment: 'default', track: 'review' })
-    const reserved = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000,
+    const reserved = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000, stepwiseBudget: true, steps: 1, inputChars: 1, stepOutputTokens: 1,
       planHash: binding }).ticket
     // Two calls returned 6000 tokens before the switch closed; the ledger must not fall back to 4000.
     f.engine.evaluationCancel({ ticket: reserved, spent: 6_000 })
@@ -471,7 +472,7 @@ test('a fixed short answer is accepted end to end, and its verdict is a real tri
     const shortAnswer = String(shortSample.checker.expected)
     const criteria = (shortSample.criteria ?? []).length > 0 ? shortSample.criteria : CRITERIA_FALLBACK
     const binding = planHash({ lessonId: lesson.id, version: lesson.version, environment: 'default', track: 'review' })
-    const reservation = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000,
+    const reservation = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000, stepwiseBudget: true, steps: 1, inputChars: 1, stepOutputTokens: 1,
       planHash: binding, criteria, shortAnswersAllowed: true })
     assert.equal(typeof reservation.ticket, 'string')
     const verdict = f.engine.reviewResult({ ticket: reservation.ticket, projectKey: f.projectKey, criteria,
@@ -493,7 +494,7 @@ test('the same short answer is refused when the reservation did not allow it', (
     const lesson = candidate(f)
     const criteria = [{ id: 'lifecycle_scope', kind: 'structured', statement: '回答必须区分请求代次与并发提交' }]
     const binding = planHash({ lessonId: lesson.id, version: lesson.version, environment: 'default', track: 'review' })
-    const ticket = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000,
+    const ticket = f.engine.reviewRequest({ lessonId: lesson.id, projectKey: f.projectKey, maxTokens: 4_000, stepwiseBudget: true, steps: 1, inputChars: 1, stepOutputTokens: 1,
       planHash: binding, criteria }).ticket
     // A tie between two seven-character answers is exactly the vacuous case the gate exists for.
     const verdict = f.engine.reviewResult({ ticket, projectKey: f.projectKey, criteria,

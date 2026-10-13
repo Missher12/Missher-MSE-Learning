@@ -82,13 +82,13 @@ const criteriaOf = caseId => packCases(PACK_ID).find(row => row.caseId === caseI
  * same plan and the same revision are refused afterwards (`evidence_already_attempted`) — exactly what
  * makes a lost IPC answer or a crash unable to pay for the same evidence twice.
  */
-function freshAttempt(f, lesson, caseId, label) {
+function freshAttempt(f, lesson, caseId, label, requestOverrides = {}) {
   const bound = f.engine.sourcePublish({ sessionId: SESSION, projectKey: f.projectKey, provider: PROVIDER,
     model: MODEL, apiMode: 'chat_completions', baseUrl: `https://stage4c.invalid/${SESSION}/${label}/v1`,
     reasoningState: 'explicit', reasoningValue: EFFORT, driver: 'async_openai_chat' })
   assert.equal(bound.published, true, JSON.stringify(bound))
   const plan = reviewPlan(f, lesson, caseId, bound)
-  const ticket = reviewRequest(f, lesson, plan, caseId, bound)
+  const ticket = reviewRequest(f, lesson, plan, caseId, bound, requestOverrides)
   assert.equal(typeof ticket.ticket, 'string', JSON.stringify(ticket))
   return { ticket, plan, bound }
 }
@@ -116,7 +116,7 @@ function objectivePlan(f, lesson, bound) {
 /** The automatic review request, exactly as the driver would send it. */
 function reviewRequest(f, lesson, plan, caseId, bound, overrides = {}) {
   return f.engine.reviewRequest({ lessonId: lesson.id, expectedVersion: lesson.version,
-    projectKey: f.projectKey, maxTokens: 4_000, planHash: plan.row.planHash, queueKey: plan.row.queueKey,
+    projectKey: f.projectKey, maxTokens: 4_000, stepwiseBudget: true, steps: 1, inputChars: 1, stepOutputTokens: 1, planHash: plan.row.planHash, queueKey: plan.row.queueKey,
     packId: PACK_ID, caseId, scenarioHash: packScenarioHash(PACK_ID, caseId),
     criteriaHash: packCaseCriteriaHash(PACK_ID, caseId), criteria: criteriaOf(caseId),
     sourceBinding: true, sessionId: SESSION, sourceRevision: bound.revision,
@@ -290,7 +290,7 @@ test('the objective track commits on the pack the TICKET froze, and only there',
   const plan = objectivePlan(f, lesson, bound)
   assert.equal(plan.ok, true, JSON.stringify(plan))
   const request = f.engine.evaluationRequest({ lessonId: lesson.id, expectedVersion: lesson.version,
-    projectKey: f.projectKey, maxTokens: 6_000, planHash: plan.row.planHash, queueKey: plan.row.queueKey,
+    projectKey: f.projectKey, maxTokens: 6_000, stepwiseBudget: true, steps: 1, inputChars: 1, stepOutputTokens: 1, planHash: plan.row.planHash, queueKey: plan.row.queueKey,
     packId: PACK_ID, sourceBinding: true, sessionId: SESSION, sourceRevision: bound.revision,
     sourceBindingHash: bound.bindingHash, controlGeneration: f.engine.controlGeneration() })
   assert.equal(typeof request.ticket, 'string', JSON.stringify(request))
@@ -336,7 +336,7 @@ test('an objective ticket cannot be promoted through a review, or a review throu
   // ── and the other direction: a live OBJECTIVE ticket offered to the review track ────────────────
   const objective = objectivePlan(f, lesson, bound)
   const objectiveTicket = f.engine.evaluationRequest({ lessonId: lesson.id, expectedVersion: lesson.version,
-    projectKey: f.projectKey, maxTokens: 6_000, planHash: objective.row.planHash,
+    projectKey: f.projectKey, maxTokens: 6_000, stepwiseBudget: true, steps: 1, inputChars: 1, stepOutputTokens: 1, planHash: objective.row.planHash,
     queueKey: objective.row.queueKey, packId: PACK_ID, sourceBinding: true, sessionId: SESSION,
     sourceRevision: bound.revision, sourceBindingHash: bound.bindingHash })
   assert.equal(typeof objectiveTicket.ticket, 'string')
@@ -363,8 +363,8 @@ test('an expired ticket keeps its cost and answers a late measurement with the r
   const plan = reviewPlan(f, lesson, caseId, bound)
   const request = reviewRequest(f, lesson, plan, caseId, bound)
   assert.equal(typeof request.ticket, 'string')
-  // The ticket ages out (30 minutes) before the answer comes back.
-  f.advance(31 * 60_000)
+  // Bound automatic tickets remain resumable across a rolling-day budget window, then expire at 48h.
+  f.advance(49 * 60 * 60_000)
   const late = f.engine.reviewResult({ ticket: request.ticket, lessonId: lesson.id, projectKey: f.projectKey,
     planHash: plan.row.planHash, criteria: criteriaOf(caseId), ...passingVerdict(), spent: 7_000 })
   assert.equal(late.ok, false)
@@ -383,7 +383,7 @@ test('a cancelled objective ticket keeps its cost and cannot be promoted later',
   const bound = publish(f, SESSION)
   const plan = objectivePlan(f, lesson, bound)
   const request = f.engine.evaluationRequest({ lessonId: lesson.id, expectedVersion: lesson.version,
-    projectKey: f.projectKey, maxTokens: 6_000, planHash: plan.row.planHash, queueKey: plan.row.queueKey,
+    projectKey: f.projectKey, maxTokens: 6_000, stepwiseBudget: true, steps: 1, inputChars: 1, stepOutputTokens: 1, planHash: plan.row.planHash, queueKey: plan.row.queueKey,
     packId: PACK_ID, sourceBinding: true, sessionId: SESSION, sourceRevision: bound.revision,
     sourceBindingHash: bound.bindingHash })
   assert.equal(typeof request.ticket, 'string')
@@ -402,6 +402,118 @@ test('a cancelled objective ticket keeps its cost and cannot be promoted later',
   assert.equal(late.code, 'ticket_cancelled', JSON.stringify(late))
   const row = f.engine.list({ projectKey: f.projectKey, limit: 5 }).lessons.find(x => x.id === lesson.id)
   assert.notEqual(row.status, 'validated')
+})
+
+test('a completed paid step resumes from its durable checkpoint, while an in-flight step becomes unknown', t => {
+  const f = fixture()
+  t.after(f.cleanup)
+  const lesson = candidate(f)
+  const caseId = packCases(PACK_ID)[0].caseId
+  const completed = freshAttempt(f, lesson, caseId, 'checkpoint-completed')
+  f.engine.autoPlanUpdate({ queueKey: completed.plan.row.queueKey, planHash: completed.plan.row.planHash,
+    stage: 'running', ticket: completed.ticket.ticket, attempts: 1 })
+  const requestHash = hash64('effective provider request with reasoning and output bound')
+  assert.equal(f.engine.ticketReserve({ ticket: completed.ticket.ticket, stepKey: 'review:candidate', requestHash,
+    inputTokens: 100, outputTokens: 128 }).ok, true)
+  assert.equal(f.engine.ticketStepStart({ ticket: completed.ticket.ticket, stepKey: 'review:candidate', requestHash }).ok, true)
+  assert.equal(f.engine.ticketStepComplete({ ticket: completed.ticket.ticket, stepKey: 'review:candidate', requestHash,
+    text: 'saved answer', truncated: false, tokens: 91 }).ok, true)
+  const recovery = f.engine.recoverAutoPlans()
+  assert.equal(recovery.interrupted, 1)
+  const checkpoint = f.engine.planProgress({ ticket: completed.ticket.ticket, stepKey: 'review:candidate' })
+  assert.equal(checkpoint.step.text, 'saved answer')
+  assert.equal(checkpoint.step.tokens, 91)
+  f.engine.evaluationCancel({ ticket: completed.ticket.ticket, spent: 91 })
+
+  const uncertain = freshAttempt(f, lesson, caseId, 'checkpoint-unknown')
+  f.engine.autoPlanUpdate({ queueKey: uncertain.plan.row.queueKey, planHash: uncertain.plan.row.planHash,
+    stage: 'running', ticket: uncertain.ticket.ticket, attempts: 1 })
+  const uncertainHash = hash64('second physical request')
+  assert.equal(f.engine.ticketReserve({ ticket: uncertain.ticket.ticket, stepKey: 'review:candidate',
+    requestHash: uncertainHash, inputTokens: 100, outputTokens: 128 }).ok, true)
+  assert.equal(f.engine.ticketStepStart({ ticket: uncertain.ticket.ticket, stepKey: 'review:candidate',
+    requestHash: uncertainHash }).ok, true)
+  f.engine.recoverAutoPlans()
+  const row = f.engine.autoPlans().find(plan => plan.queueKey === uncertain.plan.row.queueKey)
+  assert.equal(row.stage, 'blocked')
+  assert.equal(row.reason, 'ticket_usage_unknown')
+  assert.equal(f.engine.planProgress({ ticket: uncertain.ticket.ticket, stepKey: 'review:candidate' }).ok, false)
+})
+
+test('a 20k rolling window resumes only remaining steps and does not recount one task', t => {
+  const f = fixture({ tokens: 20_000, calls: 2 })
+  t.after(f.cleanup)
+  const lesson = candidate(f)
+  const caseId = packCases(PACK_ID)[0].caseId
+  const run = freshAttempt(f, lesson, caseId, 'rolling-resume', { maxTokens: 2 })
+  f.engine.autoPlanUpdate({ queueKey: run.plan.row.queueKey, planHash: run.plan.row.planHash,
+    stage: 'running', ticket: run.ticket.ticket, attempts: 1 })
+  const saveStep = (stepKey, inputTokens, tokens) => {
+    const requestHash = hash64(JSON.stringify([stepKey, inputTokens, tokens]))
+    assert.equal(f.engine.ticketReserve({ ticket: run.ticket.ticket, stepKey, requestHash,
+      inputTokens, outputTokens: 128 }).ok, true)
+    assert.equal(f.engine.ticketStepStart({ ticket: run.ticket.ticket, stepKey, requestHash }).ok, true)
+    assert.equal(f.engine.ticketStepComplete({ ticket: run.ticket.ticket, stepKey, requestHash,
+      text: `saved:${stepKey}`, truncated: false, tokens }).ok, true)
+    return requestHash
+  }
+  saveStep('review:candidate', 9_000, 8_800)
+  saveStep('review:baseline', 10_000, 9_800)
+  const overWindow = run.ticket.ticket
+  const nextHash = hash64('remaining-judge-step')
+  const refused = f.engine.ticketReserve({ ticket: overWindow, stepKey: 'review:judge:0', requestHash: nextHash,
+    inputTokens: 1_000, outputTokens: 128 })
+  assert.equal(refused.code, 'evaluation_budget')
+  f.engine.autoPlanUpdate({ queueKey: run.plan.row.queueKey, planHash: run.plan.row.planHash,
+    stage: 'queued', ticket: overWindow, reason: 'budget_window_wait' })
+  assert.equal(f.engine.status().evaluationTasksLast24h, 1)
+  assert.equal(f.engine.status().evaluationRequestsLast24h, 2)
+
+  f.advance(24 * 60 * 60_000 + 1)
+  assert.equal(f.engine.planProgress({ ticket: overWindow, stepKey: 'review:candidate' }).step.text,
+    'saved:review:candidate')
+  const next = saveStep('review:judge:0', 1_000, 900)
+  assert.equal(typeof next, 'string')
+  assert.equal(f.engine.status().evaluationTasksLast24h, 1,
+    'a resumed ticket counts once in the new rolling window after it dispatches')
+  assert.equal(f.engine.status().evaluationRequestsLast24h, 1,
+    'physical requests remain a separate rolling count')
+})
+
+test('an undispatched reservation is re-admitted atomically after restart and a rolling window', t => {
+  const f = fixture({ tokens: 20_000, calls: 2 })
+  t.after(f.cleanup)
+  const lesson = candidate(f)
+  const run = freshAttempt(f, lesson, packCases(PACK_ID)[0].caseId, 'start-after-window', { maxTokens: 2 })
+  f.engine.autoPlanUpdate({ queueKey: run.plan.row.queueKey, planHash: run.plan.row.planHash,
+    stage: 'running', ticket: run.ticket.ticket, attempts: 1 })
+  const stepKey = 'review:candidate'
+  const requestHash = hash64('reserved before restart, not yet dispatched')
+  assert.equal(f.engine.ticketReserve({ ticket: run.ticket.ticket, stepKey, requestHash,
+    inputTokens: 100, outputTokens: 128 }).ok, true)
+  assert.equal(f.engine.status().evaluationRequestsLast24h, 0)
+
+  f.advance(24 * 60 * 60_000 + 1)
+  const reopen = (tokens, calls) => new LearningEngine({ stateRoot: f.stateRoot, adapterId: 'hermes',
+    maxContextBytes: 768, now: f.now, evaluationTokensPerDay: tokens, evaluationCallsPerDay: calls })
+  f.engine = reopen(0, 0)
+  assert.equal(f.engine.ticketStepStart({ ticket: run.ticket.ticket, stepKey, requestHash }).code,
+    'evaluation_budget_calls', 'a tightened task limit is checked at the dispatch transaction')
+  f.engine = reopen(0, 2)
+  assert.equal(f.engine.ticketStepStart({ ticket: run.ticket.ticket, stepKey, requestHash }).code,
+    'evaluation_budget', 'a tightened token limit is checked at the dispatch transaction')
+  f.engine = reopen(20_000, 2)
+  assert.equal(f.engine.ticketReserve({ ticket: run.ticket.ticket, stepKey, requestHash,
+    inputTokens: 100, outputTokens: 128 }).duplicate, true,
+  'a duplicate reservation does not itself spend, but cannot bypass start-time admission')
+  assert.equal(f.engine.ticketStepStart({ ticket: run.ticket.ticket, stepKey, requestHash }).ok, true)
+  const debit = f.document().spends.find(row => row.ticket === run.ticket.ticket)
+  const entry = debit.budgetEntries.find(row => row.stepKey === stepKey)
+  assert.equal(entry.dispatched, true)
+  assert.equal(entry.at, f.now())
+  assert.equal(entry.tokens, 228)
+  assert.equal(f.engine.status().evaluationTasksLast24h, 1)
+  assert.equal(f.engine.status().evaluationRequestsLast24h, 1)
 })
 
 test('an ordinary binding is refused whole, and the legacy DSH identity does not move', t => {
@@ -453,7 +565,7 @@ test('the released legacy documents still work: a ticket-less evaluation and a c
     prompt: row.prompt }))
   // The released request keeps its exact shape: the CALLER states the case list, no binding is named.
   const request = f.engine.evaluationRequest({ lessonId: lesson.id, expectedVersion: lesson.version,
-    projectKey: f.projectKey, maxTokens: 6_000, suiteId: 'legacy-suite', cases })
+    projectKey: f.projectKey, maxTokens: 6_000, stepwiseBudget: true, steps: 1, inputChars: 1, stepOutputTokens: 1, suiteId: 'legacy-suite', cases })
   assert.equal(typeof request.ticket, 'string', JSON.stringify(request))
   const trials = packCases(PACK_ID).map(testCase => ({ caseId: testCase.caseId, family: testCase.family,
     split: testCase.split, baseline: { passed: false, tokens: 10 }, candidate: { passed: true, tokens: 10 },
@@ -490,8 +602,8 @@ test('the transport refuses a half-bound automatic request instead of running it
   // The automatic RESULT entries cannot be reached without their ticket.
   const noTicket = run('objectiveResult', { lessonId: lesson.id, projectKey: f.projectKey })
   assert.equal(noTicket.body.code, 'invalid_source_binding', JSON.stringify(noTicket))
-  // The two paid request entries are open; the scheduling/recovery surface is deliberately not (yet).
-  const closed = run('maintainLearning', {})
+  // No generic scheduler alias is opened; each adapter uses only its enumerated production calls.
+  const closed = run('autoPlanScan', {})
   assert.equal(closed.body.code, 'invalid_operation', JSON.stringify(closed))
 })
 
@@ -578,7 +690,7 @@ test('the objective material walks the frozen cases one bounded page at a time',
   const bound = publish(f, SESSION)
   const plan = objectivePlan(f, lesson, bound)
   const ticket = f.engine.evaluationRequest({ lessonId: lesson.id, expectedVersion: lesson.version,
-    projectKey: f.projectKey, maxTokens: 6_000, planHash: plan.row.planHash, queueKey: plan.row.queueKey,
+    projectKey: f.projectKey, maxTokens: 6_000, stepwiseBudget: true, steps: 1, inputChars: 1, stepOutputTokens: 1, planHash: plan.row.planHash, queueKey: plan.row.queueKey,
     packId: PACK_ID, sourceBinding: true, sessionId: SESSION, sourceRevision: bound.revision,
     sourceBindingHash: bound.bindingHash })
   assert.equal(typeof ticket.ticket, 'string')
@@ -655,7 +767,7 @@ test('a measured zero, a known part plus unknown, and a repeated IPC stay three 
   assert.equal(f.document().spends.filter(x => x.ticket === third.ticket).length, 1)
 })
 
-test('a signed attempt is consumed at signing time: a lost answer can never pay twice', t => {
+test('an undispatched plan ticket survives recovery, while the evidence cannot be signed twice', t => {
   const f = fixture()
   t.after(f.cleanup)
   const lesson = candidate(f)
@@ -665,23 +777,23 @@ test('a signed attempt is consumed at signing time: a lost answer can never pay 
   const first = reviewRequest(f, lesson, plan, caseId, bound)
   assert.equal(typeof first.ticket, 'string', JSON.stringify(first))
   const spendsBefore = f.document().spends.length
-  // The IPC answer to that signature is lost; the process even restarts and voids every ticket.
+  // No physical step was started. Recovery keeps the plan-bound ticket so its first dispatch can
+  // happen later; evidence itself is still consumed at signing and cannot mint a second ticket.
   const released = f.engine.recoverAutoPlans()
-  assert.equal(released.releasedTickets, 1, JSON.stringify(released))
+  assert.equal(released.releasedTickets, 0, JSON.stringify(released))
   const voided = f.document().spends.find(x => x.ticket === first.ticket)
-  assert.equal(voided.terminal, 'ticket_voided')
+  assert.equal(voided.terminal, undefined)
   // The SAME evidence on the SAME plan is refused: it was already paid for at signing time.
   const replay = reviewRequest(f, lesson, plan, caseId, bound)
   assert.equal(replay.ok, true, JSON.stringify(replay))
   assert.equal(replay.skipped, 'evidence_already_attempted')
   assert.equal(f.document().spends.length, spendsBefore,
     'a refused replay reserves nothing new')
-  // The consumed attempt can still be REPORTED (and its cost settled) through its own ticket.
+  // The retained undispatched ticket remains bound to its original plan and can be settled once.
   const settled = f.engine.reviewResult({ ticket: first.ticket, lessonId: lesson.id, projectKey: f.projectKey,
     criteria: criteriaOf(caseId), ...passingVerdict() })
-  assert.equal(settled.ok, false)
-  assert.equal(settled.code, 'ticket_voided')
-  // A budget/cooldown wait that signed NOTHING is still recoverable: the next request signs normally.
+  assert.equal(settled.ok, true, JSON.stringify(settled))
+  // A newer source revision permits a distinct later attempt.
   const second = freshAttempt(f, lesson, caseId, 'after-void').ticket
   assert.equal(typeof second.ticket, 'string')
 })
@@ -736,7 +848,7 @@ test('cold start: the candidate and its source are enough to get an official pla
   assert.equal(identity.planHash, proposal.planHash)
   // The request then needs NO case and NO criteria of its own: the plan carries them.
   const ticket = f.engine.reviewRequest({ lessonId: lesson.id, expectedVersion: lesson.version,
-    projectKey: f.projectKey, maxTokens: 4_000, planHash: proposal.planHash, queueKey: proposal.queueKey,
+    projectKey: f.projectKey, maxTokens: 4_000, stepwiseBudget: true, steps: 1, inputChars: 1, stepOutputTokens: 1, planHash: proposal.planHash, queueKey: proposal.queueKey,
     sourceBinding: true, sessionId: SESSION, sourceRevision: bound.revision,
     sourceBindingHash: bound.bindingHash })
   assert.equal(typeof ticket.ticket, 'string', JSON.stringify(ticket))
@@ -1008,7 +1120,7 @@ test('an unknown step already reported cannot be overwritten by a later known fr
   // ── objective: the same rule, through the ticket's own usage report ────────────────────────────
   const plan = objectivePlan(f, lesson, f.engine.sourceStatus({ limit: 4 }).rows[0])
   const objective = f.engine.evaluationRequest({ lessonId: lesson.id, expectedVersion: lesson.version,
-    projectKey: f.projectKey, maxTokens: 6_000, planHash: plan.row.planHash, queueKey: plan.row.queueKey,
+    projectKey: f.projectKey, maxTokens: 6_000, stepwiseBudget: true, steps: 1, inputChars: 1, stepOutputTokens: 1, planHash: plan.row.planHash, queueKey: plan.row.queueKey,
     packId: PACK_ID, sourceBinding: true, sessionId: SESSION,
     sourceRevision: f.engine.sourceStatus({ limit: 4 }).rows[0].revision,
     sourceBindingHash: f.engine.sourceStatus({ limit: 4 }).rows[0].bindingHash })

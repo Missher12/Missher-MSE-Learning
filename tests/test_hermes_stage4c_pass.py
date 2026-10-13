@@ -81,6 +81,7 @@ pkg = types.ModuleType("mse_hermes_pkg")
 pkg.__path__ = [str(ROOT / "adapters" / "hermes")]
 sys.modules.setdefault("mse_hermes_pkg", pkg)
 driver = load("mse_learning_driver_4cpass", ROOT / "adapters/hermes/driver.py")
+node_clock_mod = load("mse_learning_node_clock_4cpass", ROOT / "tests/node_clock.py")
 
 PROVIDER = "deepseek-official"
 MODEL = "deepseek-flash"
@@ -313,6 +314,7 @@ def fake_transport(answers):
         def __init__(self):
             self.physical = 0
             self.closed = 0
+            self.bodies = []
 
         async def handle_async_request(self, request):
             self.physical += 1
@@ -321,6 +323,7 @@ def fake_transport(answers):
                 body = json.loads(request.content.decode("utf-8")) if request.content else {}
             except Exception:  # noqa: BLE001
                 pass
+            self.bodies.append(body)
             return httpx.Response(200, json=answers(body))
 
         async def aclose(self):
@@ -341,6 +344,9 @@ class PassFixture:
         self.scheduler = Scheduler(self.clock)
         self.transport = fake_transport(self._answer)
         self.usage = usage
+        self._install_hooks(tokens_per_day, calls_per_day)
+
+    def _install_hooks(self, tokens_per_day, calls_per_day):
         self.hooks = bridge.Hooks(config={"stateRoot": str(self.state_root), "adapterId": "hermes",
                                           "maxContextBytes": 768,
                                           "evaluationTokensPerDay": tokens_per_day,
@@ -355,6 +361,11 @@ class PassFixture:
         self.hooks.set_plan_pass(lambda hooks: planmod.build_auto_pass(
             hooks, call=self.core, clock=self.clock, state=hooks.plan,
             schedule=self.scheduler.schedule, cancel=self.scheduler.cancel))
+
+    def restart_hooks(self, tokens_per_day=100_000, calls_per_day=8):
+        """Rebuild a fresh production Hooks/driver/pass over the same persistent core state."""
+        self.hooks.dispose()
+        self._install_hooks(tokens_per_day, calls_per_day)
         # NOTE: the source row is published by `observe_route`, in the SCOPE this fixture is about. An
         # early instance-scope publish would lock the row (the core refuses a later project publish as
         # a scope mismatch), and the fixture would then be testing a scope it never claimed.
@@ -445,6 +456,7 @@ class PassFixture:
     def close(self):
         try:
             self.hooks.dispose()
+            self.hooks.cleanup_settled(timeout=5)
         except Exception:  # noqa: BLE001
             pass
 
@@ -526,6 +538,34 @@ class BudgetGateTests(unittest.TestCase):
         self.assertIsNone(fixture.core.plan_for(lesson, "review") and
                           fixture.core.plan_for(lesson, "review").get("ticket"))
 
+    def test_step_reservations_are_atomic_idempotent_and_unknown_blocks_the_next_step(self):
+        fixture = PassFixture(self, tokens_per_day=20_000, calls_per_day=2)
+        self.addCleanup(fixture.close)
+        fixture.observe_route()
+        lesson = fixture.with_session(fixture.core.lesson())
+        row = fixture.core.row(lesson)
+        registered = register_plan(fixture.core, lesson, row, "review", SESSION)
+        plan = registered["plan"]
+        source = fixture.core.source_rows()[0]
+        ticket = fixture.core("reviewRequest", {"lessonId": lesson, "expectedVersion": row["version"],
+            "maxTokens": 2, "stepwiseBudget": True, "steps": 1, "inputChars": 1,
+            "stepOutputTokens": 1, "planHash": plan["planHash"], "queueKey": plan["queueKey"],
+            "sourceBinding": True, "sessionId": SESSION, "sourceRevision": source["revision"],
+            "sourceBindingHash": source["bindingHash"]})
+        self.assertTrue(ticket.get("ticket"), "%r" % (ticket,))
+        base = {"ticket": ticket["ticket"], "stepKey": "one", "requestHash": "a" * 64,
+                "inputTokens": 1000, "outputTokens": 512}
+        first = fixture.core("ticketReserve", base)
+        self.assertTrue(first.get("ok"), "%r" % (first,))
+        self.assertTrue(fixture.core("ticketReserve", base).get("duplicate"), "same step is idempotent")
+        denied = fixture.core("ticketReserve", {**base, "stepKey": "too-large", "requestHash": "b" * 64,
+                                                 "inputTokens": 19_000, "outputTokens": 512})
+        self.assertEqual(denied.get("code"), "evaluation_budget")
+        fixture.core("ticketUsage", {"ticket": ticket["ticket"], "spent": 0,
+                                      "usage": {"known": False, "tokens": 0}})
+        unknown = fixture.core("ticketReserve", {**base, "stepKey": "after-unknown", "requestHash": "c" * 64})
+        self.assertEqual(unknown.get("code"), "ticket_usage_unknown")
+
 
 @NEEDS_SDK
 class FairCursorTests(unittest.TestCase):
@@ -593,7 +633,7 @@ class FairCursorTests(unittest.TestCase):
 class RecoveryTests(unittest.TestCase):
     """A dead process's attempt is released and never replayed; an unsigned wait just becomes due."""
 
-    def test_a_running_plan_from_a_dead_process_is_released_and_its_ticket_voided(self):
+    def test_a_dead_process_resumes_a_ticket_with_no_dispatched_steps(self):
         fixture = PassFixture(self)
         self.addCleanup(fixture.close)
         fixture.observe_route()
@@ -608,7 +648,9 @@ class RecoveryTests(unittest.TestCase):
         # the plan identity, and no optional identity sent as null.
         source_row = fixture.core.source_rows()[0]
         ticket = fixture.core("reviewRequest", {"lessonId": lesson,
-                                                "expectedVersion": row["version"], "maxTokens": 4000,
+                                                "expectedVersion": row["version"], "maxTokens": 2,
+                                                "stepwiseBudget": True, "steps": 1,
+                                                "inputChars": 1, "stepOutputTokens": 1,
                                                 "planHash": plan["planHash"], "queueKey": plan["queueKey"],
                                                 "sourceBinding": True, "sessionId": SESSION,
                                                 "sourceRevision": source_row["revision"],
@@ -619,17 +661,22 @@ class RecoveryTests(unittest.TestCase):
         # bounded counts are published with the chain rather than lost with that one call.
         release = fixture.hooks.plan["startupRecovery"]
         self.assertGreaterEqual(release["interrupted"], 1, "%r" % (started,))
-        self.assertGreaterEqual(release["releasedTickets"], 1, "%r" % (started,))
+        self.assertEqual(release["releasedTickets"], 0, "%r" % (started,))
+        recovered_plan = fixture.core.plan_for(lesson, "review")
+        self.assertEqual(recovered_plan.get("ticket"), ticket["ticket"],
+                         "a request never dispatched by the dead process is safe to continue")
         audit = fixture.step()
         after = fixture.core.plan_for(lesson, "review")
         self.assertNotEqual(after.get("stage"), "running")
-        self.assertIsNone(after.get("ticket"), "a released plan does not keep a submittable ticket")
-        # The SAME ticket can never be submitted again: the core answers from its voided row.
+        self.assertEqual(len(fixture.core.ops("reviewRequest")), 1,
+                         "resume uses the existing ticket instead of signing another attempt")
+        # The SAME ticket is settled once; a late repeated result cannot start another attempt.
         replay = fixture.core("reviewResult", {"ticket": ticket["ticket"], "lessonId": lesson,
                                                "projectKey": PROJECT, "costKnown": True,
                                                "sourceBinding": True, "first": "x", "second": "y"})
         self.assertFalse(replay.get("ok"), "a voided ticket is never a second attempt: %r" % (replay,))
-        self.assertIn(replay.get("code"), ("ticket_voided", "review_ticket_rejected"))
+        self.assertIn(replay.get("code"), ("review_plan_stale", "review_settled", "ticket_voided",
+                                            "review_ticket_rejected"))
 
     def test_an_unsigned_budget_wait_stays_recoverable_and_costs_nothing(self):
         fixture = PassFixture(self, tokens_per_day=0, calls_per_day=0)
@@ -809,6 +856,136 @@ class PlanAdvanceTests(unittest.TestCase):
         self.assertEqual(after.get("stage"), "done", "%r" % (after,))
         # ONE physical slot: the driver never runs two attempts at once.
         self.assertEqual(fixture.hooks.reflection_driver.slot.status()["peak"], 1)
+
+    def test_supported_chat_route_runs_with_stepwise_budget_and_wire_output_caps(self):
+        fixture = PassFixture(self, tokens_per_day=20_000, calls_per_day=2)
+        self.addCleanup(fixture.close)
+        fixture.observe_route()
+        lesson = fixture.with_session(fixture.core.lesson())
+        fixture.hooks.start_auto_pass("startup")
+        first = fixture.step()
+        plan = fixture.core.plan_for(lesson, "review")
+        self.assertIsNotNone(plan, "%r" % (first,))
+        fixture.core("autoPlanUpdate", {"queueKey": plan["queueKey"], "planHash": plan["planHash"],
+                                         "nextAttemptAt": 0})
+        result = fixture.step()
+        self.assertEqual(fixture.transport.physical, 4, "%r" % (result,))
+        self.assertTrue(all(item.get("max_tokens") in (128, 256) for item in fixture.transport.bodies))
+        reservations = fixture.core.ops("ticketReserve")
+        self.assertEqual(len(reservations), 4)
+        status = fixture.core("status", {})
+        self.assertLessEqual(status.get("evaluationTokensReserved24h", 0), 20_000)
+        self.assertLessEqual(status.get("evaluationCallsLast24h", 0), 2)
+
+    def test_objective_plan_resumes_remaining_steps_after_twenty_thousand_window(self):
+        node_clock = node_clock_mod.NodeClock(self)
+        fixture = PassFixture(self, tokens_per_day=20_000, calls_per_day=2)
+        self.addCleanup(fixture.close)
+        fixture.hooks.wall_ms = node_clock.now_ms
+        fixture.observe_route()
+        lesson = fixture.with_session(fixture.core.lesson())
+        fixture.hooks.start_auto_pass("startup")
+        fixture.step()
+        review = fixture.core.plan_for(lesson, "review")
+        objective = fixture.core.plan_for(lesson, "objective")
+        self.assertIsNotNone(review)
+        self.assertIsNotNone(objective)
+        fixture.core("autoPlanUpdate", {"queueKey": review["queueKey"], "planHash": review["planHash"],
+                                         "stage": "blocked", "reason": "test_review_deferred"})
+        fixture.core("autoPlanUpdate", {"queueKey": objective["queueKey"], "planHash": objective["planHash"],
+                                         "nextAttemptAt": 0})
+        result = fixture.step()
+        status = fixture.core("status", {})
+        self.assertLessEqual(status.get("evaluationTokensReserved24h", 0), 20_000)
+        self.assertLessEqual(status.get("evaluationCallsLast24h", 0), 2)
+        self.assertTrue(all(body.get("max_tokens") == 128 for body in fixture.transport.bodies))
+        after = fixture.core.plan_for(lesson, "objective")
+        self.assertEqual(after.get("stage"), "queued", "%r bodies=%d status=%r reserves=%r" % (
+            result, len(fixture.transport.bodies), status, fixture.core.ops("ticketReserve")))
+        self.assertEqual(after.get("reason"), "evaluation_budget")
+        ticket = after.get("ticket")
+        self.assertIsInstance(ticket, str)
+        raw = fixture.core.document()
+        saved = next(row for row in raw["autoPlans"] if row["queueKey"] == after["queueKey"])
+        self.assertEqual(len(saved.get("progress", {}).get("steps", [])), fixture.transport.physical)
+        self.assertEqual(fixture.transport.physical, 22)
+        self.assertEqual(status.get("evaluationTasksLast24h"), 1)
+        self.assertEqual(status.get("evaluationRequestsLast24h"), 22)
+
+        # The plan checkpoint survives ticket expiry. A fresh process waits for the same source session
+        # to report a real dispatch route, then the official startup/timer chain resumes remaining steps.
+        parked = fixture.core.plan_for(lesson, "objective")
+        self.assertEqual(parked.get("ticket"), ticket)
+        initial_progress = next(row for row in fixture.core.document()["autoPlans"]
+                                if row["queueKey"] == parked["queueKey"]).get("progress", {}).get("steps", [])
+        initial_keys = {item.get("stepKey") for item in initial_progress}
+        self.assertEqual(len(initial_keys), 22)
+        old_driver = fixture.hooks.reflection_driver
+        fixture.restart_hooks(tokens_per_day=20_000, calls_per_day=2)
+        self.assertIsNot(fixture.hooks.reflection_driver, old_driver)
+        fixture.hooks.wall_ms = node_clock.now_ms
+        node_clock.advance_ms(24 * 60 * 60 * 1000 + 1)
+        # The host has now delivered a genuine pre_api_request event for this same source session.
+        # This is the supported way a fresh process regains dispatch facts; the fixture does not
+        # repopulate bridge internals or manufacture a plan/ticket transition.
+        fixture.hooks.pre_api_request(session_id=SESSION, turn_id="turn-after-restart",
+            provider=PROVIDER, model=MODEL, base_url=BASE_URL, api_mode="chat_completions",
+            request={"method": "POST", "body": {"model": MODEL, "reasoning_effort": EFFORT}})
+        started = fixture.hooks.start_auto_pass("startup")
+        self.assertTrue(started.get("armed") or started.get("ok"), "%r" % (started,))
+        self.assertEqual(len(fixture.scheduler.live()), 1)
+        fixture.scheduler.fire()
+        # Startup recovery may impose its ordinary retry delay after recognizing the retained
+        # budget wait. Let the production timer chain, not a plan mutation, reach that deadline.
+        for _ in range(8):
+            if fixture.core.plan_for(lesson, "objective").get("stage") == "done":
+                break
+            node_clock.advance_ms(60_000)
+            fixture.scheduler.fire()
+        resumed = fixture.hooks.auto_pass_status()
+        finished = fixture.core.plan_for(lesson, "objective")
+        self.assertEqual(finished.get("stage"), "done", "%r plan=%r" % (resumed, finished))
+        progress = next(row for row in fixture.core.document()["autoPlans"]
+                        if row["queueKey"] == finished["queueKey"]).get("progress", {}).get("steps", [])
+        final_keys = {item.get("stepKey") for item in progress}
+        final_by_key = {item.get("stepKey"): item.get("requestHash") for item in progress}
+        self.assertEqual(len(progress), 36, "the frozen plan contains 36 objective steps")
+        self.assertEqual(len(final_keys), 36, "each objective step has one durable checkpoint")
+        self.assertTrue(initial_keys < final_keys, "the original checkpoints survived ticket expiry and restart")
+        self.assertTrue(all(final_by_key.get(item.get("stepKey")) == item.get("requestHash")
+                            for item in initial_progress), "the original step request identities stayed unchanged")
+        self.assertEqual(len(final_keys - initial_keys), 14, "only 14 incomplete steps remained")
+        self.assertEqual(fixture.transport.physical, 36,
+                         "22 prior requests were reused and only 14 remaining requests dispatched")
+        tickets_used = {row["value"].get("ticket") for row in fixture.core.ops("ticketReserve")}
+        self.assertIn(ticket, tickets_used)
+        self.assertEqual(tickets_used, {ticket}, "the live ticket survived the day window and process restart")
+        self.assertEqual(fixture.core("status", {}).get("evaluationTasksLast24h"), 1,
+                         "the resumed ticket counts once in the new window, not once per step")
+        self.assertEqual(fixture.core("status", {}).get("evaluationRequestsLast24h"), 14)
+
+    def test_hermes_production_pass_grants_and_recalls_an_ordinary_evidence_trial(self):
+        fixture = PassFixture(self)
+        self.addCleanup(fixture.close)
+        fixture.observe_route()
+        first = fixture.core.observe(1, SESSION, tool="ordinary-tool")
+        second = fixture.core.observe(2, SESSION, tool="ordinary-tool")
+        problem_id = second.get("id")
+        self.assertIsInstance(problem_id, str)
+        ordinary = "部署前核对当前分支与工作区状态，确认改动已保存后再继续。"
+        lesson = fixture.core.candidate(problem_id, SESSION, instruction=ordinary, turn="ordinary-trial")
+        fixture.hooks.start_auto_pass("startup")
+        audit = fixture.step()
+        self.assertGreaterEqual(audit.get("evidenceTrialsGranted", 0), 1, "%r" % (audit,))
+        calls = fixture.core.ops("grantEvidenceTrial")
+        self.assertTrue(calls, "the production Hermes pass calls the core trial operation")
+        row = next(item for item in fixture.core.document()["lessons"] if item.get("id") == lesson)
+        self.assertEqual(row.get("trial", {}).get("kind"), "evidence", "%r" % (calls,))
+        self.assertEqual(row.get("trial", {}).get("note"), "reference_only_unverified")
+        prepared = fixture.core("prepare", {"sessionId": SESSION, "turnId": "ordinary-recall",
+                                             "origin": "user", "prompt": "部署前如何确认工作区状态？"})
+        self.assertEqual(prepared.get("reason"), "recalled", "%r" % (prepared,))
+        self.assertIn(lesson, prepared.get("lessons", []), "%r" % (prepared,))
 
 
 class ReadOnlyStatusTests(unittest.TestCase):

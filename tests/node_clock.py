@@ -43,7 +43,9 @@ class NodeClock:
     def advance_ms(self, milliseconds):
         """Move the clock the CORE reads forward, and return the new value."""
         value = self.now_ms() + int(milliseconds)
-        self.file.write_text(str(value))
+        pending = self.file.with_suffix(".next")
+        pending.write_text(str(value))
+        pending.replace(self.file)
         return value
 
     def restore(self):

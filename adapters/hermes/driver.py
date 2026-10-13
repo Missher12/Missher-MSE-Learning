@@ -601,9 +601,14 @@ class ReflectionDriver:
         host has not read is therefore OMITTED rather than sent as `null` (the same rule the released
         reflection path follows), while a generation that WAS read travels as the caller's own fact.
         """
+        existing = job.get("ticket")
+        if isinstance(existing, str) and existing:
+            live = call("ticketContinuation", {"ticket": existing, "kind": "evaluation" if kind == "objective" else "review"})
+            return {"ok": True, "ticket": existing, "source": live.get("job", {}).get("source"),
+                    **({} if live.get("ok") is True else {"ok": False, "wait": live.get("code", "ticket_consumed")})}
         binding = {"lessonId": job.get("lessonId"), "expectedVersion": job.get("version"),
-                   "maxTokens": int(((job.get("review") if kind == "review" else job.get("objective"))
-                                     or {}).get("maxTokens") or 512),
+                   "maxTokens": 2, "stepwiseBudget": True,
+                   "steps": 1, "inputChars": 1, "stepOutputTokens": 1,
                    "planHash": job.get("planHash"), "queueKey": job.get("queueKey"),
                    "sourceBinding": True, "sessionId": job.get("source_session")}
         # OPTIONAL IDENTITIES ARE OMITTED, NEVER SENT AS NULL. The core's own label check accepts a
@@ -1353,7 +1358,7 @@ def _multi_failure(result, state):
     return None, (usage, content, finish)
 
 
-async def _multi_step(driver, client, identity, prompt, state, budget, limits):
+async def _multi_step(driver, client, identity, prompt, state, budget, limits, call):
     """ONE paid physical step of a review/objective run, bounded by the CORE's own allowance.
 
     It is the same `_dispatch` the reflection path uses — one `chat.completions.with_raw_response.create`,
@@ -1374,6 +1379,54 @@ async def _multi_step(driver, client, identity, prompt, state, budget, limits):
     limit = {"textUnits": int(limits.get("armChars", 4000)),
              "textBytes": int(limits.get("verdictBytes", 8192))}
     try:
+        ticket = state.get("ticket")
+        step_key = prompt.get("stepKey")
+        if not isinstance(ticket, str) or not isinstance(step_key, str):
+            return {"ok": False, "wait": "usage_unprovable"}
+        messages = [{"role": "system", "content": prompt.get("system", "")},
+                    {"role": "user", "content": prompt.get("text", "")}]
+        output_cap = 256 if step_key.startswith("review:judge:") else 128
+        # The route is part of the identity too. A resume may only reuse the saved response when
+        # endpoint/provider/API mode and all effective body fields are unchanged.
+        request_shape = {"provider": identity.provider, "base_url": identity.base_url,
+                         "api_mode": identity.api_mode, "model": identity.model,
+                         "messages": messages, "max_tokens": output_cap}
+        if identity.reasoning_state == REASONING_EXPLICIT:
+            request_shape["reasoning_effort"] = identity.reasoning_value
+        encoded = json.dumps(request_shape, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        request_hash = hashlib.sha256(encoded).hexdigest()
+        checkpoint = call("planProgress", {"ticket": ticket, "stepKey": step_key})
+        if isinstance(checkpoint, dict) and checkpoint.get("ok") is True and checkpoint.get("step") is not None:
+            saved = checkpoint["step"]
+            if saved.get("requestHash") != request_hash:
+                return {"ok": False, "wait": "checkpoint_conflict"}
+            tokens = saved.get("tokens")
+            if not isinstance(tokens, int):
+                return {"ok": False, "wait": "ticket_usage_unknown"}
+            spend["known"] += tokens
+            state["last_tokens"] = tokens
+            return {"ok": True, "usage": {"known": True, "totalTokens": tokens},
+                    "content": {"text": saved["text"], "units": utf16_units(saved["text"]),
+                                "bytes": len(saved["text"].encode("utf-8")),
+                                "truncated": saved["truncated"]}, "finish": None,
+                    "resumed": True}
+        reserve = call("ticketReserve", {"ticket": ticket, "stepKey": step_key,
+            "requestHash": request_hash, "inputTokens": len(encoded) + 128,
+            "outputTokens": output_cap})
+        if not isinstance(reserve, dict) or reserve.get("ok") is not True:
+            return {"ok": False, "wait": (reserve or {}).get("code", "evaluation_budget")}
+        # The reservation transaction is an await boundary. Re-read the ticket-bound material after
+        # it and before entering the provider call; stale permission can therefore buy no request.
+        refresh = prompt.get("refresh")
+        if callable(refresh):
+            fresh = refresh()
+            if not isinstance(fresh, dict) or fresh.get("ok") is not True:
+                return {"ok": False, "wait": (fresh or {}).get("code", "ticket_consumed")}
+        started = call("ticketStepStart", {"ticket": ticket, "stepKey": step_key,
+                                            "requestHash": request_hash})
+        if not isinstance(started, dict) or started.get("ok") is not True:
+            return {"ok": False, "wait": (started or {}).get("code", "ticket_step_start_failed")}
+        prompt["maxTokens"] = output_cap
         result = await _dispatch(driver, client, identity, prompt, state, limits=limit, truncation=True,
                                  step=spend)
     except asyncio.CancelledError:
@@ -1390,6 +1443,11 @@ async def _multi_step(driver, client, identity, prompt, state, budget, limits):
         _note_unmeasured(spend, state)
         return {"ok": False, "wait": wait}
     usage, content, finish = note
+    completed = call("ticketStepComplete", {"ticket": ticket, "stepKey": step_key,
+        "requestHash": request_hash, "text": content["text"], "truncated": content["truncated"],
+        "tokens": _usage_tokens(usage)})
+    if not isinstance(completed, dict) or completed.get("ok") is not True:
+        return {"ok": False, "wait": (completed or {}).get("code", "ticket_checkpoint_failed")}
     spend["resultInFlight"] = False
     state["last_tokens"] = _usage_tokens(usage)
     state["last_usage_known"] = bool(isinstance(usage, dict) and usage.get("known") is True)
@@ -1496,7 +1554,9 @@ async def _multi_job(driver, job, cancel_event, call, key):
         else:
             outcome = {"ok": False, "wait": "provider_driver_unsupported"}
         if outcome.get("ok") is not True:
-            failure = outcome.get("wait") or "reflection_refused"
+            spend = state.get("spend") or {}
+            failure = ("ticket_usage_unknown" if spend.get("unknown", 0) > 0
+                       else outcome.get("wait") or "reflection_refused")
             payload = {"ran": True, "wait": failure, "kind": kind, "completed": False,
                        "costKnown": _cost_known(outcome), "truncated": outcome.get("truncated") is True}
             return _multi_bail(state, kind, payload, failure)
@@ -1568,7 +1628,7 @@ async def _multi_review(driver, job, call, client, identity, cancel_event, state
         limits = material.get("limits") or {}
         criteria = material.get("criteria") or []
         arms = material.get("arms") or {}
-        max_tokens = int((job.get("review") or {}).get("maxTokens") or 512)
+        max_tokens = 512
         answers = {}
         for name in ("candidate", "baseline"):
             if _multi_cancelled(cancel_event, job):
@@ -1582,7 +1642,9 @@ async def _multi_review(driver, job, call, client, identity, cancel_event, state
             arm = arms.get(name) or {}
             step = await _multi_step(driver, client, identity,
                                      {"system": arm.get("system", ""), "text": arm.get("prompt", ""),
-                                      "maxTokens": max_tokens}, state, budget, limits)
+                                      "maxTokens": 512, "stepKey": "review:" + name,
+                                      "refresh": lambda: driver._review_material(call, state["ticket"])},
+                                     state, budget, limits, call)
             if step.get("ok") is not True:
                 return {"ok": False, "wait": step.get("wait"), "truncated": truncated}
             answer = _multi_arm(step["content"], state)
@@ -1603,9 +1665,10 @@ async def _multi_review(driver, job, call, client, identity, cancel_event, state
                 return {"ok": False, "wait": built.get("code") or "reflection_refused", "truncated": truncated}
             step = await _multi_step(driver, client, identity,
                                      {"system": built.get("system", ""), "text": built.get("text", ""),
-                                      "maxTokens": max_tokens}, state, budget,
+                                      "maxTokens": 512, "stepKey": "review:judge:%d" % index,
+                                      "refresh": lambda: driver._review_material(call, state["ticket"])}, state, budget,
                                      {"armChars": 4000, "verdictBytes": int(
-                                         (built.get("limits") or {}).get("responseBytes", 8192))})
+                                         (built.get("limits") or {}).get("responseBytes", 8192))}, call)
             if step.get("ok") is not True:
                 return {"ok": False, "wait": step.get("wait"), "truncated": truncated}
             verdict = _multi_arm(step["content"], state)
@@ -1677,7 +1740,7 @@ async def _multi_objective(driver, job, call, client, identity, cancel_event, st
                         "truncated": truncated}
             limits = case.get("limits") or {}
             case_id = case.get("caseId")
-            max_tokens = int((job.get("objective") or {}).get("maxTokens") or 512)
+            max_tokens = 512
             pair = {}
             measured = {}
             for name in ("baseline", "candidate"):
@@ -1691,7 +1754,9 @@ async def _multi_objective(driver, job, call, client, identity, cancel_event, st
                 arm = (material.get("arms") or {}).get(name) or {}
                 step = await _multi_step(driver, client, identity,
                                          {"system": arm.get("system", ""), "text": arm.get("prompt", ""),
-                                          "maxTokens": max_tokens}, state, budget, limits)
+                                          "maxTokens": 128, "stepKey": "objective:%s:%s" % (case_id, name),
+                                          "refresh": lambda: driver._objective_material(call, state["ticket"], cursor)},
+                                         state, budget, limits, call)
                 if step.get("ok") is not True:
                     return {"ok": False, "wait": step.get("wait"), "truncated": truncated}
                 answer = _multi_arm(step["content"], state)

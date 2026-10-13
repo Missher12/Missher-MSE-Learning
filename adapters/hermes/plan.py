@@ -49,8 +49,8 @@ PROBLEM_WINDOW = 4
 MAINTENANCE_WINDOW = 8
 # The reservation each track asks the core for. They are the CORE's amounts, frozen into the ticket;
 # this side only has to state the same number when it asks whether the allowance exists at all.
-REVIEW_TOKENS = 4000
-OBJECTIVE_TOKENS = 12000
+REVIEW_TOKENS = 2  # initial ticket floor; each wire request is reserved atomically by the driver
+OBJECTIVE_TOKENS = 2
 # How many paid steps may be handed to the driver per pass, across all tracks.
 PER_PASS_STEPS = 24
 # The one wake-up cadence. Bounded, and the only timer this adapter owns.
@@ -65,7 +65,7 @@ MIN_GAP_SECONDS = 1.0
 # them keeps its attempts and is retried when its own due time arrives. Nothing here is a local
 # policy: the codes are the core's own.
 WAIT_CODES = frozenset({
-    "review_budget", "evaluation_budget", "review_budget_calls", "review_budget_tokens",
+    "review_budget", "evaluation_budget", "evaluation_budget_calls", "review_budget_calls", "review_budget_tokens",
     "review_budget_disabled", "renewal_waiting_evidence", "review_not_allowed",
     "auto_plan_unknown", "auto_plan_stale", "slot_busy", "plan_not_runnable",
 })
@@ -454,6 +454,18 @@ class AutoPass:
                 # profile default is exactly what must not happen.
                 note("source_unknown")
                 continue
+            # Ordinary methods can be eligible for the same evidence backed reference trial as the
+            # DSH scheduler. The core rechecks independent host evidence, domain coverage, checker
+            # availability, version and scope; Hermes supplies identity only. Refusal is an expected
+            # wait and never substitutes for the registered paid plan below.
+            trial_value = {"lessonId": lesson_id, "expectedVersion": version}
+            if isinstance(source.get("projectKey"), str) and source.get("projectKey"):
+                trial_value["projectKey"] = source["projectKey"]
+            trial = self._safe("grantEvidenceTrial", trial_value, None)
+            if isinstance(trial, dict) and trial.get("ok") is True:
+                audit["evidenceTrialsGranted"] = audit.get("evidenceTrialsGranted", 0) + 1
+            elif isinstance(trial, dict) and isinstance(trial.get("code"), str):
+                note("evidence_trial_" + trial["code"][:48])
             for track in ("review", "objective"):
                 if audit["registered"] >= PER_PASS_REGISTRATIONS:
                     break
@@ -664,7 +676,7 @@ class AutoPass:
         # plan view, so a device whose paid budget is zero registers its work and buys NOTHING — no
         # request document, no reservation, no provider call — and the plan keeps its identity and its
         # attempts for the wake-up that may find the allowance changed.
-        if not self._budget_allows(plan, lesson):
+        if not plan.get("ticket") and not self._budget_allows(plan, lesson):
             self._settle_stopped(plan, "review_budget")
             return "review_budget"
         prepared = self.hooks.plan_run(plan, lesson)
@@ -672,12 +684,15 @@ class AutoPass:
             code = (prepared or {}).get("wait") if isinstance(prepared, dict) else "plan_not_runnable"
             return self._settle_stopped(plan, code or "plan_not_runnable")
         started = self._safe("autoPlanUpdate", {"queueKey": plan.get("queueKey"), "planHash": plan.get("planHash"),
-                                                "stage": "running", "ticket": None,
-                                                "attempts": self._next_attempts(plan), "reason": None}, None)
+                                                "stage": "running", "ticket": plan.get("ticket"),
+                                                "attempts": self._next_attempts(plan) if not plan.get("ticket")
+                                                else plan.get("attempts", 0), "reason": None}, None)
         if not isinstance(started, dict) or started.get("ok") is not True:
             self._park(plan, (started or {}).get("code") if isinstance(started, dict) else "auto_plan_stale")
             return "auto_plan_stale"
         result = self.hooks.plan_execute(prepared["job"])
+        if isinstance(result, dict) and isinstance(result.get("ticket"), str):
+            plan = {**plan, "ticket": result["ticket"]}
         code = result.get("wait") if isinstance(result, dict) else None
         if isinstance(result, dict) and result.get("completed") is True and result.get("wait") is None:
             self._finish(plan, result)
@@ -712,17 +727,22 @@ class AutoPass:
         unknown = code in UNKNOWN_CODES
         transient = code in TRANSIENT_CODES
         waiting = code in WAIT_CODES
+        unmeasured = code == "ticket_usage_unknown"
         attempts = plan.get("attempts") if isinstance(plan.get("attempts"), int) else 0
-        spend_attempt = not (cancelled or unknown)
+        spend_attempt = not (cancelled or unknown or waiting or unmeasured)
         next_attempts = attempts + 1 if spend_attempt else attempts
         maximum = plan.get("maxAttempts") if isinstance(plan.get("maxAttempts"), int) else 2
-        if cancelled or unknown or waiting:
+        if unmeasured:
+            stage = "blocked"
+        elif cancelled or unknown or waiting:
             stage = "queued"
         elif transient and next_attempts < maximum:
             stage = "queued"
         else:
             stage = "blocked"
-        if cancelled:
+        if unmeasured:
+            delay = BUDGET_RETRY_SECONDS
+        elif cancelled:
             delay = YIELD_RETRY_SECONDS
         elif unknown or waiting:
             delay = BUDGET_RETRY_SECONDS
@@ -730,7 +750,8 @@ class AutoPass:
             index = min(max(next_attempts - 1, 0), len(BACKOFF_SECONDS) - 1)
             delay = BACKOFF_SECONDS[index]
         self._safe("autoPlanUpdate", {"queueKey": plan.get("queueKey"), "planHash": plan.get("planHash"),
-                                      "stage": stage, "ticket": None, "reason": code,
+                                      "stage": stage, "ticket": plan.get("ticket") if waiting else None,
+                                      "reason": code,
                                       "attempts": next_attempts,
                                       "nextAttemptAt": self._now_ms() + int(delay * 1000)}, None)
         return code

@@ -12,7 +12,7 @@ import { CALL_DEADLINE_MS, JobQueue } from './jobs.mjs'
 import { createAutoValidation } from './auto.mjs'
 import { PROBLEM_DEFER_PLAN_CODES } from '../../src/problems.mjs'
 import { latestRoute } from './session-digest.mjs'
-import { getDomainPack, packAdmits, packCaseCriteriaHash, packCases, packScenarioHash,
+import { getDomainPack, listDomainPacks, packAdmits, packCaseCriteriaHash, packCases, packScenarioHash,
   packSuiteId } from '../../src/domains.mjs'
 import { buildJudgePrompt, parseVerdict, REVIEW_REASONS } from '../../src/review.mjs'
 import { assessEvaluation, DEFAULT_EVALUATION_POLICY } from '../../src/evaluation.mjs'
@@ -48,6 +48,59 @@ export function mseCommandDefinition(bridge) {
     handler: invocation => Promise.resolve(handleMseCommand(bridge, invocation.rawInput, {
       sessionId: invocation.agent?.session?.id, projectKey: invocation.agent?.session?.header?.cwd })),
   }
+}
+
+/** The production, stepwise DSH call used by automatic review/objective plans. */
+export async function callEvaluationModel({ engine, ctx, lifetime }, request, ticket) {
+  const route = request?.route
+  if (route === null || route === undefined) throw Object.assign(new Error('review_no_route'), { code: 'review_no_route' })
+  const signal = request?.signal === undefined
+    ? lifetime.signal : AbortSignal.any([lifetime.signal, request.signal])
+  const maxTokens = Number.isSafeInteger(request?.maxTokens) ? request.maxTokens : 512
+  if (typeof request?.stepKey !== 'string') throw Object.assign(new Error('usage_unprovable'), { code: 'usage_unprovable' })
+
+  // DSH's createUserMessage assigns a fresh host-local id each time. That id is not sent as provider
+  // content and is not a request identity: hash only the effective route, prompt, system text and cap.
+  const requestShape = { provider: route.provider, model: route.model,
+    ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: route.reasoningEffort }),
+    system: request.system, user: { role: 'user', content: [{ type: 'text', text: request.prompt }] }, maxTokens }
+  const requestHash = createHash('sha256').update(JSON.stringify(requestShape)).digest('hex')
+  const checkpoint = engine.planProgress({ ticket, stepKey: request.stepKey })
+  if (checkpoint?.ok === true && checkpoint.step !== null) {
+    if (checkpoint.step.requestHash !== requestHash) {
+      throw Object.assign(new Error('checkpoint_conflict'), { code: 'checkpoint_conflict' })
+    }
+    if (!Number.isSafeInteger(checkpoint.step.tokens)) {
+      throw Object.assign(new Error('ticket_usage_unknown'), { code: 'ticket_usage_unknown' })
+    }
+    return { text: checkpoint.step.text, tokens: checkpoint.step.tokens,
+      truncated: checkpoint.step.truncated, ticket, resumed: true }
+  }
+  const requestBytes = Buffer.byteLength(JSON.stringify(requestShape), 'utf8')
+  const reserve = engine.ticketReserve({ ticket, stepKey: request.stepKey, requestHash,
+    inputTokens: requestBytes + 128, outputTokens: maxTokens })
+  if (reserve?.ok !== true) throw Object.assign(new Error(reserve?.code ?? 'evaluation_budget'),
+    { code: reserve?.code ?? 'evaluation_budget', physicalDispatch: false })
+  const continuation = engine.ticketContinuation(ticket)
+  if (continuation?.ok !== true) throw Object.assign(new Error(continuation?.code ?? 'ticket_consumed'),
+    { code: continuation?.code ?? 'ticket_consumed', physicalDispatch: false })
+  const started = engine.ticketStepStart({ ticket, stepKey: request.stepKey, requestHash })
+  if (started?.ok !== true) throw Object.assign(new Error(started?.code ?? 'ticket_step_start_failed'),
+    { code: started?.code ?? 'ticket_step_start_failed', physicalDispatch: false })
+  let answer
+  try {
+    answer = await readModel(ctx, { route, system: request.system,
+      prompt: request.prompt, maxTokens, signal, pluginForm: 'case-run', outputLimitBytes: 8192 })
+  } catch (error) {
+    if (error !== null && typeof error === 'object') error.physicalDispatch = true
+    throw error
+  }
+  const tokens = answer.tokensKnown === true && Number.isSafeInteger(answer.tokens) ? answer.tokens : null
+  const saved = engine.ticketStepComplete({ ticket, stepKey: request.stepKey, requestHash,
+    text: answer.output, truncated: answer.truncated === true, tokens })
+  if (saved?.ok !== true) throw Object.assign(new Error(saved?.code ?? 'ticket_checkpoint_failed'),
+    { code: saved?.code ?? 'ticket_checkpoint_failed' })
+  return { text: answer.output, tokens, truncated: answer.truncated === true, ticket, physicalDispatch: true }
 }
 
 export const name = 'mse-learning'
@@ -94,6 +147,13 @@ async function drainProviderStream(iterator) {
   } catch { return false }
 }
 /** The one registered lifecycle pack both model tracks are bound to. */
+/**
+ * The release-default domain NAME, kept for compatibility callers only.
+ *
+ * It is deliberately NOT used to select a domain any more: `applicablePack` asks every registered
+ * pack's own predicate, so an ordinary development method is never silently attributed to this one.
+ * Nothing in the automatic path reads this constant.
+ */
 const LIFECYCLE_PACK_ID = 'mse-lifecycle-v1'
 /**
  * The text the domain predicate reads for one method: the same words the core reads, so the
@@ -270,8 +330,9 @@ export function apply(ctx, config = {}) {
     autoScheduled = true
     Promise.resolve().then(async () => {
       try {
-        const pack = getDomainPack(LIFECYCLE_PACK_ID)
-        if (pack === undefined) return
+        // A REGISTERED pack must exist for the paid tracks; the scan selects the applicable one per
+        // method itself, so this is only the "is the registry usable at all" gate.
+        if (listDomainPacks().length === 0) return
         // ONE preparation for every wake-up; the scan itself re-checks every permission per step.
         const candidates = await loadAutoFeedRows()
         await automation.scan(candidates)
@@ -454,6 +515,28 @@ export function apply(ctx, config = {}) {
       // `effective.autoValidation` states the three conditions a run really needs, so a switched-on
       // setting that cannot run says WHY instead of looking idle: the switch, a trusted route, and
       // a budget that is not zero.
+      // THE ONE LABEL an operator reads first. It answers "is the automatic path doing anything, and
+      // if not, WHICH thing is it waiting for" instead of leaving a switched-on-but-idle card to be
+      // interpreted. `awaiting_validator_evidence` is the honest state for ordinary development
+      // experience that has no official scenario and no registered checker yet: the candidate exists,
+      // nothing is charged, and real task evidence (or a checker) is what moves it.
+      autoState: (() => {
+        if (current.length > 0) return 'disabled'
+        if (!p.autoValidationEnabled) return 'off'
+        if (p.evaluationTokensPerDay <= 0 || p.evaluationCallsPerDay <= 0) return 'budget_exhausted'
+        const paid = (() => { try { return engine.status() } catch { return null } })()
+        if (paid?.evaluationUnknown24h > 0) return 'cost_unknown'
+        if (paid?.evaluationTokensReserved24h >= p.evaluationTokensPerDay
+          || paid?.evaluationCallsLast24h >= p.evaluationCallsPerDay) return 'waiting_budget'
+        const last = automation.status()
+        if ((last.registeredChecker ?? 0) > 0) return 'checker_settled'
+        if ((last.waitingValidator ?? 0) > 0) return 'awaiting_validator_evidence'
+        if (!autoRoutesReady() && !(p.verificationSessionId !== '' && backfillRoute !== null)) {
+          return 'awaiting_source'
+        }
+        if (jobs.status().running > 0) return 'working'
+        return 'idle_ready'
+      })(),
       effective: { learning: current.length === 0, reflection: current.length === 0 && p.reflectionEnabled,
         // A run can be authorised when the work ALREADY carries its route: the plans the queue holds
         // are the authority, not a process-wide "last observed" value. A cold start therefore
@@ -467,6 +550,49 @@ export function apply(ctx, config = {}) {
         reasons: [...current], legacyOwner, disposed },
       budget: { turnBytes: p.maxContextBytes, sessionBytes: 1536, maxLessons: 2, storeCap: null,
         evaluationTokensPerDay: p.evaluationTokensPerDay, evaluationCallsPerDay: p.evaluationCallsPerDay },
+      // THE PAID BUDGET, STATED EXACTLY. The operator chose "20 000 tokens / at most 2 tasks a day",
+      // and a card that just repeated the limit would hide three things that matter:
+      //   • BOTH paid tracks count against it — a model review and an objective evaluation are both
+      //     `review`/`evaluation` spends, and both are in this window;
+      //   • it is a ROLLING 24-hour window, not a calendar day, so the allowance frees itself
+      //     continuously instead of at midnight;
+      //   • `tokensReserved` is a FLOOR (a reservation raised by whatever the provider really
+      //     reported), `tokensKnown` is what was actually measured, and `tasksUnknown` counts the
+      //     attempts that carried at least one UNREADABLE step. Showing the floor alone would claim a
+      //     precision the run may not have; showing the measured part alone would understate what is
+      //     already committed. Neither is presented as an exact actual when a step was unreadable.
+      paidBudget: (() => {
+        let status = null
+        try { status = engine.status() } catch { status = null }
+        const reserved = Number.isSafeInteger(status?.evaluationTokensReserved24h)
+          ? status.evaluationTokensReserved24h : null
+        const known = Number.isSafeInteger(status?.evaluationTokensKnown24h)
+          ? status.evaluationTokensKnown24h : null
+        const calls = Number.isSafeInteger(status?.evaluationCallsLast24h)
+          ? status.evaluationCallsLast24h : null
+        const requests = Number.isSafeInteger(status?.evaluationRequestsLast24h)
+          ? status.evaluationRequestsLast24h : null
+        const unknown = Number.isSafeInteger(status?.evaluationUnknown24h)
+          ? status.evaluationUnknown24h : null
+        const jobsOpen = Number.isSafeInteger(status?.evaluationJobsOpen) ? status.evaluationJobsOpen : null
+        const nextAvailableAt = Number.isFinite(status?.evaluationNextAvailableAt)
+          ? status.evaluationNextAvailableAt : null
+        const budgetState = unknown === null ? 'unavailable' : unknown > 0 ? 'cost_unknown'
+          : (reserved !== null && reserved >= p.evaluationTokensPerDay)
+            || (calls !== null && calls >= p.evaluationCallsPerDay) ? 'waiting_budget'
+            : jobsOpen > 0 ? 'running' : 'ready'
+        return { state: budgetState, window: 'rolling_24h', coversTasks: ['model_review', 'objective_evaluation'],
+          tokensPerDay: p.evaluationTokensPerDay, callsPerDay: p.evaluationCallsPerDay,
+          tokensReserved: reserved, tokensKnown: known, callsUsed: calls, requestsUsed: requests, tasksUnknown: unknown,
+          jobsOpen, nextAvailableAt,
+          // `known: true` means every paid attempt in this window reported a readable measurement, so
+          // the measured total can be presented as an actual. `null` on any field means the core could
+          // not answer — reported as unknown, never as a zero.
+          known: reserved === null ? null : (unknown === 0),
+          remainingTokens: reserved === null ? null
+            : Math.max(0, p.evaluationTokensPerDay - reserved),
+          remainingCalls: calls === null ? null : Math.max(0, p.evaluationCallsPerDay - calls) }
+      })(),
       review, settlement, jobs: jobs.status(),
       // The durable pause the user asked for, and — if the control write has not been confirmed —
       // the exact pending fact. The settings document being saved is not this confirmation.
@@ -776,15 +902,53 @@ export function apply(ctx, config = {}) {
    * "no scenario yet".
    */
   const reviewAdmission = lesson => {
-    const pack = getDomainPack(LIFECYCLE_PACK_ID)
-    if (pack === undefined) return { ok: false, reason: 'domain_pack_unknown' }
-    const admission = packAdmits(pack.packId, methodDomainText(lesson))
-    return admission.ok ? { ok: true, packId: pack.packId, version: pack.version }
-      : { ok: false, reason: admission.reason ?? `outside_${pack.packId}` }
+    const selection = applicablePack(lesson)
+    if (selection.pack === null) {
+      // NO registered pack admits this method. That is a FIRST-CLASS state, not an error and not a
+      // silent attribution to a foreign domain: an ordinary development method has no official
+      // scenario here, so the paid tracks are not offered for it. Its own automatic path is the
+      // registered checker (when the method carries one) or waiting for applicable real task
+      // evidence — see `noValidatorCode` below. Naming the lifecycle pack anyway is exactly the
+      // hardcoded bottleneck this replaces.
+      return { ok: false, reason: selection.reason }
+    }
+    return { ok: true, packId: selection.pack.packId, version: selection.pack.version }
   }
+  /**
+   * WHICH registered pack admits this method — asked of every registered pack's OWN predicate.
+   *
+   * With one pack registered the answer for a lifecycle method is the same as before; the difference
+   * is that the code no longer NAMES that pack, so a second registered domain (or a method that
+   * belongs to none) is handled by the registry rather than by an assumption. The reason names the
+   * refusal the predicate really produced (`domain_forbidden:排序`, `domain_terms_insufficient:1`,
+   * …), and `no_pack_registered` is kept distinct from `outside_*` so a caller can tell a broken
+   * registry from a method that simply has no applicable validator.
+   */
+  const applicablePack = lesson => {
+    const text = methodDomainText(lesson)
+    const registered = listDomainPacks().map(row => getDomainPack(row.packId)).filter(Boolean)
+    if (registered.length === 0) return { pack: null, reason: 'no_pack_registered' }
+    let first = null
+    for (const pack of registered) {
+      const admission = packAdmits(pack.packId, text)
+      if (admission.ok) return { pack, reason: null }
+      if (first === null) first = { pack: pack.packId, reason: admission.reason ?? `outside_${pack.packId}` }
+    }
+    return { pack: null, reason: `no_applicable_pack:${first?.reason ?? 'unknown'}` }
+  }
+  /**
+   * The readable reason an ordinary (non-domain) candidate is WAITING, never an error.
+   *
+   * It is reported by the scan and surfaced in the effective state, so "this device has no validator
+   * for that kind of experience yet" is visible instead of looking like a failure, a stuck queue or a
+   * finished job. Nothing is promoted from this state: the only things that can move it are a
+   * registered checker (zero-cost, objective) or real task evidence the host really produced.
+   */
+  const NO_VALIDATOR_REASON = 'waiting_validator_evidence'
   const reviewContextFor = lesson => {
-    const pack = getDomainPack(LIFECYCLE_PACK_ID)
-    if (pack === undefined || typeof lesson?.instruction !== 'string' || lesson.instruction.trim() === '') return null
+    const selection = applicablePack(lesson)
+    const pack = selection.pack
+    if (pack === null || typeof lesson?.instruction !== 'string' || lesson.instruction.trim() === '') return null
     // Domain admission FIRST: an unrelated method never reaches a scenario, so the "if the method is
     // unrelated, just answer normally" prompt can never manufacture an aligned review for a sorting
     // or cooking method that the pack explicitly does not cover.
@@ -833,6 +997,67 @@ export function apply(ctx, config = {}) {
       scenario, arm, judge, shortAnswersAllowed }
   }
   /**
+   * Settle ONE candidate with its OWN registered checker, if it has one.
+   *
+   * This is the first thing the automatic pass tries for a candidate whose domain has no official
+   * scenario, and it is deliberately the EXISTING engine call (`evaluateRegistered`) rather than a
+   * second evidence path: the method's frozen fixtures decide, the adapter contributes nothing but
+   * the lesson identity, and the run costs no model call, no provider request and no budget.
+   *
+   * The three answers are deliberately distinct, because the caller must treat them differently:
+   *   • `{ ok: true, attempted: true, state: 'accepted' | '' }` — the checker really ran; the state is
+   *     the CORE's own decision and this side never upgrades it;
+   *   • `{ ok: false, attempted: true, code }` — the checker ran and refused (or reported a bounded
+   *     reason): a terminal fact about this edition, never retried as a paid review;
+   *   • `{ ok: false, attempted: false, code: 'no_registered_checker' }` — this method carries no
+   *     registered checker, so the caller falls through to the domain path.
+   */
+  const registeredCheckFor = lesson => {
+    if (lesson === undefined || lesson === null) return { ok: false, attempted: false, code: 'no_registered_checker' }
+    const methodId = lesson.methodId
+    if (typeof methodId !== 'string' || methodId === '') {
+      return { ok: false, attempted: false, code: 'no_registered_checker' }
+    }
+    // The SAME identity shape the manual registered path uses: a project key only when the lesson
+    // really carries one, and the adapter's own environment id. Spreading a scope OBJECT (never a raw
+    // string) is what keeps the core's `findLesson` able to resolve the edition.
+    const scope = typeof lesson.projectKey === 'string' && lesson.projectKey !== ''
+      ? { projectKey: lesson.projectKey } : {}
+    const environment = environmentId === undefined ? {} : { environmentId }
+    let outcome = null
+    try {
+      outcome = engine.evaluateRegistered({ lessonId: lesson.id, expectedVersion: lesson.version,
+        ...scope, ...environment })
+    } catch (error) {
+      return { ok: false, attempted: true, code: typeof error?.code === 'string' ? error.code : 'registered_check_failed' }
+    }
+    if (outcome?.ok !== true) {
+      return { ok: false, attempted: true, code: typeof outcome?.code === 'string' ? outcome.code : 'evaluation_incomplete' }
+    }
+    const decision = typeof outcome.decision === 'string' ? outcome.decision : ''
+    return { ok: decision === 'accepted', attempted: true, state: decision, code: null,
+      lessonId: lesson.id, version: outcome.version ?? lesson.version }
+  }
+  /**
+   * Grant the bounded EVIDENCE TRIAL for one ordinary candidate, through the core's own decision.
+   *
+   * It is a thin wrapper on purpose: the core decides whether the row has a real basis (independent
+   * host-observed failures in its own scope/environment), refuses it when an official domain or a
+   * registered checker already covers it, and stores the licence. This layer contributes the lesson
+   * identity and nothing else — no reason, no revision, no status.
+   */
+  const evidenceTrialFor = lesson => {
+    if (lesson === undefined || lesson === null) return { ok: false, code: 'lesson_unavailable' }
+    const scope = typeof lesson.projectKey === 'string' && lesson.projectKey !== ''
+      ? { projectKey: lesson.projectKey } : {}
+    const environment = environmentId === undefined ? {} : { environmentId }
+    const answer = engine.grantEvidenceTrial({ lessonId: lesson.id, expectedVersion: lesson.version,
+      ...scope, ...environment })
+    return answer?.ok === true
+      ? { ok: true, duplicate: answer.duplicate === true, note: answer.note ?? 'reference_only_unverified' }
+      : { ok: false, code: typeof answer?.code === 'string' ? answer.code : 'evidence_trial_unavailable' }
+  }
+  /**
    * The objective half of the scheduler: the pack's frozen cases plus the two arm prompts.
    *
    * The adapter contributes PROMPTS and the lesson's own text; the expected values, the scoring and
@@ -842,8 +1067,9 @@ export function apply(ctx, config = {}) {
    */
   const objectiveContextFor = lesson => {
     if (lesson === undefined || lesson === null || typeof lesson.instruction !== 'string') return null
-    const pack = getDomainPack(LIFECYCLE_PACK_ID)
-    if (pack === undefined || !packAdmits(pack.packId, methodDomainText(lesson)).ok) return null
+    const selection = applicablePack(lesson)
+    const pack = selection.pack
+    if (pack === null || !packAdmits(pack.packId, methodDomainText(lesson)).ok) return null
     const cases = packCases(pack.packId)
     return {
       packId: pack.packId, suiteId: packSuiteId(pack), cases,
@@ -888,6 +1114,8 @@ export function apply(ctx, config = {}) {
     // method must say WHICH domain refused it instead of looking like a fixture that is still being
     // prepared. It is read before any reservation, so the refusal costs no call.
     reviewAdmission,
+    registeredCheck: registeredCheckFor,
+    evidenceTrial: evidenceTrialFor,
     objectiveContext: objectiveContextFor,
     source: sourceFor,
     // The foreground (a user turn or a manual job) always wins: the automatic queue yields while one
@@ -959,27 +1187,8 @@ export function apply(ctx, config = {}) {
     // the plans that already carry a route, and an item that has none stays parked with a reason
     // instead of borrowing whatever session happened to run last.
     route: ({ source } = {}) => source?.route ?? null,
-    callModel: async (request, ticket) => {
-      // The route the PLAN was registered with wins; the last observed route is only a fallback for
-      // a caller that has no plan. A historical item therefore cannot ride another project's model.
-      const route = request?.route ?? observedRoute
-      if (route === null || route === undefined) throw Object.assign(new Error('review_no_route'), { code: 'review_no_route' })
-      // The scheduler's own signal joins the lifetime signal: a timeout must really cancel the
-      // provider call, not just stop waiting for it.
-      const signal = request?.signal === undefined
-        ? lifetime.signal : AbortSignal.any([lifetime.signal, request.signal])
-      // NO second lock: the automatic plan already HOLDS the host's single job slot (it runs inside
-      // `jobs.run`), so wrapping the provider call in `withPhysicalSlot` both duplicated the
-      // serialisation and made `providerBusy()` true inside our own run — the scheduler then refused
-      // itself with `review_yielded` and issued zero model calls.
-      const answer = await readModel(ctx, { route, system: request.system,
-        prompt: request.prompt, maxTokens: request.maxTokens ?? 512, signal })
-      // `null` travels: an unreported measurement must reach the pack as unknown, never as a zero
-      // that makes an unknown-cost pair look measured.
-      return { text: answer.output,
-        tokens: answer.tokensKnown === true && Number.isSafeInteger(answer.tokens) ? answer.tokens : null,
-        truncated: answer.truncated === true, ticket }
-    },
+    callModel: (request, ticket) => callEvaluationModel({ engine, ctx, lifetime },
+      { ...request, route: request?.route ?? observedRoute }, ticket),
     // The operator switch and the legacy owner are re-read before EVERY paid step, so closing the
     // switch stops the next call rather than the one after it.
     enabled: () => !disposed && sync().length === 0 && readPolicy().autoValidationEnabled === true,

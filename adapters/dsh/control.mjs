@@ -83,7 +83,8 @@ function markRemote(Class, method) {
  * Returns `tokens: null` — never `0` — when the provider reported no usage: an unmeasured call
  * is not a free one, and the caller is required to decide what to charge for it.
  */
-export async function readModel(ctx, { route, system, prompt, maxTokens, signal, pluginForm = 'instructions' }) {
+export async function readModel(ctx, { route, system, prompt, maxTokens, signal, pluginForm = 'instructions',
+  outputLimitBytes = 65_536 }) {
   const controller = new AbortController()
   const forward = () => controller.abort()
   signal?.addEventListener('abort', forward, { once: true })
@@ -111,7 +112,7 @@ function modelFailure(code, usage) {
       for await (const chunk of ctx.llm.stream(options)) {
         if (chunk.type === 'text-delta') {
           output += chunk.text
-          if (Buffer.byteLength(output) > 65_536) throw modelFailure('output_too_large', usage)
+          if (Buffer.byteLength(output) > outputLimitBytes) throw modelFailure('output_too_large', usage)
         } else if (chunk.type === 'usage') {
           usage = chunk.usage ?? null
         } else if (chunk.type === 'finish') {

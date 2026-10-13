@@ -120,7 +120,8 @@ const lifecycleAnswer = ({ prompt, system }) => {
   return fixed
 }
 
-function chain({ answer = lifecycleAnswer, tokens = 20_000, calls = 3, archived = false, emit = () => {} } = {}) {
+function chain({ answer = lifecycleAnswer, tokens = 20_000, calls = 3, archived = false, emit = () => {},
+  omitBudgetFields = false } = {}) {
   const stateRoot = mkdtempSync(join(tmpdir(), 'mse-chain-'))
   const host = hostContext(stateRoot, { answer })
   // The host's own directory services, present BEFORE the plugin loads (the plugin reads them at
@@ -136,17 +137,36 @@ function chain({ answer = lifecycleAnswer, tokens = 20_000, calls = 3, archived 
   // reviewing a task that already happened. Nothing here borrows a route the host did not name.
   const config = { enabled: true, reflectionEnabled: false, autoValidationEnabled: true,
     verificationSessionId: SESSION, maxContextBytes: 768,
-    evaluationTokensPerDay: tokens, evaluationCallsPerDay: calls }
+    ...(omitBudgetFields ? {} : { evaluationTokensPerDay: tokens, evaluationCallsPerDay: calls }) }
   apply(host.ctx, config)
   const service = host.services.get('mseLearning')
   assert.ok(service, 'the plugin must provide its service')
   // The plugin built its own engine on the host path; a second engine on the same root is the
   // read-back view (exactly what a restart of the plugin would do).
   const reader = new LearningEngine({ stateRoot, adapterId: 'dsh', maxContextBytes: 768,
-    evaluationTokensPerDay: tokens, evaluationCallsPerDay: calls })
+    ...(omitBudgetFields ? {} : { evaluationTokensPerDay: tokens, evaluationCallsPerDay: calls }) })
   return { ...host, stateRoot, service, reader,
     cleanup: () => rmSync(stateRoot, { recursive: true, force: true }) }
 }
+
+test('legacy missing budgets remain fail-closed, and explicit zero/custom values survive settings reads', () => {
+  const missing = chain({ omitBudgetFields: true })
+  try {
+    const settings = missing.service.settings()
+    assert.equal(settings.user.evaluationTokensPerDay, 0)
+    assert.equal(settings.user.evaluationCallsPerDay, 2)
+    assert.equal(settings.effective.autoValidation, false)
+  } finally { missing.cleanup() }
+
+  for (const [tokens, calls] of [[0, 0], [12_345, 7]]) {
+    const configured = chain({ tokens, calls })
+    try {
+      const settings = configured.service.settings()
+      assert.equal(settings.user.evaluationTokensPerDay, tokens)
+      assert.equal(settings.user.evaluationCallsPerDay, calls)
+    } finally { configured.cleanup() }
+  }
+})
 
 const method = (engine, instruction) => {
   const recorded = engine.record({ projectKey: PROJECT, source: 'host_proposal', kind: 'method',
@@ -300,7 +320,8 @@ test('the plugin wakes up, retires an expired licence and buys no renewal withou
       suite: { packId: PACK_ID, version: 1 }, criteria: packCases(PACK_ID)[0].criteria }).plan
     const caseId = packCases(PACK_ID)[0].caseId
     const reserved = past.reviewRequest({ lessonId: lesson.id, projectKey: PROJECT, expectedVersion: lesson.version,
-      maxTokens: 4_000, planHash: plan.planHash, queueKey: plan.queueKey, packId: PACK_ID, caseId,
+      maxTokens: 4_000, steps: 4, inputChars: 1, stepOutputTokens: 1,
+      planHash: plan.planHash, queueKey: plan.queueKey, packId: PACK_ID, caseId,
       scenarioHash: packScenarioHash(PACK_ID, caseId), criteriaHash: packCaseCriteriaHash(PACK_ID, caseId),
       criteria: packCases(PACK_ID)[0].criteria })
     assert.ok(reserved.ticket, 'the fixture must really reserve the review')
@@ -486,7 +507,8 @@ test('a listing that started before a new session appeared can never stop it', a
       suite: { packId: PACK_ID, version: 1 }, criteria: packCases(PACK_ID)[0].criteria }).plan
     const caseId = packCases(PACK_ID)[0].caseId
     const reserved = c.reader.reviewRequest({ lessonId: lesson.id, projectKey: PROJECT, expectedVersion: lesson.version,
-      maxTokens: 4_000, planHash: plan.planHash, queueKey: plan.queueKey, packId: PACK_ID, caseId,
+      maxTokens: 4_000, steps: 4, inputChars: 1, stepOutputTokens: 1,
+      planHash: plan.planHash, queueKey: plan.queueKey, packId: PACK_ID, caseId,
       scenarioHash: packScenarioHash(PACK_ID, caseId), criteriaHash: packCaseCriteriaHash(PACK_ID, caseId),
       criteria: packCases(PACK_ID)[0].criteria })
     assert.ok(reserved.ticket)

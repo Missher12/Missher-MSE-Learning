@@ -260,11 +260,62 @@ function pruneState(state, now) {
   for (const job of state.jobs) {
     if (job.expiresAt > now) continue
     const debit = state.spends.find(row => row.ticket === job.ticket)
-    if (debit !== undefined && debit.terminal === undefined) debit.terminal = 'ticket_expired'
+    const plan = (state.autoPlans ?? []).find(row => row.queueKey === job.queueKey && row.planHash === job.planHash)
+    const pending = job.stepReservations?.some(row => row.dispatched === true && row.completed !== true)
+    if (pending) {
+      if (debit !== undefined) {
+        recordTicketCost(state, job.ticket, debit.tokens, { known: false, tokens: debit.usage?.tokens ?? 0 })
+        debit.terminal = 'ticket_usage_unknown'; debit.terminalAt = now
+      }
+      if (plan) { plan.stage = 'blocked'; plan.reason = 'ticket_usage_unknown'; plan.ticket = null; plan.updatedAt = now }
+    } else if (plan && Array.isArray(plan.progress?.steps) && plan.progress.steps.length > 0) {
+      if (debit !== undefined && debit.terminal === undefined) {
+        debit.terminal = 'ticket_expired'; debit.terminalAt = now
+      }
+      plan.stage = 'queued'; plan.reason = 'budget_window_wait'; plan.ticket = null; plan.updatedAt = now
+    } else if (debit !== undefined && debit.terminal === undefined) {
+      debit.terminal = 'ticket_expired'; debit.terminalAt = now
+    }
   }
   state.jobs = state.jobs.filter(x => x.expiresAt > now)
-  state.spends = state.spends.filter(x => x.at > now - DAY)
+  const liveTickets = new Set((state.jobs ?? []).map(job => job.ticket))
+  state.spends = state.spends.filter(x => x.at > now - DAY || liveTickets.has(x.ticket)
+    || (Number.isFinite(x.terminalAt) && x.terminalAt > now - DAY))
+  for (const row of state.spends) if (Array.isArray(row.budgetEntries)) {
+    row.budgetEntries = row.budgetEntries.filter(entry => entry.at > now - DAY)
+  }
   return state
+}
+
+function budgetTokens(row, now) {
+  if (Array.isArray(row.budgetEntries)) return row.budgetEntries
+    .filter(entry => entry.at > now - DAY).reduce((sum, entry) => sum + entry.tokens, 0)
+  return row.at > now - DAY ? row.tokens : 0
+}
+
+function budgetCalls(rows, now) {
+  const cutoff = now - DAY
+  // One logical ticket is one task in the rolling window if it dispatched at least one physical
+  // step there. A cross-window resume counts once in the new window; multiple steps on that ticket
+  // still count once. Legacy rows without per-step entries keep their historical attempt timestamp.
+  return rows.filter(row => Array.isArray(row.budgetEntries)
+    ? row.budgetEntries.some(entry => entry.dispatched === true && entry.at > cutoff)
+    : row.at > cutoff).length
+}
+
+function budgetRequests(rows, now) {
+  const cutoff = now - DAY
+  return rows.reduce((total, row) => total + (Array.isArray(row.budgetEntries)
+    ? row.budgetEntries.filter(entry => entry.dispatched === true && entry.at > cutoff).length
+    : (row.at > cutoff ? 1 : 0)), 0)
+}
+
+function budgetNextAt(rows, now) {
+  const cutoff = now - DAY
+  const entries = rows.flatMap(row => Array.isArray(row.budgetEntries)
+    ? row.budgetEntries.filter(entry => entry.at > cutoff && entry.dispatched === true)
+    : (row.at > cutoff ? [{ at: row.at }] : []))
+  return entries.length ? Math.min(...entries.map(entry => entry.at + DAY)) : null
 }
 
 /**
@@ -848,6 +899,13 @@ function recordTicketCost(state, ticket, spent, usage) {
     debit.usage = { known: prior.known === true && report.known === true,
       tokens: Math.max(Number.isSafeInteger(prior.tokens) ? prior.tokens : 0, report.tokens) }
   }
+  if (Array.isArray(debit.budgetEntries) && debit.tokens > 0) {
+    const initial = debit.budgetEntries.find(row => row.stepKey === '__initial__')
+    if (initial !== undefined) {
+      const stepFloor = debit.budgetEntries.filter(row => row !== initial).reduce((sum, row) => sum + row.tokens, 0)
+      initial.tokens = Math.max(initial.tokens, debit.tokens - stepFloor)
+    }
+  }
   return debit
 }
 
@@ -857,7 +915,10 @@ function recordTicketCost(state, ticket, spent, usage) {
 function recordTicketTerminal(state, ticket, spent, terminal, usage) {
   const debit = recordTicketCost(state, ticket, spent, usage)
   if (debit === null) return null
-  if (debit.terminal === undefined && typeof terminal === 'string') debit.terminal = terminal
+  if (debit.terminal === undefined && typeof terminal === 'string') {
+    debit.terminal = terminal
+    debit.terminalAt = Date.now()
+  }
   return debit
 }
 
@@ -1433,7 +1494,14 @@ function validateState(state) {
       && Array.isArray(state.jobs) && state.jobs.length <= 32
       && Array.isArray(state.spends) && state.spends.length <= 128, 'invalid_store')
     for (const s of state.spends) check(Number.isFinite(s.at) && ['reflection', 'evaluation', 'review'].includes(s.kind)
-      && Number.isSafeInteger(s.tokens) && s.tokens >= 0, 'invalid_store')
+      && Number.isSafeInteger(s.tokens) && s.tokens >= 0
+      && (s.budgetEntries === undefined || (Array.isArray(s.budgetEntries) && s.budgetEntries.length <= 38
+        && s.budgetEntries.every(row => isPlainObject(row) && Number.isFinite(row.at)
+          && Number.isSafeInteger(row.tokens) && row.tokens >= 0 && boundedLabel(row.stepKey, 96)
+          && (row.measuredTokens === undefined || row.measuredTokens === null
+            || (Number.isSafeInteger(row.measuredTokens) && row.measuredTokens >= 0))
+          && (row.known === undefined || row.known === null || typeof row.known === 'boolean')
+          && (row.dispatched === undefined || typeof row.dispatched === 'boolean')))), 'invalid_store')
     for (const l of state.lessons) {
       check(typeof l.hypothesis === 'string' && /^[a-f0-9]{64}$/u.test(l.hypothesis), 'invalid_store')
       check(l.methodId === null || typeof l.methodId === 'string', 'invalid_store')
@@ -1546,6 +1614,16 @@ const RENEWAL_STATES = Object.freeze(['waiting_evidence', 'authorised', 'consume
  */
 const RENEWAL_EVIDENCE_MAX = 8
 /**
+ * The largest output/reasoning budget ONE paid step may reserve.
+ *
+ * It exists so a caller cannot state an unbounded output (which no cap could reserve for) and cannot
+ * quietly widen its own plan. A host that cannot enforce an output ceiling at all reports
+ * `output_cap_unsupported` and the run WAITS rather than overrunning the operator's allowance.
+ */
+const MAX_STEP_OUTPUT_TOKENS = 4096
+/** The released review plan: two arms and two swapped judge passes. */
+const DEFAULT_REVIEW_STEPS = 4
+/**
  * How many paid renewal attempts ONE expired licence may sign.
  *
  * A renewal that fails (an unknown cost, an abstention, a provider error) has consumed the evidence
@@ -1555,10 +1633,73 @@ const RENEWAL_EVIDENCE_MAX = 8
  * turn, version or dedupe escape.
  */
 const MAX_RENEWAL_ATTEMPTS = 3
+/** The bounded integer a stored licence may carry, or 0 when it carries none. */
+const boundedInt = value => Number.isSafeInteger(value) && value >= 0 ? value : 0
+
+/**
+ * The token floor ONE bounded paid plan must reserve, or the reason it cannot be proved.
+ *
+ * The daily allowance the operator chose is a CAP ON WHAT MAY BE SPENT, and a reservation that only
+ * covers "roughly one step" is not a cap: the run would exceed it and the system would be relying on a
+ * post-hoc refusal to notice. So a paid request must state a reservation that covers the WHOLE plan it
+ * is about to run, and the core checks that claim against the material it really holds:
+ *
+ *   • every step's complete serialized input is bounded by `inputChars` UTF-8 bytes plus a fixed
+ *     provider-envelope allowance included by the adapter; for byte-based tokenizers this bounds
+ *     prompt tokens, unlike a Unicode character count;
+ *   • every step may produce at most its own `maxTokens` of output/reasoning;
+ *   • a plan with `steps` steps therefore needs `steps * (inputChars + maxTokens)` reserved.
+ *
+ * A caller that cannot bound its own plan is refused with `usage_unprovable` instead of being trusted,
+ * and a reservation below the floor is refused with `reservation_insufficient`. Both are accurate
+ * BLOCKS: the run waits, nothing is sent, and no allowance is silently overspent.
+ */
+function planReservationFloor({ steps, inputChars, maxTokens }) {
+  if (!Number.isSafeInteger(steps) || steps <= 0) return { ok: false, code: 'usage_unprovable' }
+  if (!Number.isSafeInteger(inputChars) || inputChars <= 0) return { ok: false, code: 'usage_unprovable' }
+  if (!Number.isSafeInteger(maxTokens) || maxTokens <= 0) return { ok: false, code: 'usage_unprovable' }
+  // The host's own output/reasoning ceiling is REQUIRED, not optional: an unbounded step cannot be
+  // reserved for at all.
+  if (maxTokens > MAX_STEP_OUTPUT_TOKENS) return { ok: false, code: 'output_cap_unsupported' }
+  return { ok: true, floor: steps * (inputChars + maxTokens), steps, inputChars, maxTokens }
+}
+
+/** The bounding evidence revision for one lesson, or `null` when it has none. Read-only. */
+function evidenceRevisionOf(state, owner, lesson) {
+  const live = evidenceOf(state, owner, lesson)
+  if (live.snapshot.length === 0) return null
+  return live.snapshot.reduce((high, item) => Math.max(high, item.revision), 0)
+}
+
+/** The SAME admission `independentEvidenceOf` applies, read through ONE name for both call sites. */
+function evidenceOf(state, owner, lesson) {
+  return independentEvidenceOf(state, owner, lesson)
+}
+
+/** The bounded answer for a licence that is already live. Never a write. */
+function duplicateTrial(lesson, trial) {
+  return { ok: true, duplicate: true, lessonId: lesson.id, version: lesson.version, trial: 'trial',
+    note: trial.note ?? 'reference_only_unverified',
+    evidenceRevision: Number.isSafeInteger(trial.evidenceRevision) ? trial.evidenceRevision : null }
+}
+
 function trialRowValid(row) {
   return isPlainObject(row) && Object.keys(row).every(key => ['state', 'at', 'reason', 'planHash', 'note',
-    'packId', 'packVersion', 'epoch'].includes(key))
-    && ['trial', 'withdrawn'].includes(row.state) && Number.isFinite(row.at)
+    'packId', 'packVersion', 'epoch', 'kind', 'evidenceRevision', 'evidence'].includes(key))
+    // `expired` is the ONE terminal state an EVIDENCE licence may reach by itself (same evidence, one
+    // trial); a review licence keeps its released states, and a withdrawal keeps its own.
+    && (['trial', 'withdrawn'].includes(row.state)
+      || (row.state === 'expired' && row.kind === 'evidence')) && Number.isFinite(row.at)
+    // `kind: 'evidence'` marks the bounded EVIDENCE trial: it was granted from real host-observed
+    // failures rather than bought with a model review, so it must carry that basis and nothing else —
+    // a bounded revision plus at most RENEWAL_EVIDENCE_MAX problem identities, exactly the shape the
+    // review path already stores for its own evidence watermark.
+    && (row.kind === undefined || row.kind === 'evidence')
+    && (row.kind !== 'evidence' || (Number.isSafeInteger(row.evidenceRevision) && row.evidenceRevision >= 0
+      && row.planHash === undefined
+      && Array.isArray(row.evidence) && row.evidence.length <= RENEWAL_EVIDENCE_MAX
+      && row.evidence.every(item => isPlainObject(item) && hex64(item.problemId)
+        && Number.isSafeInteger(item.revision) && item.revision >= 0)))
     && (row.reason === undefined || row.reason === null || boundedLabel(row.reason, 64))
     && (row.planHash === undefined || hex64(row.planHash))
     && (row.note === undefined || row.note === 'reference_only_unverified')
@@ -1706,6 +1847,12 @@ function renewalAdmits(lesson) {
 function trialLicenceExpired(lesson, now) {
   if (lesson.kind !== 'method' || lesson.status === 'suspended' || lesson.status === 'validated') return false
   const trial = lesson.trial
+  // ONLY a trial the REVIEW track granted takes part in the renewal machinery: that licence exists
+  // because a paid model review was bought, and its expiry is what opens a renewal window. A bounded
+  // EVIDENCE trial (granted from real host-observed failures, `kind: 'evidence'`) is a different
+  // instrument: when it expires the row simply stops being offered, and nothing should be queued for
+  // a promotion that nobody earned.
+  if (isPlainObject(trial) && trial.kind === 'evidence') return false
   return isPlainObject(trial) && trial.state === 'trial' && Number.isFinite(trial.at)
     && trial.at + TRIAL_TTL_MS <= now
 }
@@ -1965,7 +2112,7 @@ function autoPlanRowValid(row) {
   return isPlainObject(row) && Object.keys(row).every(key => ['queueKey', 'planHash', 'lessonId', 'version', 'environment',
     'track', 'stage', 'evidence', 'source', 'ticket', 'generation', 'attempts', 'maxAttempts', 'nextAttemptAt',
     'reason', 'updatedAt', 'sourceBinding', 'packId', 'packVersion', 'caseId', 'scenarioHash',
-    'criteriaHash', 'attempt'].includes(key))
+    'criteriaHash', 'attempt', 'progress'].includes(key))
     && hex64(row.queueKey) && hex64(row.planHash)
     // Stage 4c: the optional published SOURCE IDENTITY a bound registration froze. It is bounded to
     // the two scalars it is made of, so a stored plan can never carry an unbounded or unknown row.
@@ -1978,6 +2125,16 @@ function autoPlanRowValid(row) {
       && Number.isSafeInteger(row.attempt.revision) && row.attempt.revision >= 1
       && hex64(row.attempt.bindingHash) && boundedLabel(row.attempt.ticket, 64)
       && Number.isFinite(row.attempt.at)))
+    && (row.progress === undefined || (isPlainObject(row.progress)
+      && Object.keys(row.progress).every(key => key === 'steps')
+      && Array.isArray(row.progress.steps) && row.progress.steps.length <= 36
+      && row.progress.steps.every(step => isPlainObject(step)
+        && Object.keys(step).every(key => ['stepKey', 'requestHash', 'text', 'truncated', 'tokens'].includes(key))
+        && boundedLabel(step.stepKey, 96) && hex64(step.requestHash)
+        && typeof step.text === 'string' && Buffer.byteLength(step.text, 'utf8') <= 8192
+        && typeof step.truncated === 'boolean'
+        && (step.tokens === null || (Number.isSafeInteger(step.tokens) && step.tokens >= 0)))
+      && Buffer.byteLength(JSON.stringify(row.progress), 'utf8') <= 300_000))
     && (row.sourceBinding === undefined || (isPlainObject(row.sourceBinding)
       && Object.keys(row.sourceBinding).every(key => key === 'revision' || key === 'bindingHash')
       && Number.isSafeInteger(row.sourceBinding.revision) && row.sourceBinding.revision >= 1
@@ -2010,6 +2167,13 @@ function autoPlanView(plans) {
   const view = new Map()
   for (const plan of plans) view.set(`${plan.lessonId}:${plan.version}`, plan)
   return view
+}
+
+function autoPlanSummary(plan) {
+  if (!isPlainObject(plan)) return plan
+  const { progress, ...summary } = plan
+  void progress
+  return summary
 }
 
 /**
@@ -2325,7 +2489,7 @@ export class LearningEngine {
     check(Number.isSafeInteger(maxLessons) && maxLessons >= 1 && maxLessons <= 2)
     this.budget = maxContextBytes; this.maxLessons = maxLessons; this.now = now
     check(Number.isSafeInteger(evaluationTokensPerDay) && evaluationTokensPerDay >= 0 && evaluationTokensPerDay <= 1_000_000)
-    check(Number.isSafeInteger(evaluationCallsPerDay) && evaluationCallsPerDay >= 0 && evaluationCallsPerDay <= 8)
+    check(Number.isSafeInteger(evaluationCallsPerDay) && evaluationCallsPerDay >= 0 && evaluationCallsPerDay <= 20)
     this.evaluationTokensPerDay = evaluationTokensPerDay; this.evaluationCallsPerDay = evaluationCallsPerDay
     this.store = new LessonStore(stateRoot, hash(JSON.stringify([this.adapter, this.instance])))
   }
@@ -2364,7 +2528,7 @@ export class LearningEngine {
     }
     if (input.evaluationCallsPerDay !== undefined) {
       check(Number.isSafeInteger(input.evaluationCallsPerDay) && input.evaluationCallsPerDay >= 0
-        && input.evaluationCallsPerDay <= 8, 'invalid_evaluation_calls')
+        && input.evaluationCallsPerDay <= 20, 'invalid_evaluation_calls')
       next.evaluationCallsPerDay = input.evaluationCallsPerDay
     }
     Object.assign(this, next)
@@ -2739,7 +2903,26 @@ export class LearningEngine {
       if (trialExpired) diagnostics.trialExpired += 1
       const trialDomain = lesson.trial?.packId === undefined ? null
         : { packId: lesson.trial.packId, version: lesson.trial.packVersion, scope: 'validation_domain_only' }
-      const trialAdmitted = trialDomain === null ? false : domainAdmission(trialDomain, view).ok
+      // ── THE EVIDENCE TRIAL'S OWN BASIS (the one bounded exception to "no domain, no recall") ─────
+      // An ordinary method has no pack, so it could never satisfy the domain rule above — and a
+      // candidate that is never offered can never be used on a real turn, which means the host can
+      // never check it and it waits for ever. The exception is deliberately NARROW, and it is a
+      // different instrument rather than a loosened domain rule:
+      //   • the licence must be `kind: 'evidence'` — granted by `grantEvidenceTrial` from REAL
+      //     host-observed failures, never by a model review (those still carry a pack identity);
+      //   • it must still carry that basis: at least INDEPENDENT_THRESHOLD real failure revision,
+      //     which is the SAME bar the problem ledger uses before it lets a reflection run. A licence
+      //     whose record is missing or below the bar is NOT recallable;
+      //   • nothing else changes: the TTL still ends it, it stays the LOWEST priority, at most one
+      //     trial per turn, its tier is `trial` (never `verified`), and using it proves nothing — only
+      //     a real host check on a real accepted turn can verify the method.
+      // The similarity gate below still decides whether it is applicable at all, so this never turns
+      // an unrelated method into a suggestion.
+      const evidenceTrial = lesson.trial?.kind === 'evidence'
+        && Number.isSafeInteger(lesson.trial.evidenceRevision)
+        && lesson.trial.evidenceRevision >= INDEPENDENT_THRESHOLD
+      const trialAdmitted = evidenceTrial ? true
+        : (trialDomain === null ? false : domainAdmission(trialDomain, view).ok)
       if (lesson.trial?.state === 'trial' && !trialExpired && !trialAdmitted) diagnostics.domainOutside += 1
       const trial = lesson.kind === 'method' && lesson.status !== 'validated'
         && lesson.trial?.state === 'trial' && !trialExpired && trialAdmitted
@@ -3796,8 +3979,28 @@ export class LearningEngine {
       reflectionTokensUnknown24h: (state.spends ?? []).filter(x => x.kind === 'reflection' && x.at > this.now() - DAY
         && x.usage?.known === false).length,
       experiments: state.experiments?.length ?? 0,
-      evaluationTokensReserved24h: (state.spends ?? []).filter(x => PAID_EVALUATION_KINDS.has(x.kind) && x.at > this.now() - DAY).reduce((n, x) => n + x.tokens, 0),
-      evaluationCallsLast24h: (state.spends ?? []).filter(x => PAID_EVALUATION_KINDS.has(x.kind) && x.at > this.now() - DAY).length,
+      evaluationTokensReserved24h: (state.spends ?? []).filter(x => PAID_EVALUATION_KINDS.has(x.kind))
+        .reduce((n, x) => n + budgetTokens(x, this.now()), 0),
+      evaluationCallsLast24h: budgetCalls((state.spends ?? []).filter(x => PAID_EVALUATION_KINDS.has(x.kind)), this.now()),
+      evaluationTasksLast24h: budgetCalls((state.spends ?? []).filter(x => PAID_EVALUATION_KINDS.has(x.kind)), this.now()),
+      evaluationRequestsLast24h: budgetRequests((state.spends ?? []).filter(x => PAID_EVALUATION_KINDS.has(x.kind)), this.now()),
+      // THE SAME WINDOW, SPLIT INTO WHAT WAS REALLY READ. `evaluationTokensReserved24h` above is the
+      // conservative FLOOR the budget is held against (a reservation, raised by any measurement the
+      // provider really reported). These two say what the provider actually told us inside the same
+      // rolling 24 h: the tokens that were measured, and how many paid attempts carried at least one
+      // UNREADABLE step. A page that showed only the floor would be claiming a precision it does not
+      // have; one that showed only the measured part would understate what is already committed.
+      evaluationTokensKnown24h: (state.spends ?? []).filter(x => PAID_EVALUATION_KINDS.has(x.kind)
+        && (Array.isArray(x.budgetEntries) || x.at > this.now() - DAY))
+        .reduce((n, x) => n + (Array.isArray(x.budgetEntries)
+          ? x.budgetEntries.filter(entry => entry.at > this.now() - DAY)
+            .reduce((sum, entry) => sum + (entry.measuredTokens ?? 0), 0)
+          : (x.usage?.known === true && Number.isSafeInteger(x.usage.tokens) ? x.usage.tokens : 0)), 0),
+      evaluationUnknown24h: (state.spends ?? []).filter(x => PAID_EVALUATION_KINDS.has(x.kind)
+        && (Array.isArray(x.budgetEntries)
+          ? x.budgetEntries.some(entry => entry.at > this.now() - DAY && entry.known === false)
+          : x.at > this.now() - DAY && x.usage?.known === false)).length,
+      evaluationNextAvailableAt: budgetNextAt((state.spends ?? []).filter(x => PAID_EVALUATION_KINDS.has(x.kind)), this.now()),
       evaluationTokensPerDay: this.evaluationTokensPerDay,
       evaluationCallsPerDay: this.evaluationCallsPerDay,
       evaluationJobsOpen: (state.jobs ?? []).length,
@@ -3979,6 +4182,13 @@ export class LearningEngine {
     const epoch = reviewLicenceOf(lesson)
     lesson.trial = { state: 'withdrawn', at: now, reason: String(reason ?? 'trial_withdrawn').slice(0, 64),
       planHash: lesson.trial.planHash, note: 'reference_only_unverified', epoch,
+      // An EVIDENCE licence keeps its basis through the closure: without it the history could not say
+      // which real failures the trial was withdrawn for, and a later grant could not tell a genuinely
+      // newer revision from the one a person or a failed check already retired.
+      ...(lesson.trial.kind === 'evidence'
+        ? { kind: 'evidence', evidenceRevision: lesson.trial.evidenceRevision,
+          evidence: Array.isArray(lesson.trial.evidence) ? lesson.trial.evidence.map(x => ({ ...x })) : undefined }
+        : {}),
       // The domain the licence was earned in is conserved on the withdrawal: the history keeps
       // WHAT was withdrawn, and a later reader never has to guess it.
       ...(lesson.trial.packId === undefined ? {} : { packId: lesson.trial.packId, packVersion: lesson.trial.packVersion }) }
@@ -4114,7 +4324,7 @@ export class LearningEngine {
       if (existing !== undefined) {
         // A re-registration with the SAME execution binding is a duplicate; a different binding
         // replaces the plan and invalidates the old one, because its result can no longer match.
-        if (existing.planHash === planHashValue) return { ok: true, duplicate: true, plan: { ...existing } }
+        if (existing.planHash === planHashValue) return { ok: true, duplicate: true, plan: autoPlanSummary(existing) }
         state.autoPlans = state.autoPlans.filter(row => row.queueKey !== queueKey)
       }
       // The SAME binding already reached a terminal decision for this lesson version. The plan row
@@ -4150,7 +4360,7 @@ export class LearningEngine {
         reason: null, updatedAt: now }
       plans.push(plan)
       state.autoPlans = plans
-      return { ok: true, duplicate: false, plan: { ...plan } }
+      return { ok: true, duplicate: false, plan: autoPlanSummary(plan) }
     })
   }
   /**
@@ -4386,34 +4596,60 @@ export class LearningEngine {
   /**
    * Startup recovery for the automatic queue.
    *
-   * A plan that was `running` when the process stopped describes a provider call whose outcome
-   * nobody can prove: it is marked `interrupted` (conservatively — its reservation is NOT refunded,
-   * because the call may have been paid for), its ticket is released, and it becomes eligible for a
-   * bounded NEW attempt rather than a silent replay of the old one. Called once at adapter start,
-   * never by a read.
+   * A completed checkpoint or a ticket that had not dispatched the next step is safe to resume on
+   * the same plan/ticket. A started step without a durable result is unknown and permanently blocks
+   * replay. Called once at adapter start, never by a read.
    */
   recoverAutoPlans(input = {}) {
     return this.transaction((state, now) => {
       const plans = Array.isArray(state.autoPlans) ? state.autoPlans : []
       let interrupted = 0
+      const resumable = new Set()
       for (const plan of plans) {
-        if (plan.stage !== 'running') continue
-        plan.stage = plan.attempts >= plan.maxAttempts ? 'blocked' : 'interrupted'
-        plan.reason = 'review_interrupted'
-        plan.ticket = null
-        plan.updatedAt = now
-        interrupted += 1
+        if (!['running', 'queued', 'interrupted'].includes(plan.stage)) continue
+        const job = state.jobs.find(row => row.ticket === plan.ticket && row.queueKey === plan.queueKey
+          && row.planHash === plan.planHash)
+        const pending = job?.stepReservations?.find(row => row.dispatched === true && row.completed !== true)
+        if (pending !== undefined) {
+          const debit = state.spends.find(row => row.ticket === job.ticket)
+          if (debit) recordTicketCost(state, job.ticket, debit.tokens,
+            { known: false, tokens: debit.usage?.tokens ?? 0 })
+          if (debit) { debit.terminal = 'ticket_usage_unknown'; debit.terminalAt = now }
+          state.jobs = state.jobs.filter(row => row.ticket !== job.ticket)
+          plan.stage = 'blocked'
+          plan.reason = 'ticket_usage_unknown'
+          plan.ticket = null
+          plan.updatedAt = now
+          interrupted += 1
+        } else if (job !== undefined) {
+          // A queued budget wait may already carry completed steps. Keep its ticket and checkpoints;
+          // a never-dispatched next step is safe to start after the allowance changes.
+          resumable.add(job.ticket)
+          if (plan.stage === 'running') {
+            plan.stage = plan.attempts >= plan.maxAttempts ? 'blocked' : 'interrupted'
+            plan.reason = 'review_interrupted'
+            plan.updatedAt = now
+            interrupted += 1
+          }
+        } else {
+          if (plan.stage === 'running') {
+            plan.stage = plan.attempts >= plan.maxAttempts ? 'blocked' : 'interrupted'
+            plan.reason = 'review_interrupted'
+            plan.updatedAt = now
+            interrupted += 1
+          }
+          plan.ticket = null
+        }
       }
-      // EVERY ticket of the previous process is void: this process cannot know whether a provider
-      // call it never awaited finished, and a ticket held across a restart could otherwise be
-      // submitted up to its full 30-minute window. The reservation stays spent (conservative), the
-      // job stops blocking the serial slot, and a new attempt must reserve again.
-      const voided = (state.jobs ?? []).map(job => job.ticket)
+      // A completed checkpoint (or a reservation never dispatched) is safe to resume on the same
+      // ticket. A request marked dispatched without a checkpoint is UNKNOWN above and is never
+      // replayed. Non-plan jobs keep the historical cold-recovery rule.
+      const voided = (state.jobs ?? []).map(job => job.ticket).filter(ticket => !resumable.has(ticket))
       // Each voided ticket keeps its reservation AND the reason it can no longer be submitted, on its
       // own bounded spend row: a late answer after a restart is then answered with exactly what
       // happened to the attempt, and can never be a second charge or a first promotion.
       for (const ticket of voided) recordTicketTerminal(state, ticket, undefined, 'ticket_voided')
-      state.jobs = []
+      state.jobs = state.jobs.filter(job => resumable.has(job.ticket))
       for (const plan of plans) {
         if (plan.ticket !== null && plan.ticket !== undefined && voided.includes(plan.ticket)) plan.ticket = null
       }
@@ -4563,7 +4799,7 @@ export class LearningEngine {
   /** Read-only view of the automatic queue, newest work last. */
   autoPlans() {
     const state = this.store.read(); validateState(state)
-    return (state.autoPlans ?? []).map(row => ({ ...row, source: { ...row.source } }))
+    return (state.autoPlans ?? []).map(row => ({ ...autoPlanSummary(row), source: { ...row.source } }))
   }
   /**
    * Advance one plan. Only the stages and the bounded bookkeeping fields can move; the
@@ -4612,7 +4848,7 @@ export class LearningEngine {
             [plan.track]: { planHash: plan.planHash, state: plan.stage === 'done' ? 'done' : 'blocked', at: now } }
         }
       }
-      return { ok: true, plan: { ...plan, source: { ...plan.source } } }
+      return { ok: true, plan: { ...autoPlanSummary(plan), source: { ...plan.source } } }
     })
   }
   /**
@@ -4808,6 +5044,7 @@ export class LearningEngine {
     // No live job: the bounded spend row is what still remembers whether this ticket was ever signed
     // here. An unknown ticket is not answered as if it were this one.
     const debit = (state.spends ?? []).find(row => row.ticket === ticket)
+    if (debit?.usage?.known === false) return { ok: false, code: 'ticket_usage_unknown' }
     return { known: debit !== undefined, live: false, bound: null }
   }
   boundObjectiveJob(ticket) { return this.evaluateTicket(ticket).bound }
@@ -4845,9 +5082,10 @@ export class LearningEngine {
     if (!screenSuggestion(lesson.instruction).ok) reasons.push('review_unsafe_suggestion')
     const recent = state.spends.filter(x => PAID_EVALUATION_KINDS.has(x.kind))
     const tokens = Number.isSafeInteger(input.maxTokens) && input.maxTokens > 0 ? input.maxTokens : 0
-    const remainingCalls = Math.max(0, this.evaluationCallsPerDay - recent.length)
-    const remainingTokens = Math.max(0, this.evaluationTokensPerDay - recent.reduce((sum, row) => sum + row.tokens, 0))
-    if (recent.length >= this.evaluationCallsPerDay) reasons.push('review_budget_calls')
+    const callsUsed = budgetCalls(recent, this.now())
+    const remainingCalls = Math.max(0, this.evaluationCallsPerDay - callsUsed)
+    const remainingTokens = Math.max(0, this.evaluationTokensPerDay - recent.reduce((sum, row) => sum + budgetTokens(row, this.now()), 0))
+    if (callsUsed >= this.evaluationCallsPerDay) reasons.push('review_budget_calls')
     if (tokens > 0 && tokens > remainingTokens) reasons.push('review_budget_tokens')
     if (this.evaluationTokensPerDay === 0 || this.evaluationCallsPerDay === 0) reasons.push('review_budget_disabled')
     return { ok: reasons.length === 0, reasons, allowed: reasons.length === 0, lessonId: lesson.id,
@@ -4950,7 +5188,9 @@ export class LearningEngine {
         // new evidence (a new revision/binding) re-opens it. Nothing is consumed by a refusal that
         // signed nothing, so budget and cooldown waits stay recoverable.
         const priorAttempt = resolved.plan.attempt
-        if (priorAttempt !== undefined && priorAttempt !== null
+        const resumeProgress = resolved.plan.reason === 'budget_window_wait'
+          && Array.isArray(resolved.plan.progress?.steps) && resolved.plan.progress.steps.length > 0
+        if (!resumeProgress && priorAttempt !== undefined && priorAttempt !== null
           && priorAttempt.revision === bound.revision && priorAttempt.bindingHash === bound.bindingHash) {
           return { ok: true, skipped: 'evidence_already_attempted' }
         }
@@ -4963,10 +5203,24 @@ export class LearningEngine {
         frozen = gate.frozen
         planRow = resolved.plan
       }
+      // ── THE WHOLE-PLAN CLAIM, CHECKED HERE, BEFORE ANY TICKET ────────────────────────────────────
+      // A review is FOUR physical steps. The reservation must cover all of them — input upper bound plus
+      // the step's own output/reasoning ceiling — or the operator's daily cap would only be a number the
+      // run can pass. A caller that cannot bound its plan, or that under-reserves, is refused HERE.
+      // `stepOutputTokens` is the per-STEP output/reasoning ceiling the host will enforce; `tokens` (the
+      // request's `maxTokens`) is the WHOLE-PLAN reservation the allowance is held against. The two are
+      // deliberately separate: conflating them is how a per-step number ended up standing in for a plan.
+      const floor = planReservationFloor(input.stepwiseBudget === true
+        ? { steps: 1, inputChars: 1, maxTokens: 1 }
+        : { steps: input.steps ?? DEFAULT_REVIEW_STEPS,
+          inputChars: input.inputChars, maxTokens: input.stepOutputTokens ?? tokens })
+      if (floor.ok !== true) return { ok: true, skipped: floor.code }
+      if (tokens < floor.floor) return { ok: true, skipped: 'reservation_insufficient', required: floor.floor }
       const recent = state.spends.filter(x => PAID_EVALUATION_KINDS.has(x.kind))
-      // Same shared caps as the evaluation track; nothing is reserved when either is exhausted.
-      if (state.jobs.length || recent.length >= this.evaluationCallsPerDay
-        || recent.reduce((sum, row) => sum + row.tokens, 0) + tokens > this.evaluationTokensPerDay) {
+      // Same shared caps as the evaluation track; nothing is reserved when either is exhausted. The
+      // comparison uses the WHOLE-PLAN reservation, so what the operator authorised is what may be sent.
+      if (state.jobs.length || budgetCalls(recent, now) >= this.evaluationCallsPerDay
+        || recent.reduce((sum, row) => sum + budgetTokens(row, now), 0) + tokens > this.evaluationTokensPerDay) {
         return { ok: true, skipped: 'evaluation_budget' }
       }
       const ticket = randomUUID()
@@ -5003,12 +5257,15 @@ export class LearningEngine {
         // same transaction as the ticket and the hold, so the result gate can only ever re-read what
         // was really signed for — never a value the caller states at submission time.
         ...(frozen === null ? {} : { sourceBound: true, ...frozen }),
-        expiresAt: now + 30 * 60_000 })
-      state.spends.push({ kind: 'review', ticket, tokens, at: now })
+        expiresAt: frozen === null ? now + 30 * 60_000 : now + 48 * 60 * 60_000,
+        ...(frozen === null ? {} : { stepReservations: [] }) })
+      state.spends.push({ kind: 'review', ticket, tokens, at: now,
+        budgetEntries: [{ at: now, tokens, stepKey: '__initial__', measuredTokens: null, known: null }] })
       if (frozen !== null) {
         holdSourceInState(state, ownerOf(this), frozen.sourceSessionHash, true)
         planRow.attempt = { revision: frozen.sourceRevision, bindingHash: frozen.sourceBindingHash,
           ticket, at: now }
+        planRow.ticket = ticket
       }
       // THE EVIDENCE WATERMARK, consumed by the ACT of reserving: this ticket IS a paid attempt
       // identity, so success, abstention and an unknown cost all consume what it was signed for. A
@@ -5309,6 +5566,125 @@ export class LearningEngine {
       registration, queueKey, planHash: planHashValue })
   }
   /**
+   * Grant the BOUNDED EVIDENCE TRIAL for one ordinary method — the smallest honest way an experience
+   * with no official pack and no registered checker can ever be USED on a real turn.
+   *
+   * The problem this solves is concrete: a fresh candidate has no review licence, so recall never
+   * offers it, so no real turn ever uses it, so the host can never check it and it can never be
+   * verified — it waits for ever however the switches and the budget are set.
+   *
+   * What this grants is the SAME instrument the review track grants, with the same truthful label
+   * (`reference_only_unverified`): the row may be OFFERED as a temporary licence, it is reported with
+   * tier `trial` (never `verified`), and using it proves nothing. It deliberately does NOT:
+   *
+   *   • validate anything — `status` is never set to `validated` here, and no experiment is written;
+   *   • pre-empt an official domain — a lesson an admitting pack covers returns `domain_covered`, and a
+   *     lesson with a registered checker returns `registered_checker_available`;
+   *   • grant without a real basis — the lesson must carry INDEPENDENT host-observed failures
+   *     (`evidenceRevision >= INDEPENDENT_THRESHOLD`, already excluding direct-user, user-correction
+   *     and checker-failure rows) in its own scope and environment;
+   *   • spend anything — zero model calls, zero tokens, no ticket, no job.
+   *
+   * The only things that can promote the row afterwards are the ones that already could: a real host
+   * check on a real accepted turn (`verified`), or a formal evaluation. A failed host check still
+   * withdraws it, exactly as before.
+   */
+  grantEvidenceTrial(input = {}) {
+    // ── (A) THE READ-ONLY DECISION, OUTSIDE ANY TRANSACTION ──────────────────────────────────────
+    // A store transaction rewrites the document even when its callback changes nothing, and the
+    // scheduler asks this ONCE PER PASS for the same candidate. So the refusal AND the duplicate are
+    // decided here, where answering costs no write at all.
+    const stored = this.store.read(); validateState(stored)
+    check(stored.schema === 2, 'migration_required')
+    const owner = ownerOf(this)
+    const lesson = this.findLesson(stored, input)
+    // An ineligible ROW is a bounded refusal, not a malformed request: the automatic pass asks this
+    // per candidate, so it must be able to READ the answer instead of catching an exception.
+    if (lesson.kind !== 'method') return { ok: false, code: 'evidence_trial_not_method' }
+    if (lesson.status === 'suspended') return { ok: false, code: 'evidence_trial_suspended' }
+    if (lesson.status === 'validated') return { ok: false, code: 'evidence_trial_already_validated' }
+    if (lesson.methodId) return { ok: false, code: 'registered_checker_available' }
+    if (admittingPacks(lesson).length > 0) return { ok: false, code: 'domain_covered' }
+    const revision = evidenceRevisionOf(stored, owner, lesson)
+    if (revision === null) return { ok: false, code: 'evidence_insufficient' }
+    const held = lesson.trial
+    // A HUMAN OR FAILED WITHDRAWAL IS NEVER REVIVED BY THE EVIDENCE IT WAS WITHDRAWN FOR. It takes a
+    // strictly NEWER real revision — which only new, independent host failures can produce.
+    if (isPlainObject(held) && held.state === 'withdrawn'
+      && revision <= boundedInt(held.evidenceRevision)) return { ok: false, code: 'evidence_trial_withdrawn' }
+    if (isPlainObject(held) && held.state === 'trial') {
+      const heldRevision = boundedInt(held.evidenceRevision)
+      const live = !(held.at + TRIAL_TTL_MS <= this.now())
+      if (live && revision <= heldRevision) return duplicateTrial(lesson, held)
+      // SAME EVIDENCE, ONE TRIAL: an expired licence is CLOSED here (one bounded write) and the same
+      // evidence may not buy another one. Only genuinely newer evidence re-opens it below.
+      if (!live && revision <= heldRevision) return this._expireEvidenceTrial(lesson, held)
+    }
+    if (isPlainObject(held) && held.state === 'expired'
+      && revision <= boundedInt(held.evidenceRevision)) return { ok: false, code: 'evidence_trial_expired' }
+    return this.transaction((state, now) => {
+      // ── (B) EVERYTHING IS RE-READ UNDER THE LOCK ───────────────────────────────────────────────
+      // The row, its current version/scope/standing and the EVIDENCE ITSELF are read again here: a
+      // licence is a claim about what the host really observed, and an outside snapshot could have
+      // been superseded (a version bump, a suspension, a consumed revision) between the two.
+      const row = state.lessons.find(x => x.id === lesson.id && x.version === lesson.version
+        && x.scope === lesson.scope)
+      if (row === undefined) return { ok: false, code: 'lesson_unavailable' }
+      if (row.kind !== 'method' || row.status === 'suspended' || row.status === 'validated') {
+        return { ok: false, code: 'evidence_trial_superseded' }
+      }
+      if (row.methodId) return { ok: false, code: 'registered_checker_available' }
+      if (admittingPacks(row).length > 0) return { ok: false, code: 'domain_covered' }
+      const live = evidenceOf(state, owner, row)
+      if (live.snapshot.length === 0) return { ok: false, code: 'evidence_insufficient' }
+      const current = live.snapshot.reduce((high, item) => Math.max(high, item.revision), 0)
+      const prior = row.trial
+      if (isPlainObject(prior) && prior.state === 'withdrawn'
+        && current <= boundedInt(prior.evidenceRevision)) return { ok: false, code: 'evidence_trial_withdrawn' }
+      if (isPlainObject(prior) && prior.state === 'trial') {
+        const priorRevision = boundedInt(prior.evidenceRevision)
+        const priorLive = !(prior.at + TRIAL_TTL_MS <= now)
+        if (priorLive && current <= priorRevision) return duplicateTrial(row, prior)
+        if (!priorLive && current <= priorRevision) {
+          row.trial = { ...prior, state: 'expired', at: now }
+          return { ok: false, code: 'evidence_trial_expired', lessonId: row.id, version: row.version }
+        }
+      }
+      if (isPlainObject(prior) && prior.state === 'expired'
+        && current <= boundedInt(prior.evidenceRevision)) {
+        return { ok: false, code: 'evidence_trial_expired' }
+      }
+      row.trial = { state: 'trial', kind: 'evidence', at: now, reason: 'host_failure_evidence',
+        note: 'reference_only_unverified', epoch: reviewLicenceOf(row),
+        evidenceRevision: current, evidence: live.snapshot.map(item => ({ ...item })) }
+      // The same transition the review track makes when it earns a trial: a TESTED reference, never a
+      // validated method.
+      if (row.status === 'candidate') row.status = 'tested'
+      return { ok: true, duplicate: false, lessonId: row.id, version: row.version, trial: 'trial',
+        note: 'reference_only_unverified', evidenceRevision: current,
+        evidence: live.snapshot.map(item => ({ ...item })) }
+    })
+  }
+  /**
+   * Close ONE expired evidence trial, exactly once. Returns the bounded refusal the caller sees.
+   *
+   * The write is deliberately ONE-SHOT: after it the licence is `expired`, and every later call is
+   * answered from the read-only pre-check without touching the document again.
+   */
+  _expireEvidenceTrial(lesson, held) {
+    return this.transaction((state, now) => {
+      const row = state.lessons.find(x => x.id === lesson.id && x.version === lesson.version
+        && x.scope === lesson.scope)
+      if (row === undefined || !isPlainObject(row.trial) || row.trial.state !== 'trial'
+        || row.trial.kind !== 'evidence') {
+        return { ok: false, code: 'evidence_trial_expired' }
+      }
+      if (!(row.trial.at + TRIAL_TTL_MS <= now)) return duplicateTrial(row, row.trial)
+      row.trial = { ...row.trial, state: 'expired', at: now }
+      return { ok: false, code: 'evidence_trial_expired', lessonId: row.id, version: row.version }
+    })
+  }
+  /**
    * Read-only: the OFFICIAL pack id a queued plan resolved when it was registered, or `null`.
    */
   planPackId(queueKey) {
@@ -5329,6 +5705,173 @@ export class LearningEngine {
     return plan !== undefined && plan.caseId !== undefined && plan.caseId !== null
       ? { caseId: plan.caseId, scenarioHash: plan.scenarioHash, criteriaHash: plan.criteriaHash,
         packId: plan.packId } : null
+  }
+  /**
+   * Atomically reserve the next physical step of an already signed paid ticket.
+   * `inputTokens` is a host-verified upper bound computed from the exact serialized messages and
+   * provider envelope; `outputTokens` is the cap sent on the wire. Repeating the same step key is
+   * idempotent. A changed request under an existing key is refused. Unknown usage latches the task
+   * and prevents any later step from being dispatched.
+   */
+  ticketReserve(input = {}) {
+    const ticket = String(input.ticket ?? '')
+    const stepKey = String(input.stepKey ?? '')
+    check(boundedLabel(ticket, 64) && boundedLabel(stepKey, 96), 'invalid_reservation')
+    check(Number.isSafeInteger(input.inputTokens) && input.inputTokens > 0
+      && Number.isSafeInteger(input.outputTokens) && input.outputTokens > 0
+      && input.outputTokens <= MAX_STEP_OUTPUT_TOKENS, 'invalid_reservation')
+    check(hex64(input.requestHash), 'invalid_reservation')
+    const amount = input.inputTokens + input.outputTokens
+    check(Number.isSafeInteger(amount), 'invalid_reservation')
+    return this.transaction((state, now) => {
+      const job = (state.jobs ?? []).find(row => row.ticket === ticket)
+      const debit = (state.spends ?? []).find(row => row.ticket === ticket)
+      if (job === undefined || debit === undefined) return { ok: false, code: 'ticket_unknown' }
+      if (!PAID_EVALUATION_KINDS.has(job.kind)) return { ok: false, code: 'ticket_kind_mismatch' }
+      if (!(job.expiresAt > now)) return { ok: false, code: 'ticket_expired' }
+      if (debit.usage?.known === false) return { ok: false, code: 'ticket_usage_unknown' }
+      if (!Array.isArray(job.stepReservations)) job.stepReservations = []
+      const prior = job.stepReservations.find(row => row.stepKey === stepKey)
+      if (prior !== undefined) {
+        if (prior.requestHash !== input.requestHash || prior.inputTokens !== input.inputTokens
+          || prior.outputTokens !== input.outputTokens) return { ok: false, code: 'step_reservation_conflict' }
+        if (prior.dispatched === true && prior.completed !== true) return { ok: false, code: 'ticket_usage_unknown' }
+        return { ok: true, duplicate: true, reserved: debit.reserved ?? debit.tokens }
+      }
+      const alreadyCountedTask = Array.isArray(debit.budgetEntries)
+        && debit.budgetEntries.some(entry => entry.dispatched === true && entry.at > now - DAY)
+      const recent = (state.spends ?? []).filter(row => PAID_EVALUATION_KINDS.has(row.kind))
+      if (!alreadyCountedTask && budgetCalls(recent, now) >= this.evaluationCallsPerDay) {
+        return { ok: false, code: 'evaluation_budget_calls' }
+      }
+      const projected = (state.spends ?? []).filter(row => PAID_EVALUATION_KINDS.has(row.kind))
+        .reduce((sum, row) => sum + budgetTokens(row, now), 0) + amount
+      if (projected > this.evaluationTokensPerDay) return { ok: false, code: 'evaluation_budget' }
+      debit.tokens += amount
+      debit.reserved = (debit.reserved ?? 0) + amount
+      job.tokens = (job.tokens ?? 0) + amount
+      if (!Array.isArray(debit.budgetEntries)) debit.budgetEntries = [{ at: debit.at, tokens: debit.tokens - amount, stepKey: '__initial__' }]
+      debit.budgetEntries.push({ at: now, tokens: amount, stepKey, measuredTokens: null, known: null })
+      job.stepReservations.push({ stepKey, requestHash: input.requestHash,
+        inputTokens: input.inputTokens, outputTokens: input.outputTokens, at: now,
+        dispatched: false, completed: false })
+      return { ok: true, duplicate: false, reserved: debit.reserved }
+    })
+  }
+  /** Mark a reserved physical request as entered. A started step without a durable result is UNKNOWN
+   * after restart and must never be replayed. */
+  ticketStepStart(input = {}) {
+    const ticket = String(input.ticket ?? ''), stepKey = String(input.stepKey ?? '')
+    check(boundedLabel(ticket, 64) && boundedLabel(stepKey, 96) && hex64(input.requestHash), 'invalid_reservation')
+    const permitted = this.ticketContinuation(ticket)
+    if (permitted.ok !== true) return permitted
+    return this.transaction((state, now) => {
+      const job = state.jobs.find(row => row.ticket === ticket)
+      const reservation = job?.stepReservations?.find(row => row.stepKey === stepKey)
+      if (job === undefined || reservation === undefined || reservation.requestHash !== input.requestHash) {
+        return { ok: false, code: 'step_reservation_missing' }
+      }
+      if (reservation.completed) return { ok: true, duplicate: true }
+      if (reservation.dispatched) return { ok: false, code: 'ticket_usage_unknown' }
+      const debit = state.spends.find(row => row.ticket === ticket)
+      if (debit === undefined) return { ok: false, code: 'ticket_unknown' }
+      if (debit.usage?.known === false) return { ok: false, code: 'ticket_usage_unknown' }
+      if (!Array.isArray(debit.budgetEntries)) debit.budgetEntries = []
+      let bucket = debit.budgetEntries.find(entry => entry.stepKey === stepKey)
+      const cutoff = now - DAY
+      const alreadyCountedTask = debit.budgetEntries.some(entry => entry.dispatched === true && entry.at > cutoff)
+      const recent = state.spends.filter(row => PAID_EVALUATION_KINDS.has(row.kind))
+      if (!alreadyCountedTask && budgetCalls(recent, now) >= this.evaluationCallsPerDay) {
+        return { ok: false, code: 'evaluation_budget_calls' }
+      }
+      const reservationTokens = reservation.inputTokens + reservation.outputTokens
+      const bucketIsCurrent = bucket !== undefined && bucket.at > cutoff
+      const projected = recent.reduce((sum, row) => sum + budgetTokens(row, now), 0)
+        + (bucketIsCurrent ? 0 : reservationTokens)
+      if (projected > this.evaluationTokensPerDay) return { ok: false, code: 'evaluation_budget' }
+      if (!bucketIsCurrent) {
+        bucket = { at: now, tokens: reservationTokens, stepKey, measuredTokens: null, known: null }
+        debit.budgetEntries.push(bucket)
+      } else {
+        bucket.at = now
+      }
+      bucket.dispatched = true
+      reservation.dispatched = true
+      reservation.startedAt = now
+      return { ok: true, duplicate: false }
+    })
+  }
+  /** Read exactly one checkpoint under its still-live ticket and frozen plan binding. */
+  planProgress(input = {}) {
+    const ticket = String(input.ticket ?? ''), stepKey = String(input.stepKey ?? '')
+    check(boundedLabel(ticket, 64) && boundedLabel(stepKey, 96), 'invalid_reservation')
+    const live = this.ticketContinuation(ticket)
+    if (live.ok !== true) return live
+    const plan = (this.store.read().autoPlans ?? []).find(row => row.queueKey === live.job.queueKey
+      && row.planHash === live.job.planHash)
+    const row = plan?.progress?.steps?.find(step => step.stepKey === stepKey)
+    return { ok: true, step: row ? { ...row } : null }
+  }
+  /** Atomically persist a completed response and its per-step measurement on the plan. */
+  ticketStepComplete(input = {}) {
+    const ticket = String(input.ticket ?? ''), stepKey = String(input.stepKey ?? '')
+    check(boundedLabel(ticket, 64) && boundedLabel(stepKey, 96) && hex64(input.requestHash)
+      && typeof input.text === 'string' && Buffer.byteLength(input.text, 'utf8') <= 8192
+      && typeof input.truncated === 'boolean'
+      && (input.tokens === null || (Number.isSafeInteger(input.tokens) && input.tokens >= 0)), 'invalid_checkpoint')
+    const permitted = this.ticketContinuation(ticket)
+    if (permitted.ok !== true) return permitted
+    return this.transaction((state, now) => {
+      const job = state.jobs.find(row => row.ticket === ticket)
+      const debit = state.spends.find(row => row.ticket === ticket)
+      const plan = state.autoPlans.find(row => row.queueKey === job?.queueKey && row.planHash === job?.planHash)
+      const reservation = job?.stepReservations?.find(row => row.stepKey === stepKey)
+      if (!job || !debit || !plan || !reservation || reservation.requestHash !== input.requestHash
+        || reservation.dispatched !== true) return { ok: false, code: 'step_reservation_missing' }
+      const planGate = planPermission(state, { queueKey: job.queueKey, planHash: job.planHash,
+        lessonId: job.lessonId, version: job.version, track: job.kind === 'evaluation' ? 'objective' : 'review' })
+      if (planGate.ok !== true) return { ok: false, code: planGate.code }
+      if (job.sourceBound === true) {
+        const gate = boundSourceGate(state, { phase: 'result', owner: ownerOf(this),
+          sessionHash: job.sourceSessionHash, revision: job.sourceRevision,
+          bindingHash: job.sourceBindingHash, epoch: job.sourceEpoch,
+          generation: job.sourceControlGeneration, routeId: job.sourceRouteId,
+          scope: hex64(plan.sourceBinding?.scope) ? plan.sourceBinding.scope : null,
+          environment: hex64(plan.environment) ? plan.environment : null })
+        if (gate.ok !== true) return { ok: false, code: gate.code }
+      }
+      const value = { stepKey, requestHash: input.requestHash, text: input.text,
+        truncated: input.truncated, tokens: input.tokens }
+      if (!Array.isArray(plan.progress?.steps)) plan.progress = { steps: [] }
+      const prior = plan.progress.steps.find(row => row.stepKey === stepKey)
+      if (prior !== undefined) {
+        return JSON.stringify(prior) === JSON.stringify(value)
+          ? { ok: true, duplicate: true } : { ok: false, code: 'checkpoint_conflict' }
+      }
+      if (reservation.completed || reservation.dispatched !== true) return { ok: false, code: 'checkpoint_conflict' }
+      if (input.tokens === null) {
+        recordTicketCost(state, ticket, debit.tokens, { known: false, tokens: debit.usage?.tokens ?? 0 })
+      } else {
+        const priorKnown = Number.isSafeInteger(debit.usage?.tokens) ? debit.usage.tokens : 0
+        recordTicketCost(state, ticket, priorKnown + input.tokens,
+          { known: debit.usage?.known !== false, tokens: priorKnown + input.tokens })
+        const bucket = debit.budgetEntries?.find(entry => entry.stepKey === stepKey)
+        if (bucket) {
+          bucket.tokens = Math.max(bucket.tokens, input.tokens)
+          bucket.measuredTokens = input.tokens
+          bucket.known = true
+        }
+      }
+      if (input.tokens === null) {
+        const bucket = debit.budgetEntries?.find(entry => entry.stepKey === stepKey)
+        if (bucket) bucket.known = false
+      }
+      plan.progress.steps.push(value)
+      reservation.completed = true
+      reservation.completedAt = now
+      check(Buffer.byteLength(JSON.stringify(plan.progress), 'utf8') <= 300_000, 'checkpoint_capacity')
+      return { ok: true, duplicate: false }
+    })
   }
   /**
    * Record a MEASUREMENT against a ticket that is still open, without touching the attempt itself.
@@ -5377,6 +5920,12 @@ export class LearningEngine {
    * that survives the answer.
    */
   ticketContinuation(ticket, { kind = null, now = this.now() } = {}) {
+    if (isPlainObject(ticket)) {
+      const input = ticket
+      ticket = String(input.ticket ?? '')
+      kind = input.kind ?? kind
+      now = Number.isFinite(input.now) ? input.now : now
+    }
     const state = this.store.read(); validateState(state)
     const job = (state.jobs ?? []).find(row => row.ticket === ticket)
     if (job === undefined) {
@@ -5396,6 +5945,7 @@ export class LearningEngine {
       && Number.isSafeInteger(debit.tokens) && debit.tokens > job.tokens) {
       return { ok: false, code: 'budget_exceeded' }
     }
+    if (debit?.usage?.known === false) return { ok: false, code: 'ticket_usage_unknown' }
     if (job.sourceBound === true) {
       if (Number.isSafeInteger(job.sourceControlGeneration)
         && control.generation !== job.sourceControlGeneration) return { ok: false, code: 'control_changed' }
@@ -5676,6 +6226,8 @@ export class LearningEngine {
     identity(pack === null ? input.suiteId : packSuiteId(pack))
     check(Array.isArray(cases) && cases.length >= 12 && cases.length <= 128, 'invalid_evaluation')
     check(Number.isSafeInteger(input.maxTokens) && input.maxTokens > 0, 'invalid_evaluation')
+    check((input.queueKey === undefined) === (input.planHash === undefined), 'invalid_evaluation')
+    if (input.queueKey !== undefined) check(boundedLabel(input.queueKey, 160) && hex64(input.planHash), 'invalid_evaluation')
     const manifest = jobManifest(cases)
     check(new Set(manifest.map(x => x.caseId)).size === manifest.length
       && manifest.every(x => typeof x.caseId === 'string' && typeof x.family === 'string' && ['development', 'holdout'].includes(x.split)), 'invalid_evaluation')
@@ -5688,6 +6240,11 @@ export class LearningEngine {
     return this.transaction((state, now) => {
       const lesson = this.findLesson(state, input)
       check(lesson.kind === 'method' && lesson.status !== 'suspended' && input.expectedVersion === lesson.version, 'method_not_evaluable')
+      if (bound === null && input.queueKey !== undefined) {
+        const association = planPermission(state, { queueKey: input.queueKey, planHash: input.planHash,
+          lessonId: lesson.id, version: lesson.version, track: 'objective' })
+        if (association.ok !== true) return { ok: true, skipped: association.code }
+      }
       // ── the automatic binding: official pack admission, live plan, frozen source/control ────────
       // Everything is resolved INSIDE this transaction, so a pack the lesson is outside of, a plan
       // that was re-registered or evicted, and a source that drifted or a control that moved all
@@ -5709,7 +6266,9 @@ export class LearningEngine {
         // new evidence (a new revision/binding) re-opens it. Nothing is consumed by a refusal that
         // signed nothing, so budget and cooldown waits stay recoverable.
         const priorAttempt = resolved.plan.attempt
-        if (priorAttempt !== undefined && priorAttempt !== null
+        const resumeProgress = resolved.plan.reason === 'budget_window_wait'
+          && Array.isArray(resolved.plan.progress?.steps) && resolved.plan.progress.steps.length > 0
+        if (!resumeProgress && priorAttempt !== undefined && priorAttempt !== null
           && priorAttempt.revision === bound.revision && priorAttempt.bindingHash === bound.bindingHash) {
           return { ok: true, skipped: 'evidence_already_attempted' }
         }
@@ -5722,23 +6281,37 @@ export class LearningEngine {
         frozen = gate.frozen
         planRow = resolved.plan
       }
+      // ONE objective run walks the WHOLE frozen case list with two arms each, so its reservation must
+      // cover that plan — not one case. A caller that cannot bound it is refused, not trusted.
+      const objectiveFloor = planReservationFloor(input.stepwiseBudget === true
+        ? { steps: 1, inputChars: 1, maxTokens: 1 }
+        : { steps: cases.length * 2,
+          inputChars: input.inputChars, maxTokens: input.stepOutputTokens ?? input.maxTokens })
+      if (objectiveFloor.ok !== true) return { ok: true, skipped: objectiveFloor.code }
+      if (input.maxTokens < objectiveFloor.floor) {
+        return { ok: true, skipped: 'reservation_insufficient', required: objectiveFloor.floor }
+      }
       const recent = state.spends.filter(x => PAID_EVALUATION_KINDS.has(x.kind))
-      if (state.jobs.length || recent.length >= this.evaluationCallsPerDay
-        || recent.reduce((n, x) => n + x.tokens, 0) + input.maxTokens > this.evaluationTokensPerDay) return { ok: true, skipped: 'evaluation_budget' }
+      if (state.jobs.length || budgetCalls(recent, now) >= this.evaluationCallsPerDay
+        || recent.reduce((n, x) => n + budgetTokens(x, now), 0) + input.maxTokens > this.evaluationTokensPerDay) return { ok: true, skipped: 'evaluation_budget' }
       const ticket = randomUUID()
       state.jobs.push({ ticket, lessonId: lesson.id, version: lesson.version, tokens: input.maxTokens,
-        manifestHash: hash(JSON.stringify(manifest)), expiresAt: now + 30 * 60_000,
+        manifestHash: hash(JSON.stringify(manifest)), expiresAt: frozen === null ? now + 30 * 60_000 : now + 48 * 60 * 60_000,
+        ...(frozen === null ? (input.queueKey === undefined ? {} : { kind: 'evaluation', queueKey: input.queueKey,
+          planHash: input.planHash, stepReservations: [] }) : { stepReservations: [] }),
         // A bound objective ticket names its own track and freezes the pack, the plan and the source
         // identity it was signed against. The result gate re-reads exactly these, and nothing the
         // caller states later can re-point them.
         ...(frozen === null ? {} : { kind: 'evaluation', sourceBound: true, ...frozen, packId: pack.packId,
           packVersion: pack.version, suiteId: packSuiteId(pack), queueKey: input.queueKey,
           planHash: input.planHash }) })
-      state.spends.push({ kind: 'evaluation', ticket, tokens: input.maxTokens, at: now })
+      state.spends.push({ kind: 'evaluation', ticket, tokens: input.maxTokens, at: now,
+        budgetEntries: [{ at: now, tokens: input.maxTokens, stepKey: '__initial__', measuredTokens: null, known: null }] })
       if (frozen !== null) {
         holdSourceInState(state, ownerOf(this), frozen.sourceSessionHash, true)
         planRow.attempt = { revision: frozen.sourceRevision, bindingHash: frozen.sourceBindingHash,
           ticket, at: now }
+        planRow.ticket = ticket
       }
       return { ok: true, ticket, maxTokens: input.maxTokens,
         ...(frozen === null ? {} : { packId: pack.packId, packVersion: pack.version, suiteId: packSuiteId(pack),
@@ -5786,21 +6359,23 @@ export class LearningEngine {
   evaluationPlan(input = {}) {
     const stored = this.store.read(); validateState(stored)
     check(stored.schema === 2, 'migration_required')
-    const state = pruneState({ ...stored }, this.now())
+    const now = this.now()
+    const state = pruneState({ ...stored }, now)
     const lesson = this.findLesson(state, input)
     check(lesson.kind === 'method' && lesson.status !== 'suspended' && input.expectedVersion === lesson.version, 'method_not_evaluable')
     const recent = state.spends.filter(x => PAID_EVALUATION_KINDS.has(x.kind))
-    const tokensUsed = recent.reduce((sum, row) => sum + row.tokens, 0)
+    const tokensUsed = recent.reduce((sum, row) => sum + budgetTokens(row, now), 0)
     const maxTokens = Number.isSafeInteger(input.maxTokens) && input.maxTokens > 0 ? input.maxTokens : 0
     const reasons = []
     if (state.jobs.length > 0) reasons.push('evaluation_job_open')
-    if (recent.length >= this.evaluationCallsPerDay) reasons.push('evaluation_calls_exhausted')
+    const callsUsed = budgetCalls(recent, now)
+    if (callsUsed >= this.evaluationCallsPerDay) reasons.push('evaluation_calls_exhausted')
     if (tokensUsed + maxTokens > this.evaluationTokensPerDay) reasons.push('evaluation_tokens_exhausted')
     return { ok: true, allowed: lesson.methodId ? true : reasons.length === 0, reasons,
       lessonId: lesson.id, version: lesson.version, status: lesson.status, methodId: lesson.methodId ?? null,
       basis: lesson.methodId ? 'registered_algorithm' : 'host_trial', modelRequired: !lesson.methodId,
-      tokensUsed, callsUsed: recent.length, remainingTokens: Math.max(0, this.evaluationTokensPerDay - tokensUsed),
-      remainingCalls: Math.max(0, this.evaluationCallsPerDay - recent.length), jobsOpen: state.jobs.length,
+      tokensUsed, callsUsed, remainingTokens: Math.max(0, this.evaluationTokensPerDay - tokensUsed),
+      remainingCalls: Math.max(0, this.evaluationCallsPerDay - callsUsed), jobsOpen: state.jobs.length,
       evaluationTokensPerDay: this.evaluationTokensPerDay, evaluationCallsPerDay: this.evaluationCallsPerDay }
   }
   /**

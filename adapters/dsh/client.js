@@ -49,7 +49,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
   const CONTEXT_MIN = 128
   const CONTEXT_MAX = 1536
   const EVAL_TOKENS_MAX = 1_000_000
-  const EVAL_CALLS_MAX = 8
+  const EVAL_CALLS_MAX = 20
 
   /** Client-side descriptor of the read-only Remote; mirrors the Host manifest. */
   const REMOTE = {
@@ -355,10 +355,11 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     turnBudgetHint: '只计经验文本，单位为 UTF-8 字节。',
     sessionBudgetHint: '在同一会话中限制经验占用。',
     evalBudgetTitle: '模型评测额度',
-    evalBudgetHint: '验证候选经验会调用模型。额度为 0 时不执行。',
+    evalBudgetHint: '这里仅限制自动经验评审/客观评测，不含正常聊天或自动复盘（每日最多 3 次、每次输出 384 tokens）。档位按滚动 24 小时计算；耗尽后等待到最早一笔额度到期。已用/预留与实测分开显示，未知费用不会按 0 处理。',
     evalUsageTitle: '当前用量与计算说明',
     evalTokensUsed: '评测 token 已用',
-    evalCallsUsed: '评测调用已用',
+    evalCallsUsed: '评测任务已用',
+    evalRequestsUsed: '物理请求已用',
     evalJobsOpen: '进行中的评测作业',
     bytesUnit: '额度单位',
     emptyLessonsHint: '试试其他关键词或筛选条件。',
@@ -442,9 +443,16 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     contextBytesHint: '单轮注入上限，单位：字节',
     contextBytesHintFull: '合法范围 {min}–{max} 字节，默认 {def}。会话累计 1536 字节、单轮最多 2 条经验由核心固定，不能在此调整；调整只影响下一次实际注入，不会退还或清零已经用掉的会话额度。',
     advanced: '高级：模型评测预算',
-    advancedHint: '默认 0 表示停用“基于模型”的候选验证；登记方法的确定性回归不使用模型，也不消耗这里任何额度。',
+    advancedHint: '档位只约束自动经验评审/客观评测；不含正常聊天，也不改变自动复盘（每日最多 3 次、384 输出 tokens）。登记方法的确定性回归不使用模型、不消耗这里的额度。额度按滚动 24 小时计算；预留与实测分开展示，未知费用会阻止自动重放。',
     evalTokens: '每日评测 token 上限',
     evalCalls: '每日评测次数上限',
+    evalTier: '评测预算档位（滚动 24 小时）', evalTierConservative: '保守 · 20K / 2',
+    evalTierStandard: '标准 · 50K / 5', evalTierEnhanced: '增强 · 100K / 10',
+    evalTierHigh: '高强度 · 200K / 20', evalTierCustom: '自定义', evalTierPaused: '暂停 · 0 / 0',
+    evalTierStatus: '当前：{tier}',
+    evalMeasured: '已测 token', evalUnknown: '费用未知任务', evalNext: '下一次额度恢复',
+    evalBudgetState: { ready: '可用', running: '运行中', waiting_budget: '额度不足，等待恢复',
+      cost_unknown: '费用未知，自动推进已隔离', unavailable: '状态不可读' },
     // ---- the verification session a historical candidate borrows its route from ----
     verifySession: '历史候选验证会话',
     verifySessionHint: '选择历史经验验证时使用的会话和模型，经验仍归原项目。',
@@ -653,10 +661,11 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     turnBudgetHint: 'Counts lesson text only, in UTF-8 bytes.',
     sessionBudgetHint: 'Caps what lessons may occupy in one session.',
     evalBudgetTitle: 'Model evaluation budget',
-    evalBudgetHint: 'Verifying a candidate calls a model. A budget of 0 disables it.',
+    evalBudgetHint: 'This cap covers automatic experience review and objective evaluation only. It excludes normal chat and automatic reflection (up to 3 per day, 384 output tokens each). The window rolls over 24 hours; exhausted work waits for the earliest reservation to expire. Reserved and measured usage are shown separately; unknown cost is never treated as zero.',
     evalUsageTitle: 'Current usage and how it is computed',
     evalTokensUsed: 'Evaluation tokens used',
-    evalCallsUsed: 'Evaluation calls used',
+    evalCallsUsed: 'Evaluation tasks used',
+    evalRequestsUsed: 'Physical requests sent',
     evalJobsOpen: 'Evaluation jobs in flight',
     bytesUnit: 'Unit',
     emptyLessonsHint: 'Try another keyword or filter.',
@@ -739,8 +748,15 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     contextBytesHint: 'Per-turn injection cap, in bytes',
     contextBytesHintFull: 'Valid range {min}–{max} bytes, default {def}. The 1536-byte session cap and the 2-lessons-per-turn cap are fixed by the core and cannot be changed here; an edit applies to the next injection and never refunds or clears budget a session already spent.',
     advanced: 'Advanced: model evaluation budget',
-    advancedHint: 'Default 0 disables model-based candidate verification. Registered-algorithm regressions use no model and no budget.',
+    advancedHint: 'These tiers cover automatic experience review and objective evaluation only. They exclude normal chat and do not change automatic reflection (up to 3 per day, 384 output tokens). Registered-algorithm regressions use no model and no budget. The window rolls over 24 hours; reserved and measured usage stay distinct, and unknown cost prevents automatic replay.',
     evalTokens: 'Daily evaluation token cap', evalCalls: 'Daily evaluation call cap',
+    evalTier: 'Evaluation budget tier (rolling 24 h)', evalTierConservative: 'Conservative · 20K / 2',
+    evalTierStandard: 'Standard · 50K / 5', evalTierEnhanced: 'Enhanced · 100K / 10',
+    evalTierHigh: 'High · 200K / 20', evalTierCustom: 'Custom', evalTierPaused: 'Paused · 0 / 0',
+    evalTierStatus: 'Current: {tier}',
+    evalMeasured: 'Measured tokens', evalUnknown: 'Tasks with unknown cost', evalNext: 'Next allowance recovery',
+    evalBudgetState: { ready: 'Available', running: 'Running', waiting_budget: 'Waiting for allowance',
+      cost_unknown: 'Unknown cost; automatic progress isolated', unavailable: 'Status unavailable' },
     // ---- the verification session a historical candidate borrows its route from ----
     verifySession: 'Verification session for historical candidates',
     verifySessionHint: 'The session and model used to verify historical lessons; the lesson still belongs to its original project.',
@@ -1380,6 +1396,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     // row states rather than a failure the page hides.
     verificationSessionId: typeof value?.verificationSessionId === 'string' ? value.verificationSessionId : '',
     maxContextBytes: String(value?.maxContextBytes ?? 768),
+    // A missing field on an older install is still the historical fail-closed budget. The standard
+    // preset is available as an explicit action and only takes effect after the operator saves it.
     evaluationTokensPerDay: String(value?.evaluationTokensPerDay ?? 0),
     evaluationCallsPerDay: String(value?.evaluationCallsPerDay ?? 2),
   })
@@ -2256,6 +2274,17 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       ])
     })()
 
+    const budgetTiers = [
+      { id: 'paused', tokens: 0, calls: 0, label: dict.evalTierPaused },
+      { id: 'conservative', tokens: 20_000, calls: 2, label: dict.evalTierConservative },
+      { id: 'standard', tokens: 50_000, calls: 5, label: dict.evalTierStandard },
+      { id: 'enhanced', tokens: 100_000, calls: 10, label: dict.evalTierEnhanced },
+      { id: 'high', tokens: 200_000, calls: 20, label: dict.evalTierHigh },
+    ]
+    const draftTier = draft === null ? null : budgetTiers.find(tier =>
+      Number(draft.values.evaluationTokensPerDay) === tier.tokens
+      && Number(draft.values.evaluationCallsPerDay) === tier.calls) ?? null
+    const paidBudget = settings?.budget?.paidBudget ?? null
     const budgetPanel = h('div', { key: 'budget', className: 'mse-pane' }, [
       sectionTitle('c', dict.contextBudgetTitle),
       row('t', dict.turnBudget, dict.turnBudgetHint, formatBytes(overview?.budget?.turnBytes)),
@@ -2270,6 +2299,12 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       sectionTitle('e', dict.evalBudgetTitle),
       h('p', { key: 'ed', className: 'mse-hint' }, dict.evalBudgetHint),
       draft === null ? h('p', { key: 'l', className: 'mse-note' }, dict.loading) : h('div', { key: 'rows' }, [
+        h('p', { key: 'tier-label', className: 'mse-hint' }, fill(dict.evalTierStatus,
+          { tier: draftTier?.label ?? dict.evalTierCustom })),
+        h('div', { key: 'tiers', className: 'mse-actions', 'aria-label': dict.evalTier }, budgetTiers.map(tier =>
+          h(Button, { key: tier.id, variant: draftTier?.id === tier.id ? 'primary' : 'outline', size: 'sm',
+            disabled: !writable, onClick: () => edit({ evaluationTokensPerDay: String(tier.tokens),
+              evaluationCallsPerDay: String(tier.calls) }) }, tier.label))),
         row('tokens', dict.evalTokens, null,
           h(Input, { type: 'number', min: 0, max: EVAL_TOKENS_MAX, step: 1000, disabled: !writable,
             className: 'mse-num-wide', 'aria-label': dict.evalTokens, value: draft.values.evaluationTokensPerDay,
@@ -2287,10 +2322,19 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           // when nobody actually looked.
           [dict.evalTokensLimit, String(settings?.budget?.evaluationTokensPerDay ?? dict.unknown)],
           [dict.evalCallsLimit, `${settings?.budget?.evaluationCallsPerDay ?? dict.unknown} ${dict.unitCalls}`],
-          [dict.evalTokensUsed, overview?.evaluationTokensReserved24h === undefined ? dict.notReported
-            : String(overview.evaluationTokensReserved24h)],
-          [dict.evalCallsUsed, overview?.evaluationCallsLast24h === undefined ? dict.notReported
-            : `${overview.evaluationCallsLast24h} ${dict.unitCalls}`],
+          [dict.evalTokensUsed, Number.isSafeInteger(paidBudget?.tokensReserved)
+            ? String(paidBudget.tokensReserved) : dict.notReported],
+          [dict.evalMeasured, Number.isSafeInteger(paidBudget?.tokensKnown)
+            ? String(paidBudget.tokensKnown) : dict.notReported],
+          [dict.evalCallsUsed, Number.isSafeInteger(paidBudget?.callsUsed)
+            ? `${paidBudget.callsUsed} ${dict.unitCalls}` : dict.notReported],
+          [dict.evalRequestsUsed, Number.isSafeInteger(paidBudget?.requestsUsed)
+            ? `${paidBudget.requestsUsed} ${dict.unitCalls}` : dict.notReported],
+          [dict.evalUnknown, Number.isSafeInteger(paidBudget?.tasksUnknown)
+            ? String(paidBudget.tasksUnknown) : dict.notReported],
+          [dict.evalNext, Number.isFinite(paidBudget?.nextAvailableAt)
+            ? formatTime(paidBudget.nextAvailableAt, locale) : dict.notRecorded],
+          [dict.evalBudgetTitle, dict.evalBudgetState[paidBudget?.state] ?? dict.notReported],
           [dict.autoReflectEffective, review === null ? dict.unknown
             : fill(dict.autoReflectOn, { used: review.usedLast24h ?? dict.unknown, limit: review.perDay })],
           [dict.evalJobsOpen, String(controlState?.status === 'ready' ? controlState.payload.runtime?.jobs?.length ?? 0 : 0)],

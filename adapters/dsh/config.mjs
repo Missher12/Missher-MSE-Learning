@@ -34,6 +34,8 @@ export const SETTINGS_DEFAULTS = Object.freeze({
   // person pressing anything, so it must be a decision the operator makes, not a surprise.
   autoValidationEnabled: false,
   maxContextBytes: 768,
+  // Existing installs may have this field absent. Keep absence fail-closed; the UI exposes
+  // standard 50k/5 as an explicit preset the operator can save.
   evaluationTokensPerDay: 0,
   evaluationCallsPerDay: 2,
 })
@@ -42,7 +44,7 @@ export const SETTINGS_DEFAULTS = Object.freeze({
 export const CONTEXT_BYTES_MIN = 128
 export const CONTEXT_BYTES_MAX = 1536
 export const EVALUATION_TOKENS_MAX = 1_000_000
-export const EVALUATION_CALLS_MAX = 8
+export const EVALUATION_CALLS_MAX = 20
 
 export const Config = z.object({
   /** 总开关：user intent only. Effective running also needs no legacy controller and a live plugin. */

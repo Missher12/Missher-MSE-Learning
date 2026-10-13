@@ -50,7 +50,7 @@ const operations = new Set(['prepare', 'record', 'accept', 'cancel', 'complete',
   // The step-wise cost report: a multi-step run persists each step's raw usage BEFORE it awaits the
   // next provider call, so a crash between steps cannot lose tokens the provider already reported.
   // It grants no credit, signs nothing and closes nothing.
-  'ticketUsage',
+  'ticketUsage', 'ticketReserve', 'ticketStepStart', 'ticketStepComplete', 'planProgress', 'ticketContinuation',
   'autoCandidates', 'autoCandidateFacts',
   // ── Stage 4c: the scheduler/maintenance half the automatic pass actually consumes ────────────────
   // Opened only now, because only now is there a caller: the Hermes pass advances the SAME persistent
@@ -58,7 +58,11 @@ const operations = new Set(['prepare', 'record', 'accept', 'cancel', 'complete',
   // runs the ONE natural-expiry maintenance transaction. Each is the existing core entry point with
   // its own explicit projection; none of them signs a ticket or calls a model, and none is reachable
   // from a settings/status read.
-  'autoConsiderAdvance', 'recoverAutoPlans', 'maintainLearning'])
+  'autoConsiderAdvance', 'recoverAutoPlans', 'maintainLearning',
+  // The bounded EVIDENCE TRIAL for ordinary experience: the trusted host grants it from real
+  // host-observed failures, so a candidate with no official pack and no registered checker can at
+  // least be OFFERED once and earn real evidence. It validates nothing and spends nothing.
+  'grantEvidenceTrial'])
 /**
  * Minimal, EXPLICIT projections for the operations this stage newly exposes.
  *
@@ -106,10 +110,14 @@ const projections = new Map([
   ['reviewJudge', ['ticket', 'armA', 'armB', 'pass']],
   // The objective track's execution material, one frozen case at a time through the caller's cursor.
   ['objectiveMaterial', ['ticket', 'cursor']],
+  // `steps` and `inputChars` are the caller's WHOLE-PLAN claim: how many physical steps it will run and
+  // the largest host-visible input any one of them sends. The core checks the claim against the
+  // reservation and refuses an unbounded or under-reserved plan (`usage_unprovable`,
+  // `reservation_insufficient`) instead of letting the daily cap be passed mid-run.
   ['reviewRequest', ['lessonId', 'expectedVersion', 'projectKey', 'environmentId', 'maxTokens', 'planHash',
-    'queueKey', 'packId', 'packVersion', 'caseId', 'scenarioHash', 'criteriaHash', 'criteria',
+    'queueKey', 'packId', 'packVersion', 'caseId', 'scenarioHash', 'criteriaHash', 'criteria', 'stepwiseBudget',
     'shortAnswersAllowed', 'sourceBinding', 'sessionId', 'sourceRevision', 'sourceBindingHash',
-    'controlGeneration']],
+    'controlGeneration', 'steps', 'inputChars', 'stepOutputTokens']],
   ['reviewResult', ['ticket', 'lessonId', 'projectKey', 'environmentId', 'planHash', 'packId', 'packVersion',
     'scenarioHash', 'criteriaHash', 'criteria', 'first', 'second', 'truncated', 'costKnown', 'answers',
     'swapped', 'structuredPassed', 'shortAnswersAllowed', 'judge', 'source', 'spent', 'usage',
@@ -121,6 +129,11 @@ const projections = new Map([
   // ticket and nothing else that could re-point the comparison.
   ['objectiveResult', ['ticket', 'lessonId', 'projectKey', 'environmentId', 'expectedVersion', 'eventId',
     'answers', 'usage', 'policy', 'spent', 'ticketUsage', 'sourceBinding']],
+  // The objective REQUEST carries the same whole-plan claim (`cases × 2 arms`, plus the largest input
+  // any one step sends), so a plan that cannot be bounded waits instead of overspending.
+  ['evaluationRequest', ['lessonId', 'expectedVersion', 'projectKey', 'environmentId', 'maxTokens',
+    'planHash', 'queueKey', 'packId', 'packVersion', 'suiteId', 'cases', 'inputChars', 'stepOutputTokens', 'stepwiseBudget', 'sourceBinding',
+    'sessionId', 'sourceRevision', 'sourceBindingHash', 'controlGeneration']],
   // The cold-start discovery read: a host names the candidate, its scope and the source turn, and the
   // core answers with the pack it admits the lesson to, the bounded case references, the case this
   // proposal uses, and the registration document plus identity it would carry.
@@ -133,6 +146,11 @@ const projections = new Map([
   ['autoPlanUpdate', ['queueKey', 'planHash', 'stage', 'evidence', 'ticket', 'reason', 'attempts',
     'nextAttemptAt']],
   ['ticketUsage', ['ticket', 'spent', 'usage']],
+  ['ticketReserve', ['ticket', 'stepKey', 'requestHash', 'inputTokens', 'outputTokens']],
+  ['ticketStepStart', ['ticket', 'stepKey', 'requestHash']],
+  ['ticketStepComplete', ['ticket', 'stepKey', 'requestHash', 'text', 'truncated', 'tokens']],
+  ['planProgress', ['ticket', 'stepKey']],
+  ['ticketContinuation', ['ticket', 'kind']],
   ['autoPlans', []],
   ['autoCandidates', ['limit']],
   ['autoCandidateFacts', ['lessonId', 'version', 'environment', 'track', 'source', 'suite', 'criteria']],
@@ -145,6 +163,9 @@ const projections = new Map([
   // cannot aim it at one plan or one ticket it names.
   ['recoverAutoPlans', []],
   ['maintainLearning', ['limit']],
+  // The licence is granted from the lesson's OWN identity and the evidence already bound to it: the
+  // caller cannot state a reason, an evidence revision, a status or a note.
+  ['grantEvidenceTrial', ['lessonId', 'expectedVersion', 'projectKey', 'environmentId']],
 ])
 const HEX64 = /^[a-f0-9]{64}$/u
 const isPlainObject = value => value !== null && typeof value === 'object'

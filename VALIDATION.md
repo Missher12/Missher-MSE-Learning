@@ -1,8 +1,35 @@
 # MSE Learning 验证记录
 
-## 2026-10-07：0.9.0-alpha.18 交付候选
+## 0.9.0 最终交付
 
-本节记录已完成的分层验收，不把源码、包、受控 UI、真实供应商、日常安装与发布视为同一件事。当前运行候选为 r3；r2 的完整测试与真实调用保留其版本归属，r3 仅改变 DSH `adapters/dsh/index.mjs` 中首次同值设置通知的控制写入行为。其他共享运行字节未变，不等于所有完整测试都在 r3 重跑。
+正式交付采用 rev3 冻结运行包，精确摘要和分层验收见 [PUBLICATION](PUBLICATION.md)。最终包通过 14 个真实 DSH Host 服务上的隔离自动流程及独立进程冷重建：47 次合成请求、0 次真实供应商请求；最终源码另有 36 项独立检查通过。Hermes 的 20K 跨窗口断点恢复及预算组件检查按未变字节复用已有证据。
+
+下面保留开发阶段和历史版本记录，其中“未发布”、rev2 路径与早期真实模型结果只描述各自当时状态。源码发布、安装、原生界面和真实模型质量分别验收；不能用正式 Release 标记替代后几项。
+
+## 开发阶段记录：2026-10-13，0.9.0 发布前候选
+
+本节只记录本轮候选源码和离线验收，不代表已发布、已安装到日常环境或做过真实付费 provider 调用。本轮真实 provider 调用 **0**。
+
+| 层级 | 结果 | 证明范围与边界 |
+| --- | --- | --- |
+| Node 核心/DSH 定向回归 | 108/108 通过；stage3-chain 9/9 通过 | 原核心回归含真实自动计划调用链、滚动 24h 任务与物理请求计数、跨窗口 reserve→start 事务重核；另复跑改动相关 DSH chain |
+| DSH 生产 callModel + scheduler checkpoint | 1/1 通过 | 真实 DSH `callEvaluationModel`、Node 核心和 `createAutoValidation.scan`；无绑定票据确认为 30 分钟，跨日过期后 scheduler 新票重新准入，已完成步骤复用，剩余物理步骤继续；message ID 不参与身份，route/content/effort/output cap 变化被拒绝 |
+| Hermes Stage 4c | 21/21 通过 | 真实 Hermes bridge/driver/pass、真实 Node 核心和已存在的 SDK 环境；provider 使用内存假 transport，不发外部请求。20K 窗口先保存 22 个 step，跨日重建 driver/pass 后保留相同 stepKey/requestHash，只发剩余 14 个，总计 36 个唯一步骤 |
+| Hermes 来源边界 | 通过 | 新进程只在原 session 的 `pre_api_request` 事实重新到达后续跑；不以全局 resolver 猜原 session 路由。缺少新鲜证明时安全等待 |
+| 设置组件审查 | 2/2 通过 | 独立审查覆盖预算档位、旧缺省 0/2 与显式保存；不是原生 DOM/视觉或日常安装验收 |
+| JS/Python 语法检查 | 通过 | Node `--check` 与 Hermes Python `py_compile` |
+| 包构建/manifest/SHA | 通过 | `dist/0.9.0-final-20261013-luna-rev2/` 三个产物均与 manifest 匹配；`verify-package` 的源码覆盖、Hermes/SDK 同 core 与便携检查通过 |
+| 原生安装、Release、日常预算 | 未执行 | 未发布、未安装、未更改日常配置；50K/5 仍需用户明确保存后才会在目标环境生效 |
+
+滚动任务上限计算不同 ticket：当前 24 小时窗口内至少 dispatch 一次才计为任务；同一 ticket 多步骤只计一次。物理请求另计。已完成 checkpoint 的身份包括 provider、model、reasoning effort、system、用户内容和输出上限；DSH 宿主生成的临时 message ID 不属于有效 provider 请求内容，因此不参与 hash。未知费用的已 dispatch 步骤不会重放。
+
+自动评审可因假 transport 的 judge 内容而结束为 `review_inconclusive`；本跨日测试证明的是计划/账务恢复和 checkpoint 复用，不代表评审收益。`benefit` 仍为 `unproven`；试用不是已验证收益。客观验证只覆盖登记领域。没有真实 provider 调用，不能据此声称实际模型质量或长期收益已通过。
+
+---
+
+## 历史记录：2026-10-07，0.9.0-alpha.18 交付候选
+
+以下数据只属于 0.9.0-alpha.18 历史候选，不代表当前 0.9.0 候选的验收结果。旧 r2/r3 的测试、供应商和 UI 证据保留其原始版本归属，不能替代本页上方的本轮证据。
 
 | 层级 | 结果与版本归属 | 证明范围与边界 |
 | --- | --- | --- |
@@ -75,7 +102,7 @@
 
 核心结束进程后，在全新会话只再次给出原任务，没有在用户提示中重述要求。MSE 召回 177 字节经验；真实模型输出与独立预期 `[{"id":"B","amount_cents":250},{"id":"A","amount_cents":1235}]` 相同。宿主检查器授予一次 verified 记录。另一个无关问题的召回为空。
 
-同场景做了两轮：持久预算账目改造前一次，改造后一次，结果一致。最后独立检查了真实复盘产物：candidate=1、verified=0，明确没有把模型自己的总结升级为正确性证据。结构化记录保存在 `evidence/live-correction-smoke.json` 和 `evidence/live-reflection-smoke.json`；没有保存完整模型响应或凭据。
+同场景做了两轮：持久预算账目改造前一次，改造后一次，结果一致。最后独立检查了真实复盘产物：candidate=1、verified=0，明确没有把模型自己的总结升级为正确性证据。当时的结构化记录为 `evidence/live-correction-smoke.json` 和 `evidence/live-reflection-smoke.json`；这些历史文件不纳入当前 0.9.0 公开源码归档，此处只保留历史结论，不作为新版验收。
 
 这证明了“已有偏好跨会话影响行为”和“开放方法可生成候选”两条路径，尚不能证明任意错误被主动阻断、同义改写完全召回、所有 Agent 都能自动接入或长期效果提升。
 
