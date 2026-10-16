@@ -26,6 +26,10 @@ function fakeEngine({ plans = [], reviewVerdict = { ok: true, state: 'reviewed',
       if (!queue.some(row => row.queueKey === plan.queueKey)) queue.push({ ...plan })
       return { ok: true, duplicate: false, plan }
     },
+    autoPlanEconomicAdmission: input => {
+      calls.push(['economicAdmission', input.queueKey, input.planHash, input.requestHashes?.length ?? 0])
+      return { ok: true }
+    },
     autoPlanUpdate: input => { calls.push(['update', input.stage, input.reason ?? null])
       const row = queue.find(item => item.queueKey === input.queueKey)
       if (row !== undefined) Object.assign(row, input)
@@ -34,7 +38,8 @@ function fakeEngine({ plans = [], reviewVerdict = { ok: true, state: 'reviewed',
     reviewRequest: input => { calls.push(['reviewRequest', input.queueKey, Array.isArray(input.criteria)])
       return { ok: true, ticket: 't-review' } },
     reviewResult: input => { calls.push(['reviewResult', input.structuredPassed, input.swapped]); return reviewVerdict },
-    evaluationRequest: input => { calls.push(['evaluationRequest', input.cases.length]); return { ok: true, ticket: 't-objective' } },
+    evaluationRequest: input => { calls.push(['evaluationRequest', input.packId, input.suiteId,
+      Object.hasOwn(input, 'cases')]); return { ok: true, ticket: 't-objective' } },
     evaluate: input => { calls.push(['evaluate', input.basis, Object.keys(input.answers).length]); return evaluateResult },
     evaluationCancel: input => { calls.push(['cancel', input.spent ?? null]); return { ok: true } },
   }
@@ -42,7 +47,9 @@ function fakeEngine({ plans = [], reviewVerdict = { ok: true, state: 'reviewed',
 }
 
 const packContext = () => ({
-  packId: 'mse-lifecycle-v1', suiteId: 'domain-pack:mse-lifecycle-v1:v1', cases: CASES,
+  packId: 'mse-lifecycle-v1',
+  suite: { packId: 'mse-lifecycle-v1', version: 1 },
+  suiteId: 'domain-pack:mse-lifecycle-v1:v1', cases: CASES,
   instruction: '处理请求时先记录代次，迟到结果按代次丢弃', projectKey: '/synthetic/p',
   arm: kind => ({ system: kind === 'candidate' ? '方法：…' : '直接作答', prompt: 'p' }),
 })
@@ -93,10 +100,14 @@ test('the objective track reserves a pack ticket, answers every case and settles
   // Two arms per case, and nothing else: the pack's own checker does the judging inside the core.
   assert.equal(calls, CASES.length * 2, `expected ${CASES.length * 2} arms, got ${calls}`)
   const reserved = engine.calls.find(([name]) => name === 'evaluationRequest')
-  assert.equal(reserved[1], CASES.length)
+  assert.deepEqual(reserved, ['evaluationRequest', 'mse-lifecycle-v1', 'domain-pack:mse-lifecycle-v1:v1', false],
+    'the core owns registered cases; the adapter supplies pack identity, not a caller-authored case list')
   const settled = engine.calls.find(([name]) => name === 'evaluate')
   assert.equal(settled[1], 'host_pack')
   assert.equal(settled[2], CASES.length, 'every case carries an answer')
+  assert.ok(engine.calls.some(([name, queueKey, planHash, hashes]) => name === 'economicAdmission'
+    && queueKey === 'q-objective' && planHash === 'p-objective' && hashes === CASES.length * 2),
+  'the scheduler admits the exact set of actual objective request hashes before reserving')
 })
 
 test('closing the switch stops the run at the next paid step', async () => {

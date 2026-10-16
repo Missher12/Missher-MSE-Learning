@@ -68,6 +68,13 @@ export const Config = z.object({
     .default(SETTINGS_DEFAULTS.evaluationTokensPerDay).volatile(),
   evaluationCallsPerDay: z.number().min(0).max(EVALUATION_CALLS_MAX).step(1)
     .default(SETTINGS_DEFAULTS.evaluationCallsPerDay).volatile(),
+  /** Host-authored deterministic tool contracts; deliberately non-volatile and absent by default. */
+  guardTemplates: z.array(z.object({
+    guardId: z.string().max(64), version: z.number().min(1).max(100000).step(1),
+    mode: z.union([z.const('observe'), z.const('shadow'), z.const('enforce'), z.const('suspended')]),
+    toolName: z.string().max(64), requiredKeys: z.array(z.string().max(64)).max(64),
+    allowedKeys: z.array(z.string().max(64)).max(128),
+  })).max(32).default([]),
   /** Operator fingerprint; not editable, because changing it orphans validated methods. */
   environmentId: z.string(),
   /** Controlled-verification seams (injected clock / settlement options). Not user settings. */

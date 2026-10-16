@@ -12,11 +12,13 @@
 // (`ctx.llm.stream`), the host directory services, and the clock.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply } from '../adapters/dsh/index.mjs'
 import { LearningEngine } from '../src/index.mjs'
+import { createTaskEvidenceAuthority } from '../src/task-evidence.mjs'
 import { createHarnessBridge, mseMessageSource } from '../adapters/harness.mjs'
 import { packCases, packCaseCriteriaHash, packScenarioHash } from '../src/domains.mjs'
 
@@ -25,6 +27,7 @@ const DAY = 86_400_000
 const PACK_ID = 'mse-lifecycle-v1'
 const IN_DOMAIN = '处理请求时先记录代次，再把迟到结果按代次丢弃'
 const OUT_OF_DOMAIN = '数字排序时先将字符串转换为数值，再按照数值从小到大排序'
+const PACKAGE_PACK = 'package-json-structure-v1'
 const PROJECT = '/synthetic/chain-project'
 const SESSION = 'chain-session'
 
@@ -38,7 +41,7 @@ const SESSION = 'chain-session'
  * cordis would have run them. Nothing here relaxes a product gate: unknown usage would still be
  * refused, a blocked source would still stop the run, and a missing route would still park it.
  */
-function hostContext(stateRoot, { answer } = {}) {
+function hostContext(stateRoot, { answer, fs } = {}) {
   const services = new Map()
   const listeners = []
   const warnings = [], infos = []
@@ -50,6 +53,7 @@ function hostContext(stateRoot, { answer } = {}) {
     .filter(block => block?.type === 'text').map(block => block.text).join('')).join('\n')
   const ctx = {
     dshHomePath: () => stateRoot,
+    ...(fs ? { fs } : {}),
     logger: { warn: (...args) => warnings.push(args.map(String).join(' ')),
       info: (...args) => infos.push(args.map(String).join(' ')),
       error: (...args) => warnings.push(args.map(String).join(' ')),
@@ -121,21 +125,21 @@ const lifecycleAnswer = ({ prompt, system }) => {
 }
 
 function chain({ answer = lifecycleAnswer, tokens = 20_000, calls = 3, archived = false, emit = () => {},
-  omitBudgetFields = false } = {}) {
+  omitBudgetFields = false, reflectionEnabled = false, fs = undefined } = {}) {
   const stateRoot = mkdtempSync(join(tmpdir(), 'mse-chain-'))
-  const host = hostContext(stateRoot, { answer })
+  const host = hostContext(stateRoot, { answer, fs })
   // The host's own directory services, present BEFORE the plugin loads (the plugin reads them at
   // load time): one live session whose header names the project directory its turns belong to and
   // whose request header names the route they really used, plus a workspace registry whose archive
   // truth is a synchronous in-memory fact. Both are what the permit re-reads on every paid step.
-  const session = { header: { id: SESSION, cwd: PROJECT }, events: [{ seq: 1, type: 'request/header',
+  const session = { id: SESSION, cwd: PROJECT, header: { id: SESSION, cwd: PROJECT }, events: [{ seq: 1, type: 'request/header',
     data: { header: { config: { provider: 'fixture-provider', model: 'fixture-model', reasoningEffort: 'max' } } } }] }
-  host.services.set('sessionQuery', { listSessions: async () => [session], readSession: async () => session })
+  host.services.set('sessionQuery', { listSessions: async () => [session], readSession: async () => ({ session, events: session.events }) })
   host.services.set('workspaceRegistry', { archivedSessionIds: archived ? [SESSION] : [] })
   // A method recorded through the public API carries its source TURN but no session id, so its route
   // comes from the verification session the operator explicitly named — the production path for
   // reviewing a task that already happened. Nothing here borrows a route the host did not name.
-  const config = { enabled: true, reflectionEnabled: false, autoValidationEnabled: true,
+  const config = { enabled: true, reflectionEnabled, autoValidationEnabled: true,
     verificationSessionId: SESSION, maxContextBytes: 768,
     ...(omitBudgetFields ? {} : { evaluationTokensPerDay: tokens, evaluationCallsPerDay: calls }) }
   apply(host.ctx, config)
@@ -145,7 +149,7 @@ function chain({ answer = lifecycleAnswer, tokens = 20_000, calls = 3, archived 
   // read-back view (exactly what a restart of the plugin would do).
   const reader = new LearningEngine({ stateRoot, adapterId: 'dsh', maxContextBytes: 768,
     ...(omitBudgetFields ? {} : { evaluationTokensPerDay: tokens, evaluationCallsPerDay: calls }) })
-  return { ...host, stateRoot, service, reader,
+  return { ...host, stateRoot, service, reader, session,
     cleanup: () => rmSync(stateRoot, { recursive: true, force: true }) }
 }
 
@@ -166,6 +170,206 @@ test('legacy missing budgets remain fail-closed, and explicit zero/custom values
       assert.equal(settings.user.evaluationCallsPerDay, calls)
     } finally { configured.cleanup() }
   }
+})
+
+test('real DSH file events create the automatic package.json candidate and enter the budgeted fair queue', async t => {
+  const disk = mkdtempSync(join(tmpdir(), 'mse-package-chain-'))
+  const diskFile = join(disk, 'package.json')
+  const virtualFile = join(PROJECT, 'package.json')
+  const fs = {
+    resolve: async path => ({ displayPath: path, diskPath: diskFile }),
+    stat: async target => {
+      const value = statSync(target.diskPath, { bigint: true })
+      return { type: 'file', size: Number(value.size), version: `${value.dev}:${value.ino}:${value.size}:${value.mtimeNs}` }
+    },
+    readText: async target => readFileSync(target.diskPath, 'utf8'),
+  }
+  const answer = () => JSON.stringify({ instruction: '处理 package.json 时先按任务修复标准字段类型，生成完整 JSON，并保留所有无关字段。' })
+  const c = chain({ answer, reflectionEnabled: true, tokens: 0, calls: 0, fs })
+  t.after(() => { c.cleanup(); rmSync(disk, { recursive: true, force: true }) })
+  c.start()
+  const session = c.session
+  let writes = 0
+  const hostWrite = async (content, turn) => {
+    writeFileSync(diskFile, content, 'utf8')
+    const callId = `package-host-write-${++writes}`
+    session.events.push({ type: 'tool/call', data: { callId, turn: String(turn) } })
+    session.seq = session.events.length
+    const exec = { name: 'str_replace_editor', token: Symbol(callId), rootCallId: callId,
+      arguments: { command: writes === 1 ? 'create' : 'str_replace' }, signal: new AbortController().signal,
+      agent: { session } }
+    const target = await fs.resolve(virtualFile)
+    const observed = await fs.stat(target)
+    c.emit('fs/observed', { displayPath: virtualFile }, { kind: 'present', version: observed.version }, exec)
+    c.emit('tools/result', exec, { isError: false })
+    assert.equal(await waitFor(() => c.service.engine.taskEvidenceStatus().records >= writes), true,
+      'the Host observer completed its bounded readback')
+  }
+  await driveTurn(c, session, 1, { prompt: '修复 package.json 的 scripts 字段并保留扩展字段。', duringTurn: async () => {
+    await hostWrite('{"scripts":{"test":17},"extensionField":"allowed"}', 1)
+    await hostWrite('{"scripts":{"test":"node --test"},"extensionField":"allowed"}', 1)
+    await hostWrite('{"scripts":{"test":17},"extensionField":"allowed"}', 1)
+  } })
+  const sourceRow = c.service.engine.sourceStatus({ limit: 64 }).rows.find(row =>
+    row.sessionHash === createHash('sha256').update(SESSION).digest('hex'))
+  assert.equal(sourceRow?.driver, 'dsh_host_stream')
+  assert.equal(sourceRow?.identity.reasoningState, 'explicit')
+  assert.equal(sourceRow?.identity.reasoningValue, 'max')
+  assert.equal(c.service.engine.taskEvidenceReplayCases({ projectKey: PROJECT, limit: 2 }).cases.length, 1,
+    'the true project scope has a durable fail/control replay pair')
+  const evidence = c.service.engine.taskEvidenceStatus()
+  assert.equal(evidence.records, 3)
+  assert.equal(evidence.replayCases, 1, 'the observed bad and normal artifacts produced a durable replay pair')
+  assert.equal(await waitFor(() => c.service.engine.problemStatus({ limit: 8 }).rows.some(row => row.state === 'candidate_created')),
+    true, `the ordinary problem pump reflected the host failure into a candidate without a manual lesson write: ${JSON.stringify({
+      problems: c.service.engine.problemStatus({ limit: 8 }), pump: c.service.problemPump(), calls: c.modelCalls.map(x => x.prompt.slice(0, 120)) })}`)
+  const candidate = c.reader.list({ projectKey: PROJECT, limit: 16 }).lessons.find(row =>
+    row.kind === 'method' && row.instruction.includes('package.json'))
+  assert.ok(candidate, 'the candidate came from the reflection pipeline')
+  assert.equal(packCases('package-json-structure-v1').filter(row => row.split === 'development').length, 12)
+  assert.equal(packCases('package-json-structure-v1').filter(row => row.split === 'holdout').length, 4)
+  c.emit('settings/document-updated', 'mse-learning')
+  assert.equal(await waitFor(() => c.service.autoValidation().plans > 0), true,
+    'the automatic scheduler registered the domain plans even though the budget is empty')
+  assert.equal(c.reader.status().evaluationTokensReserved24h, 0, 'zero budget prevents every physical evaluation reservation')
+})
+
+test('DSH automatic package trajectory: Host failure → candidate → 12+4/replay promotion → natural adoption', async t => {
+  const disk = mkdtempSync(join(tmpdir(), 'mse-package-full-auto-'))
+  const diskFile = join(disk, 'package.json')
+  const virtualFile = join(PROJECT, 'package.json')
+  const fs = {
+    resolve: async path => ({ displayPath: path, diskPath: diskFile }),
+    stat: async target => {
+      const value = statSync(target.diskPath, { bigint: true })
+      return { type: 'file', size: Number(value.size), version: `${value.dev}:${value.ino}:${value.size}:${value.mtimeNs}` }
+    },
+    readText: async target => readFileSync(target.diskPath, 'utf8'),
+  }
+  const answer = ({ prompt, system }) => {
+    if (system.includes('独立的答案评审')) return JSON.stringify({ winner: 'tie', reason: '两条答案都符合冻结准则。',
+      criteria: packCases(PACKAGE_PACK)[0].criteria.map(row => ({ id: row.id, met: 'both' })) })
+    if (system.includes('修复后的完整 JSON 对象')) {
+      let value
+      try { value = JSON.parse(prompt) } catch { return '{"scripts":{"test":"node --test"}}' }
+      for (const [key, replacement] of Object.entries({ name: 'app', version: '1.0.0', description: '',
+        homepage: 'https://example.invalid', private: true, files: [], scripts: { test: 'node --test' } })) {
+        if (Object.hasOwn(value, key)) {
+          if (key === 'scripts' && value.scripts && typeof value.scripts === 'object') {
+            value.scripts = Object.fromEntries(Object.keys(value.scripts).map(name => [name, 'node --test']))
+          } else value[key] = replacement
+        }
+      }
+      return JSON.stringify(value)
+    }
+    const testCase = packCases(PACKAGE_PACK).find(row => prompt.includes(row.prompt))
+    if (testCase && system.includes('冻结验证场景')) return JSON.stringify(testCase.checker.expected)
+    if (testCase && system.includes('你是任务执行器')) return system.includes('严格按下面这条方法作答')
+      ? JSON.stringify(testCase.checker.expected) : '{}'
+    return JSON.stringify({ instruction: '修复 package.json 时只修改标准字段的错误类型，保留扩展字段并输出完整 JSON。' })
+  }
+  const c = chain({ answer, reflectionEnabled: true, tokens: 50_000, calls: 5, fs })
+  t.after(() => { c.cleanup(); rmSync(disk, { recursive: true, force: true }) })
+  c.start()
+  const session = c.session
+  let writes = 0
+  const hostWrite = async (content, turn) => {
+    writeFileSync(diskFile, content, 'utf8')
+    const callId = `full-auto-host-write-${++writes}`
+    session.events.push({ type: 'tool/call', data: { callId, turn: String(turn) } })
+    session.seq = session.events.length
+    const exec = { name: 'str_replace_editor', token: Symbol(callId), rootCallId: callId,
+      arguments: { command: writes === 1 ? 'create' : 'str_replace' }, signal: new AbortController().signal,
+      agent: { session } }
+    const target = await fs.resolve(virtualFile)
+    const observed = await fs.stat(target)
+    c.emit('fs/observed', { displayPath: virtualFile }, { kind: 'present', version: observed.version }, exec)
+    c.emit('tools/result', exec, { isError: false })
+    if (writes <= 3) assert.equal(await waitFor(() => c.service.engine.taskEvidenceStatus().records >= writes), true)
+  }
+
+  await driveTurn(c, session, 1, { prompt: '修复 package.json 的 scripts 字段并保留扩展字段。', duringTurn: async () => {
+    await hostWrite('{"scripts":{"test":17},"extensionField":"allowed"}', 1)
+    await hostWrite('{"scripts":{"test":"node --test"},"extensionField":"allowed"}', 1)
+    await hostWrite('{"scripts":{"test":17},"extensionField":"allowed"}', 1)
+  } })
+  const sourceRow = c.service.engine.sourceStatus({ limit: 64 }).rows.find(row =>
+    row.sessionHash === createHash('sha256').update(SESSION).digest('hex'))
+  assert.equal(sourceRow?.driver, 'dsh_host_stream')
+  assert.equal(sourceRow?.identity.reasoningState, 'explicit')
+  assert.equal(sourceRow?.identity.reasoningValue, 'max')
+  assert.equal(await waitFor(() => c.service.engine.problemStatus({ limit: 8 }).rows.some(row => row.state === 'candidate_created')),
+    true, 'Host checker failure automatically produces a candidate')
+  const candidate = c.reader.list({ projectKey: PROJECT, limit: 16 }).lessons.find(row =>
+    row.kind === 'method' && row.instruction.includes('package.json'))
+  assert.ok(candidate)
+  assert.equal(packCases(PACKAGE_PACK).filter(row => row.split === 'development').length, 12)
+  assert.equal(packCases(PACKAGE_PACK).filter(row => row.split === 'holdout').length, 4)
+  let promoted = false
+  const routeReads = []
+  const sessionQuery = c.services.get('sessionQuery')
+  const readSession = sessionQuery.readSession
+  sessionQuery.readSession = async id => { routeReads.push(id); return readSession(id) }
+  for (let attempt = 0; attempt < 20 && !promoted; attempt += 1) {
+    c.emit('settings/document-updated', 'mse-learning')
+    for (let poll = 0; poll < 60 && !promoted; poll += 1) {
+      promoted = c.reader.list({ projectKey: PROJECT, limit: 16 }).lessons
+        .find(row => row.id === candidate.id)?.status === 'validated'
+      if (!promoted) await new Promise(resolve => setTimeout(resolve, 25))
+    }
+  }
+  assert.equal(promoted, true,
+  `automatic objective did not promote: ${JSON.stringify({ calls: c.modelCalls.length,
+    status: c.reader.list({ projectKey: PROJECT, limit: 16 }).lessons.find(row => row.id === candidate.id),
+    audit: c.service.autoValidation(), calls: c.modelCalls.map(row => ({ system: row.system.slice(0, 100),
+      prompt: row.prompt.slice(0, 140), text: row.text })), routeReads,
+    plans: c.reader.autoPlans() })}`)
+  assert.ok(c.modelCalls.some(row => row.prompt.startsWith('{"scripts":{"test":17}')),
+    'the frozen bad/control replay pair reached the automatic candidate arm')
+
+  const adoptedVersion = c.reader.inspect({ projectKey: PROJECT, id: candidate.id }).lessons[0].version
+  const taskAuthority = createTaskEvidenceAuthority(c.service.engine)
+  const wrongScopeContent = '{"scripts":{"test":17},"binding":"wrong-scope"}'
+  const wrongEnvironmentContent = '{"scripts":{"test":17},"binding":"wrong-environment"}'
+  const recordUnbound = (eventId, content, projectKey, environmentId) => c.service.engine.recordPackageJsonArtifact(taskAuthority, {
+    adapterId: 'dsh', content, environmentId, eventId, filename: 'package.json',
+    fileHash: createHash('sha256').update(content).digest('hex'), lessonId: null, lessonVersion: null,
+    model: 'fixture-model', projectKey, provider: 'fixture-provider', reasoningEffort: 'max',
+    sessionId: SESSION, toolchain: 'dsh-file-editor-v1', turnId: '2' })
+  recordUnbound('wrong-scope-before-adoption', wrongScopeContent, `${PROJECT}/other`, c.service.environmentId ?? null)
+  recordUnbound('wrong-environment-before-adoption', wrongEnvironmentContent, PROJECT, 'different-environment')
+  let preAdoptionDigest
+  const adoption = await driveTurn(c, session, 2, { prompt: candidate.instruction,
+    beforeStream: async () => {
+      await hostWrite('{"scripts":{"test":17},"extensionField":"before-adoption-commit"}', 2)
+      assert.equal(await waitFor(() => c.service.engine.taskEvidenceStatus().records >= 6), true)
+      preAdoptionDigest = c.service.engine.store.read().taskEvidence.records.at(-1).digest
+    },
+    duringTurn: async () => {
+      assert.ok(c.service.engine.taskEvidenceStatus().latest.length >= 1)
+    } })
+  assert.ok(adoption.decision.messages.some(row => row.source?.kind === 'plugin:mse-learning'),
+    'the next natural task receives the promoted method through DSH recall')
+  assert.equal(await waitFor(() => c.reader.inspect({ projectKey: PROJECT, id: candidate.id }).lessons[0]?.status === 'suspended'),
+    true, 'same-turn trusted Host counterevidence withdraws the promoted method')
+  const evidenceLedger = c.service.engine.store.read().taskEvidence
+  assert.equal(evidenceLedger.adoptionAttributions.length, 1)
+  const sourceBinding = evidenceLedger.records.find(row => row.digest === preAdoptionDigest).sourceBinding
+  assert.deepEqual(evidenceLedger.adoptionAttributions[0], { ...sourceBinding, evidenceDigest: preAdoptionDigest,
+    lessonId: candidate.id, version: adoptedVersion, at: evidenceLedger.adoptionAttributions[0].at },
+  'accept binds only the exact scope/environment raw fact to the accepted version without rewriting its digest')
+  const retired = c.reader.inspect({ projectKey: PROJECT, id: candidate.id }).lessons[0]
+  assert.equal(retired.suspensionReason, 'regression')
+  const cold = new LearningEngine({ stateRoot: c.stateRoot, adapterId: 'dsh', now: () => Date.now(),
+    evaluationTokensPerDay: 50_000, evaluationCallsPerDay: 5 })
+  const next = cold.prepare({ sessionId: SESSION, turnId: '3', origin: 'user', projectKey: PROJECT,
+    prompt: candidate.instruction })
+  assert.equal(next.lessonVersions?.some(row => row.id === candidate.id), false,
+    'the Host-withdrawn version remains out of recall after a cold core restart')
+  assert.deepEqual(cold.store.read().taskEvidence.adoptionAttributions, evidenceLedger.adoptionAttributions,
+    'the exact evidence attribution survives store reopen')
+  assert.ok(c.service.engine.status().evaluationCallsLast24h <= 5)
+  assert.ok(c.service.engine.status().evaluationTokensReserved24h <= 50_000)
 })
 
 const method = (engine, instruction) => {
@@ -388,13 +592,17 @@ test('the plugin wakes up, retires an expired licence and buys no renewal withou
  * drive a real turn through `agent/pre-step` → `llm/stream` → `session/event`, so the REAL guard and
  * the REAL settlement queue decide; nothing here refreshes, restores or scans on the product's behalf.
  */
-const driveTurn = async (c, session, turn = 1) => {
+const driveTurn = async (c, session, turn = 1, { prompt = IN_DOMAIN, beforeStream = async () => {},
+  duringTurn = async () => {} } = {}) => {
   const handlers = name => c.listeners.filter(row => row.name === name).map(row => row.handler)
-  const message = { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: IN_DOMAIN }] }
-  const decision = await handlers('agent/pre-step')[0]({ agent: { session }, step: 1, turn,
+  const message = { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: prompt }] }
+  const decision = await handlers('agent/pre-step')[0]({ agent: { session,
+    options: { provider: 'fixture-provider', model: 'fixture-model', reasoningEffort: 'max' } }, step: 1, turn,
     messages: [message], signal: new AbortController().signal }, async () => ({ kind: 'enter', messages: [message] }))
+  await beforeStream({ decision })
   for await (const chunk of handlers('llm/stream')[0]({ sessionId: session.header.id, messages: decision.messages },
     async function * () { yield { type: 'finish', reason: { kind: 'stop' } } })) assert.equal(chunk.type, 'finish')
+  await duringTurn({ handlers, decision })
   for (const handler of handlers('session/event')) {
     handler(session, { type: 'turn/end', data: { turn, reason: { kind: 'completed' } } })
   }

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { LearningEngine } from './index.mjs'
+import { createTaskEvidenceAuthority } from './task-evidence.mjs'
 
 // Local trusted-host transport. stdout is protocol-only; no shell commands or model calls.
 const operations = new Set(['prepare', 'record', 'accept', 'cancel', 'complete', 'status', 'reflectionRequest', 'reflectionResult',
@@ -62,7 +63,7 @@ const operations = new Set(['prepare', 'record', 'accept', 'cancel', 'complete',
   // The bounded EVIDENCE TRIAL for ordinary experience: the trusted host grants it from real
   // host-observed failures, so a candidate with no official pack and no registered checker can at
   // least be OFFERED once and earn real evidence. It validates nothing and spends nothing.
-  'grantEvidenceTrial'])
+  'grantEvidenceTrial', 'recordPackageJsonArtifact', 'taskEvidenceStatus', 'taskEvidenceReplayCases'])
 /**
  * Minimal, EXPLICIT projections for the operations this stage newly exposes.
  *
@@ -128,21 +129,21 @@ const projections = new Map([
   // manifest and the source identity all come from the ticket, so the caller carries answers and a
   // ticket and nothing else that could re-point the comparison.
   ['objectiveResult', ['ticket', 'lessonId', 'projectKey', 'environmentId', 'expectedVersion', 'eventId',
-    'answers', 'usage', 'policy', 'spent', 'ticketUsage', 'sourceBinding']],
+    'answers', 'usage', 'policy', 'spent', 'ticketUsage', 'sourceBinding', 'taskReplayResults']],
   // The objective REQUEST carries the same whole-plan claim (`cases × 2 arms`, plus the largest input
   // any one step sends), so a plan that cannot be bounded waits instead of overspending.
   ['evaluationRequest', ['lessonId', 'expectedVersion', 'projectKey', 'environmentId', 'maxTokens',
     'planHash', 'queueKey', 'packId', 'packVersion', 'suiteId', 'cases', 'inputChars', 'stepOutputTokens', 'stepwiseBudget', 'sourceBinding',
-    'sessionId', 'sourceRevision', 'sourceBindingHash', 'controlGeneration']],
+    'sessionId', 'sourceRevision', 'sourceBindingHash', 'controlGeneration', 'taskReplayCases']],
   // The cold-start discovery read: a host names the candidate, its scope and the source turn, and the
   // core answers with the pack it admits the lesson to, the bounded case references, the case this
   // proposal uses, and the registration document plus identity it would carry.
   ['autoPlanProposal', ['lessonId', 'version', 'environment', 'projectKey', 'environmentId', 'track',
     'source', 'caseId', 'criteria', 'sourceBinding']],
   ['autoPlanRegister', ['lessonId', 'version', 'environment', 'track', 'source', 'suite', 'caseId',
-    'criteria', 'sourceBinding']],
+    'criteria', 'sourceBinding', 'requestHashes']],
   ['autoPlanIdentity', ['lessonId', 'version', 'environment', 'track', 'source', 'suite', 'caseId',
-    'criteria', 'sourceBinding']],
+    'criteria', 'sourceBinding', 'requestHashes']],
   ['autoPlanUpdate', ['queueKey', 'planHash', 'stage', 'evidence', 'ticket', 'reason', 'attempts',
     'nextAttemptAt']],
   ['ticketUsage', ['ticket', 'spent', 'usage']],
@@ -166,6 +167,10 @@ const projections = new Map([
   // The licence is granted from the lesson's OWN identity and the evidence already bound to it: the
   // caller cannot state a reason, an evidence revision, a status or a note.
   ['grantEvidenceTrial', ['lessonId', 'expectedVersion', 'projectKey', 'environmentId']],
+  ['recordPackageJsonArtifact', ['adapterId', 'content', 'environmentId', 'eventId', 'fileHash', 'filename',
+    'lessonId', 'lessonVersion', 'model', 'projectKey', 'provider', 'reasoningEffort', 'sessionId', 'toolchain', 'turnId']],
+  ['taskEvidenceStatus', []],
+  ['taskEvidenceReplayCases', ['projectKey', 'environmentId', 'limit', 'ids', 'ticket']],
 ])
 const HEX64 = /^[a-f0-9]{64}$/u
 const isPlainObject = value => value !== null && typeof value === 'object'
@@ -315,7 +320,17 @@ try {
   if (request.op === 'ticketUsage' && !guardedUsage(value)) throw refuse('invalid_usage')
   const engine = new LearningEngine(request.config)
   const method = aliases.get(request.op) ?? request.op
-  process.stdout.write(JSON.stringify(engine[method](value)) + '\n')
+  const result = request.op === 'recordPackageJsonArtifact'
+    ? engine.recordPackageJsonArtifact(createTaskEvidenceAuthority(engine), value)
+    : engine[method](value)
+  // Hermes uses this read only to recover the frozen source identity for an existing ticket. The
+  // core result also contains a full lesson and replay fixtures; returning those here is redundant
+  // and can exceed the bridge's unchanged 8 KiB protocol cap. Keep the driver's complete contract
+  // while bounding this transport projection to the one identity it consumes.
+  const output = request.op === 'ticketContinuation' && result?.ok === true
+    ? { ok: true, job: { source: result.job?.source ?? null } }
+    : result
+  process.stdout.write(JSON.stringify(output) + '\n')
 } catch (error) {
   process.stdout.write(JSON.stringify({ ok: false, code: error.code ?? 'invalid_request' }) + '\n')
   process.exitCode = 1

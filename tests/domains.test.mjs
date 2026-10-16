@@ -10,7 +10,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { DOMAIN_PACKS, getDomainPack, listDomainPacks, packCases, packCriteriaHash, packScenarioHash,
+import { DOMAIN_PACKS, getDomainPack, listDomainPacks, packAdmits, packCases, packCriteriaHash, packScenarioHash,
   packSuiteId, packTrials } from '../src/domains.mjs'
 import { CHECKER_KINDS, MAX_CASE_PROMPT_CHARS, MAX_EXPECTED_CHARS, MAX_EXPECTED_LINES, MAX_FORBIDDEN,
   MAX_FORBIDDEN_CHARS, caseManifest, normalizeCases, scoreOutput, strictJson, taskIndependence } from '../src/cases.mjs'
@@ -34,8 +34,8 @@ const answersFor = pick => Object.fromEntries(packCases(PACK_ID)
 
 test('the pack is one frozen, version-bound registration and the index reports its true shape', () => {
   const listed = listDomainPacks()
-  assert.equal(listed.length, 1, 'exactly one registered pack for now')
-  const [entry] = listed
+  assert.equal(listed.length, 2, 'the lifecycle and package.json domains are independently registered')
+  const entry = listed.find(row => row.packId === PACK_ID)
   assert.equal(entry.packId, PACK_ID)
   assert.equal(entry.version, 1)
   assert.equal(typeof entry.title, 'string')
@@ -276,7 +276,36 @@ test('criteria and scenario hashes are stable, hex, and bound to the registered 
 
 test('the suite id is exactly domain-pack:mse-lifecycle-v1:v1', () => {
   assert.equal(packSuiteId(getDomainPack(PACK_ID)), 'domain-pack:mse-lifecycle-v1:v1')
-  assert.equal(packSuiteId(listDomainPacks()[0]), 'domain-pack:mse-lifecycle-v1:v1')
+  assert.equal(packSuiteId(listDomainPacks().find(row => row.packId === PACK_ID)), 'domain-pack:mse-lifecycle-v1:v1')
   assert.equal(packSuiteId(undefined), null)
   assert.equal(packSuiteId({ packId: PACK_ID }), null, 'no version, no bound suite id')
+})
+
+test('the registered package.json domain has 12 development cases and 4 independent holdout cases', () => {
+  const id = 'package-json-structure-v1'
+  const cases = packCases(id)
+  assert.equal(cases.length, 16)
+  assert.equal(getDomainPack(id).version, 2)
+  assert.equal(cases.filter(row => row.split === 'development').length, 12)
+  assert.equal(cases.filter(row => row.split === 'holdout').length, 4)
+  assert.ok(new Set(cases.map(row => row.family)).size >= 4)
+  assert.equal(packAdmits(id, 'package.json manifest structure and JSON known field types validation').ok, true)
+  assert.equal(packAdmits(id, 'sort the project files by date').ok, false)
+  for (const row of cases) {
+    assert.equal(row.prompt.includes('package.json'), true)
+    assert.equal(row.criteria.length, 2)
+    assert.equal(row.checker.kind, 'json-deep-equal-v1')
+    assert.match(row.prompt, /只输出完整 JSON 对象/u)
+  }
+  const usage = Object.fromEntries(cases.map(row => [row.caseId, { baseline: 7, candidate: 5 }]))
+  const answers = Object.fromEntries(cases.map(row => [row.caseId,
+    { baseline: wrongAnswer(row), candidate: correctAnswer(row) }]))
+  const trials = packTrials(id, { answers, usage })
+  assert.equal(trials.filter(row => row.split === 'development').length, 12)
+  assert.equal(trials.filter(row => row.split === 'holdout').length, 4)
+  assert.ok(trials.every(row => !row.baseline.passed && row.candidate.passed && row.guardPassed))
+  assert.equal(assessEvaluation({ trials }).decision, 'accepted')
+  assert.equal(assessEvaluation({ trials: packTrials(id, { answers: Object.fromEntries(cases.map(row => [row.caseId,
+    { baseline: correctAnswer(row), candidate: correctAnswer(row) }])), usage }) }).decision, 'rejected',
+  'an edit task with no measured artifact improvement cannot promote')
 })

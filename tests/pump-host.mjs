@@ -286,6 +286,17 @@ export async function runTurn(host, { session, turn, prompt = '整理报表并�
   const decision = await host.emit('agent/pre-step', { agent: { session, options },
     step: 1, turn, messages: [userMessage], signal: new AbortController().signal },
   async () => ({ kind: 'enter', messages: [userMessage] }))[0]
+  // The source licence is created only by a successful Host-owned llm/stream carrying this turn's
+  // actual route. Drive that production hook with a deterministic upstream stream; calling
+  // sourcePublish directly here would bypass the contract these recovery tests are meant to prove.
+  if (typeof options?.provider === 'string' && typeof options?.model === 'string') {
+    const streamOptions = { sessionId: session.id, provider: options.provider, model: options.model,
+      ...(typeof options.reasoningEffort === 'string' ? { reasoningEffort: options.reasoningEffort } : {}) }
+    const stream = host.emit('llm/stream', streamOptions, async function * () {
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })[0]
+    for await (const _chunk of stream) { /* deterministic Host response; no provider transport */ }
+  }
   tools.forEach((tool, index) => {
     // Deterministic call ids: the same trajectory on two hosts must produce the same state bytes,
     // and an id is the host's own stable event identity (never a freshly minted random one).

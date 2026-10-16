@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { createHash } from 'node:crypto'
+import { evaluationRequestHash } from './evaluation-request.mjs'
 import { LearningEngine, reflect, guardedAction, RECALL_REASONS } from '../../src/index.mjs'
 import { createHarnessBridge, mseMessageSource } from '../harness.mjs'
 import { formatRecallLine, handleMseCommand } from '../../src/status.mjs'
@@ -19,6 +20,82 @@ import { assessEvaluation, DEFAULT_EVALUATION_POLICY } from '../../src/evaluatio
 import { readVolatile, SETTINGS_DEFAULTS, CONTEXT_BYTES_MIN, CONTEXT_BYTES_MAX,
   EVALUATION_TOKENS_MAX, EVALUATION_CALLS_MAX } from './config.mjs'
 import { shortHash } from './project.mjs'
+import { validateGuardTemplate, createGuardFunction, checkGuard } from '../../src/guards.mjs'
+import { createTaskEvidenceAuthority } from '../../src/task-evidence.mjs'
+
+/** Observe the real DSH file editor and verify the project's root package.json structure. */
+export function registerDshProjectManifestIntake(ctx, { engine, bridge, environmentId, enabled = () => true }) {
+  if (!ctx.fs || typeof ctx.fs.resolve !== 'function' || typeof ctx.fs.stat !== 'function'
+    || typeof ctx.fs.readText !== 'function' || typeof ctx.on !== 'function') {
+    return Object.assign(() => {}, { registered: false })
+  }
+  const authority = createTaskEvidenceAuthority(engine)
+  const writes = new Map(), inFlight = new Set(), MAX_PENDING = 64
+  let disposed = false
+  const turnFor = (session, callId) => {
+    const count = session?.seq ?? session?.events?.length ?? 0
+    for (let n = count - 1; n >= Math.max(0, count - 1000); n--) {
+      const event = session.eventAt?.(n) ?? session.events?.[n]
+      if (event?.type === 'tool/call' && event.data.callId === callId) return String(event.data.turn)
+    }
+    return null
+  }
+  const stopObserved = ctx.on('fs/observed', (target, observation, exec) => {
+    if (disposed || !enabled() || exec?.name !== 'str_replace_editor' || typeof exec.token !== 'symbol'
+      || !['create', 'str_replace', 'insert'].includes(exec.arguments?.command)) return
+    const session = exec.agent?.session, callId = exec.rootCallId ?? exec.callId
+    const cwd = session?.header?.cwd
+    if (typeof session?.id !== 'string' || typeof cwd !== 'string' || !isAbsolute(cwd)
+      || typeof callId !== 'string' || typeof observation?.version !== 'string'
+      || observation.kind !== 'present' || writes.size + inFlight.size >= MAX_PENDING) return
+    const expectedPath = resolve(cwd, 'package.json')
+    if (target?.displayPath !== expectedPath) return
+    const turnId = turnFor(session, callId)
+    if (turnId === null) return
+    writes.set(exec.token, { expectedPath, version: observation.version, sessionId: session.id,
+      turnId, callId, projectKey: cwd })
+  })
+  const processResult = async (exec, result) => {
+    const write = writes.get(exec?.token)
+    writes.delete(exec?.token)
+    if (disposed || !enabled() || !write || exec?.name !== 'str_replace_editor' || result?.isError !== false) return
+    try {
+      const session = exec.agent?.session
+      if (!session || session.id !== write.sessionId || turnFor(session, write.callId) !== write.turnId) return
+      const context = bridge.taskContext(session.id, write.turnId)
+      if (!context || context.projectKey !== write.projectKey || typeof context.provider !== 'string'
+        || typeof context.model !== 'string') return
+      const recalledMethods = context.accepted === true
+        ? context.lessons : []
+      const adopted = recalledMethods.length === 1 ? recalledMethods[0] : null
+      const target = await ctx.fs.resolve(write.expectedPath, { signal: exec.signal })
+      if (disposed || !enabled() || target?.displayPath !== write.expectedPath) return
+      const first = await ctx.fs.stat(target, exec.signal)
+      if (disposed || !enabled() || first?.type !== 'file' || first.version !== write.version
+        || !Number.isSafeInteger(first.size) || first.size < 0 || first.size > 32_000) return
+      const content = await ctx.fs.readText(target, exec.signal)
+      if (disposed || !enabled()) return
+      const second = await ctx.fs.stat(target, exec.signal)
+      if (second?.type !== 'file' || second.version !== first.version
+        || typeof content !== 'string' || Buffer.byteLength(content, 'utf8') > 32_000) return
+      if (disposed || !enabled() || exec.agent?.session?.id !== write.sessionId
+        || turnFor(exec.agent?.session, write.callId) !== write.turnId) return
+      const fileHash = createHash('sha256').update(content).digest('hex')
+      engine.recordPackageJsonArtifact(authority, { adapterId: 'dsh', content, environmentId: environmentId ?? null,
+        eventId: write.callId, fileHash, filename: basename(write.expectedPath), model: context.model,
+        lessonId: adopted?.id ?? null, lessonVersion: adopted?.version ?? null,
+        projectKey: write.projectKey, provider: context.provider, reasoningEffort: context.reasoningEffort ?? null,
+        sessionId: session.id, toolchain: 'dsh-file-editor-v1', turnId: write.turnId })
+    } catch { /* Missing/raced/denied readback remains unknown; never infer credit from the tool text. */ }
+  }
+  const stopResult = ctx.on('tools/result', (exec, result) => {
+    const task = processResult(exec, result)
+    inFlight.add(task)
+    task.finally(() => inFlight.delete(task))
+  })
+  const dispose = () => { disposed = true; writes.clear(); stopResult?.(); stopObserved?.() }
+  return Object.assign(dispose, { registered: true, drain: () => Promise.allSettled([...inFlight]) })
+}
 
 /**
  * The plugin-owned `/mse` command definition, built once and registered as-is.
@@ -50,6 +127,70 @@ export function mseCommandDefinition(bridge) {
   }
 }
 
+/** Register copied, host-configured deterministic guards against the real DSH tool pipeline. */
+export function registerDshGuardTemplates(ctx, templates = [], { enabled = () => true } = {}) {
+  const registeredGuardTemplates = []
+  if (Array.isArray(templates)) for (const template of templates.slice(0, 32)) {
+    const compiled = validateGuardTemplate(template)
+    if (compiled) registeredGuardTemplates.push(compiled)
+  }
+  const enforce = registeredGuardTemplates.filter(row => row.mode === 'enforce')
+  const shadowCounts = Object.create(null)
+  const pending = new Set()
+  const PENDING_GUARD_LIMIT = 64
+  let disposed = false
+  let stopGuard = () => {}
+  let stopExecute = () => {}
+  let stopResult = () => {}
+  const cleanup = () => {
+    if (!disposed || pending.size > 0) return
+    stopResult(); stopExecute(); stopGuard()
+    stopResult = stopExecute = stopGuard = () => {}
+  }
+  const supported = Boolean(ctx.tools && typeof ctx.tools.guard === 'function'
+    && typeof ctx.on === 'function')
+  if (supported && registeredGuardTemplates.length > 0) {
+    stopGuard = ctx.tools.guard(exec => {
+      // Once the owner disables/unloads this policy, it must immediately stop controlling newly
+      // prepared executions. Existing exec objects remain in `pending` until the Host's result.
+      if (disposed || !enabled()) return undefined
+      for (const template of registeredGuardTemplates) {
+        const decision = checkGuard(template, exec)
+        if (decision.denyReason !== undefined) return decision.denyReason
+        if (template.mode === 'shadow' && decision.matched) {
+          shadowCounts[template.guardId] = Math.min(4096, (shadowCounts[template.guardId] ?? 0) + 1)
+        }
+      }
+      if (exec && enforce.some(template => exec.name === template.toolName)) {
+        if (pending.size >= PENDING_GUARD_LIMIT) return 'MSE guard: pending dispatch capacity reached'
+        pending.add(exec)
+      }
+      return undefined
+    })
+    stopExecute = ctx.on('tools/execute', async (exec, next) => {
+      // The drain lease protects only executions that passed this guard before disposal.
+      // A call prepared after disposal is not grandfathered into a policy that is already off.
+      if (disposed && !pending.has(exec)) return next()
+      if (!enabled()) { pending.delete(exec); cleanup(); return next() }
+      for (const template of enforce) {
+        const decision = checkGuard(template, exec)
+        if (decision.denyReason !== undefined) return {
+          content: [{ type: 'text', text: `Error: ${decision.denyReason}` }], isError: true,
+          error: { message: decision.denyReason }
+        }
+      }
+      return next()
+    })
+    stopResult = ctx.on('tools/result', exec => {
+      pending.delete(exec)
+      cleanup()
+    })
+  }
+  return Object.assign(() => { disposed = true; cleanup() }, { registered: supported ? registeredGuardTemplates.length : 0,
+    configured: registeredGuardTemplates.length, supported,
+    enforcing: supported ? enforce.length : 0, shadowStatus: () => Object.freeze({ ...shadowCounts }) })
+}
+
 /** The production, stepwise DSH call used by automatic review/objective plans. */
 export async function callEvaluationModel({ engine, ctx, lifetime }, request, ticket) {
   const route = request?.route
@@ -61,10 +202,7 @@ export async function callEvaluationModel({ engine, ctx, lifetime }, request, ti
 
   // DSH's createUserMessage assigns a fresh host-local id each time. That id is not sent as provider
   // content and is not a request identity: hash only the effective route, prompt, system text and cap.
-  const requestShape = { provider: route.provider, model: route.model,
-    ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: route.reasoningEffort }),
-    system: request.system, user: { role: 'user', content: [{ type: 'text', text: request.prompt }] }, maxTokens }
-  const requestHash = createHash('sha256').update(JSON.stringify(requestShape)).digest('hex')
+  const requestHash = evaluationRequestHash({ route, system: request.system, prompt: request.prompt, maxTokens })
   const checkpoint = engine.planProgress({ ticket, stepKey: request.stepKey })
   if (checkpoint?.ok === true && checkpoint.step !== null) {
     if (checkpoint.step.requestHash !== requestHash) {
@@ -76,6 +214,9 @@ export async function callEvaluationModel({ engine, ctx, lifetime }, request, ti
     return { text: checkpoint.step.text, tokens: checkpoint.step.tokens,
       truncated: checkpoint.step.truncated, ticket, resumed: true }
   }
+  const requestShape = { provider: route.provider, model: route.model,
+    ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: route.reasoningEffort }),
+    system: request.system, user: { role: 'user', content: [{ type: 'text', text: request.prompt }] }, maxTokens }
   const requestBytes = Buffer.byteLength(JSON.stringify(requestShape), 'utf8')
   const reserve = engine.ticketReserve({ ticket, stepKey: request.stepKey, requestHash,
     inputTokens: requestBytes + 128, outputTokens: maxTokens })
@@ -205,6 +346,14 @@ export function apply(ctx, config = {}) {
     maxContextBytes: initial.maxContextBytes,
     ...(verifiedNow === null ? {} : { now: verifiedNow }),
     evaluationTokensPerDay: initial.evaluationTokensPerDay, evaluationCallsPerDay: initial.evaluationCallsPerDay })
+  // DSH 0.2.1-alpha.2 executes registered guards synchronously after its pre-execute waterfall and
+  // before dispatch. Only host configuration can register a deterministic template; model/tool
+  // output never reaches this seam. No templates are installed by default. Registration returns an
+  // exact disposer so a plugin unload removes the policy. Hermes has no equivalent verified hook.
+  const disposeGuards = registerDshGuardTemplates(ctx, config.guardTemplates, {
+    enabled: () => !disposed && readVolatile(config, 'enabled', SETTINGS_DEFAULTS.enabled) !== false,
+  })
+  if (disposeGuards.registered > 0) ctx.effect(() => disposeGuards)
   const lifetime = new AbortController()
   const jobs = new JobQueue({ ...(verifiedNow === null ? {} : { now: verifiedNow }),
     ...(typeof config.schedule === 'function' ? { schedule: config.schedule } : {}),
@@ -232,7 +381,12 @@ export function apply(ctx, config = {}) {
   let factsClock = 0
   /** hash -> the `factsClock` value at which that session was last evidenced to exist. */
   const sessionSeen = new Map()
+  let taskManifestIntake = false
   const bridge = createHarnessBridge({ engine, environmentId,
+    // The successful Host stream is the route source. The publisher validates it against the
+    // session's recorded request/header and project, then CAS-publishes a DSH-specific capability
+    // identity; it never constructs an SDK client or infers a route from the last process request.
+    onRoute: observed => publishDshSource(observed),
     // Optional controlled-verification seams: an injected clock/timer lets a host exercise the
     // bounded settlement retry without real sleeping. Unset in normal use.
     ...(verifiedNow === null ? {} : { now: verifiedNow }),
@@ -508,10 +662,19 @@ export function apply(ctx, config = {}) {
       review.allowance = Math.max(0, REFLECTION_LIMIT - review.usedLast24h)
     } catch { review.usedLast24h = null; review.allowance = null }
     return {
-      namespace: SETTINGS_NAMESPACE, pluginVersion: version, settingsSource: 'plugin_config',
+        namespace: SETTINGS_NAMESPACE, pluginVersion: version, settingsSource: 'plugin_config',
       user: { enabled: p.enabled, reflectionEnabled: p.reflectionEnabled,
         autoValidationEnabled: p.autoValidationEnabled, maxContextBytes: p.maxContextBytes,
         evaluationTokensPerDay: p.evaluationTokensPerDay, evaluationCallsPerDay: p.evaluationCallsPerDay },
+      verificationCapabilities: {
+        taskContractCore: 'available', projectTestHostRunner: 'not_connected',
+        structuredArtifactHostIntake: taskManifestIntake ? 'dsh_root_package_json_checker' : 'not_connected',
+        taskEvidence: (() => { try { return engine.taskEvidenceStatus() } catch { return { records: null, replayCases: null } } })(),
+        dshPreflight: !disposeGuards.supported ? 'unsupported' : disposeGuards.enforcing > 0 ? 'enforce_templates' : 'available_unconfigured',
+        dshDispatchRecheck: !disposeGuards.supported ? 'unsupported' : disposeGuards.enforcing > 0 ? 'enforce_templates' : 'available_unconfigured',
+        dshGuardShadowObservations: disposeGuards.shadowStatus(),
+        hermesPreflight: 'separate_plugin_not_reported',
+      },
       // `effective.autoValidation` states the three conditions a run really needs, so a switched-on
       // setting that cannot run says WHY instead of looking idle: the switch, a trusted route, and
       // a budget that is not zero.
@@ -528,13 +691,16 @@ export function apply(ctx, config = {}) {
         if (paid?.evaluationUnknown24h > 0) return 'cost_unknown'
         if (paid?.evaluationTokensReserved24h >= p.evaluationTokensPerDay
           || paid?.evaluationCallsLast24h >= p.evaluationCallsPerDay) return 'waiting_budget'
+        // JobQueue.status().running is the active job ID (string) or null, not a count.
+        // Check it before route readiness: a live job is already executing under its frozen route.
+        const runningJob = (() => { try { return jobs.status().running } catch { return null } })()
+        if (typeof runningJob === 'string' && runningJob.length > 0) return 'working'
         const last = automation.status()
         if ((last.registeredChecker ?? 0) > 0) return 'checker_settled'
         if ((last.waitingValidator ?? 0) > 0) return 'awaiting_validator_evidence'
         if (!autoRoutesReady() && !(p.verificationSessionId !== '' && backfillRoute !== null)) {
           return 'awaiting_source'
         }
-        if (jobs.status().running > 0) return 'working'
         return 'idle_ready'
       })(),
       effective: { learning: current.length === 0, reflection: current.length === 0 && p.reflectionEnabled,
@@ -765,7 +931,12 @@ export function apply(ctx, config = {}) {
         if (planned.due === false) {
           return { state: 'done', code: null, result: { kind: 'reflection', status: 'waiting', reason: 'not_due' } }
         }
-        const input = planned.reflection
+        const input = sourceCheck?.sourceBinding === null || sourceCheck?.sourceBinding === undefined
+          ? planned.reflection
+          : { ...planned.reflection, sourceBinding: true,
+              sourceRevision: sourceCheck.sourceBinding.revision,
+              sourceBindingHash: sourceCheck.sourceBinding.bindingHash,
+              controlGeneration: sourceCheck.controlGeneration }
         const route = boundedRoute(planned.route)
         if (input === undefined || input === null || route === null) {
           return { state: 'done', code: null, result: { kind: 'reflection', status: 'waiting',
@@ -1071,8 +1242,14 @@ export function apply(ctx, config = {}) {
     const pack = selection.pack
     if (pack === null || !packAdmits(pack.packId, methodDomainText(lesson)).ok) return null
     const cases = packCases(pack.packId)
+    let replayCases = []
+    if (pack.packId === 'package-json-structure-v1') {
+      const replay = engine.taskEvidenceReplayCases({ projectKey: scopeOf(lesson), limit: 2 })
+      if (replay?.ok !== true || !Array.isArray(replay.cases) || replay.cases.length === 0) return null
+      replayCases = replay.cases
+    }
     return {
-      packId: pack.packId, suiteId: packSuiteId(pack), cases,
+      packId: pack.packId, suiteId: packSuiteId(pack), suite: { packId: pack.packId, version: pack.version }, cases, replayCases,
       instruction: lesson.instruction, projectKey: scopeOf(lesson),
       arm: (kind, testCase) => ({
         system: kind === 'candidate'
@@ -1399,6 +1576,69 @@ export function apply(ctx, config = {}) {
    * rather than evidence. An absence is only ever a DELETION when the host's own confirmed directory
    * proves it (a listing that started after the last sighting); anything else is `unknown` and waits.
    */
+  async function publishDshSource(observed) {
+    if (disposed || reflectionPermission().allowed !== true) return { ok: false, code: 'reflection_disabled' }
+    const sessionId = typeof observed?.sessionId === 'string' ? observed.sessionId : ''
+    const projectKey = typeof observed?.projectKey === 'string' ? observed.projectKey : ''
+    const rawRoute = observed?.route
+    if (sessionId === '' || projectKey === '' || rawRoute === null || typeof rawRoute !== 'object') {
+      return { ok: false, code: 'source_unbound' }
+    }
+    const cleanRouteValue = value => typeof value === 'string' && value.length > 0
+      && /[\u0000-\u001f\u007f]/u.test(value) === false
+    if (!cleanRouteValue(rawRoute.provider) || rawRoute.provider.length > 32
+      || !cleanRouteValue(rawRoute.model) || rawRoute.model.length > 64) {
+      return { ok: false, code: 'source_route_unavailable' }
+    }
+    const effortPresent = Object.hasOwn(rawRoute, 'reasoningEffort')
+    if (effortPresent && (!cleanRouteValue(rawRoute.reasoningEffort) || rawRoute.reasoningEffort.length > 16)) {
+      return { ok: false, code: 'source_reasoning_unavailable' }
+    }
+    const route = { provider: rawRoute.provider, model: rawRoute.model,
+      ...(effortPresent ? { reasoningEffort: rawRoute.reasoningEffort } : {}) }
+    const generation = currentControlGeneration()
+    const openedFactsEpoch = factsEpoch
+    if (!Number.isSafeInteger(generation)) return { ok: false, code: 'control_unavailable' }
+    const archive = archivedSessionNow(sessionId)
+    if (archive === null) return { ok: false, code: 'host_state_unknown' }
+    if (archive) return { ok: false, code: 'source_archived' }
+    const query = (() => { try { return ctx.get('sessionQuery') } catch { return undefined } })()
+    if (query === undefined || typeof query.listSessions !== 'function' || typeof query.readSession !== 'function') {
+      return { ok: false, code: 'host_state_unknown' }
+    }
+    let listed, snapshot, found
+    try {
+      [listed, snapshot, found] = await Promise.all([
+        query.listSessions(), query.readSession(sessionId), latestRoute(query, sessionId),
+      ])
+    } catch { return { ok: false, code: 'host_state_unknown' } }
+    if (listed?.truncated === true || listed?.complete === false) return { ok: false, code: 'host_state_unknown' }
+    const sessions = Array.isArray(listed) ? listed : Array.isArray(listed?.sessions) ? listed.sessions : null
+    if (sessions === null) return { ok: false, code: 'host_state_unknown' }
+    if (!sessions.some(row => (row?.header?.id ?? row?.id ?? row?.sessionId) === sessionId)
+      || snapshot?.session?.id !== sessionId) return { ok: false, code: 'source_unavailable' }
+    const header = snapshot.session
+    if (header.cwd !== projectKey) return { ok: false, code: 'scope_mismatch' }
+    const recorded = boundedRoute(found?.ok === true ? found.route : null)
+    if (recorded === null || recorded.provider !== route.provider || recorded.model !== route.model
+      || (recorded.reasoningEffort ?? null) !== (route.reasoningEffort ?? null)) {
+      return { ok: false, code: 'source_route_changed' }
+    }
+    const archiveAfter = archivedSessionNow(sessionId)
+    if (archiveAfter === null) return { ok: false, code: 'host_state_unknown' }
+    if (archiveAfter) return { ok: false, code: 'source_archived' }
+    if (disposed || reflectionPermission().allowed !== true || currentControlGeneration() !== generation
+      || factsEpoch !== openedFactsEpoch) return { ok: false, code: 'control_changed' }
+    const current = engine.sourceStatus({ limit: 64 }).rows.find(row => row.sessionHash === hashId(sessionId))
+    const reasoningState = route.reasoningEffort === undefined ? 'unspecified' : 'explicit'
+    const answer = engine.sourcePublish({ sessionId, projectKey,
+      ...(environmentId === undefined ? {} : { environmentId }), provider: route.provider, model: route.model,
+      reasoningState, ...(reasoningState === 'explicit' ? { reasoningValue: route.reasoningEffort } : {}),
+      driver: 'dsh_host_stream', expectRevision: current?.revision ?? 0, expectEpoch: current?.epoch ?? 0 })
+    return answer?.published === true ? { ok: true, revision: answer.revision, epoch: answer.epoch }
+      : { ok: false, code: answer?.code ?? 'source_publish_failed' }
+  }
+
   async function resolveRecoverySource(origin) {
     if (origin === null || origin === undefined || typeof origin.sessionId !== 'string' || origin.sessionId === '') {
       return { ok: false, code: 'source_unbound' }
@@ -1470,8 +1710,23 @@ export function apply(ctx, config = {}) {
     if (archivedAfter === null) return { ok: false, code: 'host_state_unknown' }
     if (archivedAfter) return { ok: false, code: 'source_archived' }
     if (factsEpoch !== epoch) return { ok: false, code: 'host_state_unknown' }
+    const controlGeneration = currentControlGeneration()
+    if (!Number.isSafeInteger(controlGeneration)) return { ok: false, code: 'control_unavailable' }
+    let sourceRow
+    try { sourceRow = engine.sourceStatus({ limit: 64 }).rows.find(row => row.sessionHash === identity) }
+    catch { return { ok: false, code: 'source_unknown' } }
+    if (sourceRow === undefined) return { ok: false, code: 'source_unknown' }
+    if (sourceRow.driver !== 'dsh_host_stream') return { ok: false, code: 'provider_driver_unsupported' }
+    const sourceIdentity = sourceRow.identity
+    if (sourceIdentity?.provider !== origin.provider || sourceIdentity?.model !== origin.model) {
+      return { ok: false, code: 'source_route_changed' }
+    }
+    if (typeof origin.reasoningEffort === 'string'
+      ? sourceIdentity.reasoningState !== 'explicit' || sourceIdentity.reasoningValue !== origin.reasoningEffort
+      : sourceIdentity.reasoningState !== 'unspecified') return { ok: false, code: 'source_reasoning_unavailable' }
     return { ok: true, code: null, sessionId: origin.sessionId, projectKey: cwd, epoch,
-      controlGeneration: currentControlGeneration(),
+      controlGeneration, sourceBinding: { revision: sourceRow.revision, bindingHash: sourceRow.bindingHash,
+        epoch: sourceRow.epoch, routeId: sourceRow.routeId },
       route: { provider: origin.provider, model: origin.model,
         ...(typeof origin.reasoningEffort === 'string' ? { reasoningEffort: origin.reasoningEffort } : {}) } }
   }
@@ -1489,7 +1744,7 @@ export function apply(ctx, config = {}) {
    * bounded coalesced directory pull a missing snapshot needs before anyone judges.
    */
   function createSourceCheck({ sessionId, provider, model, reasoningEffort = null, projectKey = undefined,
-    epoch, controlGeneration = null, problem = null }) {
+    epoch, controlGeneration = null, problem = null, sourceBinding = null }) {
     const declaredProjectKey = projectKey === undefined ? undefined : projectKey
     let verifiedProjectKey = declaredProjectKey
     let verifiedEpoch = epoch
@@ -1517,6 +1772,15 @@ export function apply(ctx, config = {}) {
           : engine.problemRecoveryPlan(planArgs({ ticket, evidenceRevision: problem.evidenceRevision }))
       } catch (error) { return boundedCode(error?.code) }
       if (planned?.recoverable !== true) return planned?.code ?? 'not_recoverable'
+      if (problem !== null) {
+        const source = planned?.source
+        if (sourceBinding === null || source === null || source === undefined) return 'source_unknown'
+        if (source.driver !== 'dsh_host_stream' || source.gateReady !== true) {
+          return source.code ?? 'provider_driver_unsupported'
+        }
+        if (source.revision !== sourceBinding.revision || source.bindingHash !== sourceBinding.bindingHash
+          || source.epoch !== sourceBinding.epoch || source.routeId !== sourceBinding.routeId) return 'source_changed'
+      }
       return null
     }
     /** ONE bounded, coalesced confirmation of the host's own directory, then judge again. */
@@ -1577,7 +1841,7 @@ export function apply(ctx, config = {}) {
       const verdict = assess(ticket)
       return verdict === null ? true : verdict
     }
-    return { sessionId, assess, confirm, revalidate,
+    return { sessionId, assess, confirm, revalidate, sourceBinding, controlGeneration,
       plan: problem === null ? null : () => engine.problemRecoveryPlan(planArgs()) }
   }
 
@@ -1671,7 +1935,7 @@ export function apply(ctx, config = {}) {
       provider: resolved.route.provider, model: resolved.route.model,
       reasoningEffort: resolved.route.reasoningEffort ?? null, projectKey: resolved.projectKey,
       epoch: resolved.epoch, controlGeneration: resolved.controlGeneration,
-      problem: { problemId: row.id, evidenceRevision: row.evidenceRevision } })
+      problem: { problemId: row.id, evidenceRevision: row.evidenceRevision }, sourceBinding: resolved.sourceBinding })
     let planned = null
     try { planned = sourceCheck.plan() } catch (error) { planned = { code: boundedCode(error?.code) } }
     if (planned?.recoverable !== true) {
@@ -1827,6 +2091,17 @@ export function apply(ctx, config = {}) {
       if (noted.size > 512) noted.clear()
       ctx.logger.info('mse-learning: %s', formatRecallLine({ last }))
     }
+  })
+  // `fs` is an optional Host capability. Cordis guards even a presence probe (`ctx.fs`) unless the
+  // service was injected, so mount this observer in a child scope that waits for `fs`. A profile
+  // without a filesystem keeps the core plugin active and reports the intake as disconnected.
+  ctx.inject(['fs'], fsCtx => {
+    const disposeTaskManifestIntake = registerDshProjectManifestIntake(fsCtx, { engine, bridge, environmentId,
+      enabled: () => !disposed && !legacyOwner && volatileSettings().enabled })
+    taskManifestIntake = disposeTaskManifestIntake.registered === true
+    fsCtx.effect(() => () => {
+      try { disposeTaskManifestIntake() } finally { taskManifestIntake = false }
+    })
   })
   // Do not run two automatic MSE controllers in the same host. A legacy controller appearing is
   // a temporary block, and its release only recomputes: an operator pause survives it.
@@ -2062,7 +2337,7 @@ export function apply(ctx, config = {}) {
     // The host's OWN directory is evidence too: a session it listed existed when the listing was
     // produced. Recording that as a baseline sighting (at the pull's start) is what lets a LATER
     // listing prove an absence — including across a restart, where no live event has happened yet.
-    for (const hash of known) if (!sessionSeen.has(hash)) rememberSeen(hash, startedAt)
+    for (const hash of facts.known) if (!sessionSeen.has(hash)) rememberSeen(hash, startedAt)
     return facts
   }
 

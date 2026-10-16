@@ -13,6 +13,7 @@
  *    evaluation budget is exhausted (a paid call is a paid call, whoever asked for it).
  */
 import { parseVerdict, REVIEW_REASONS } from '../../src/review.mjs'
+import { objectiveRequestHashes } from './evaluation-request.mjs'
 
 /** At most this many plans are advanced in one scan; the loop is serial by construction. */
 const MAX_PLANS_PER_SCAN = 8
@@ -461,14 +462,16 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
       const withScope = { ...baseSource,
         ...(typeof lesson.projectKey === 'string' && lesson.projectKey !== '' ? { projectKey: lesson.projectKey } : {}),
         ...sourceOf(lesson) }
-      const registerFor = (track, suite, criteria) => engine.autoPlanRegister({ lessonId: lesson.id,
+      const registerFor = (track, suite, criteria, requestHashes) => engine.autoPlanRegister({ lessonId: lesson.id,
         version: lesson.version, environment: lesson.environment ?? 'default', track,
-        source: { ...withScope, route: withScope.route ?? undefined }, suite, criteria })
-      const coveredByIdentity = (track, suite, criteria) => {
+        source: { ...withScope, route: withScope.route ?? undefined }, suite, criteria,
+        ...(requestHashes === null || requestHashes === undefined ? {} : { requestHashes }) })
+      const coveredByIdentity = (track, suite, criteria, requestHashes) => {
         try {
           const identity = engine.autoPlanIdentity({ lessonId: lesson.id, version: lesson.version,
             environment: lesson.environment ?? 'default', track,
-            source: { ...withScope, route: withScope.route ?? undefined }, suite, criteria })
+            source: { ...withScope, route: withScope.route ?? undefined }, suite, criteria,
+            ...(requestHashes === null || requestHashes === undefined ? {} : { requestHashes }) })
           return identity?.ok === true
             && existing.get(`${lesson.id}:${lesson.version}:${track}`)?.planHash === identity.planHash
         } catch { return false }
@@ -493,8 +496,24 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
         registerTrack('review', scenario.suite, scenario.criteria)
       }
       const objective = objectiveContext(lesson)
-      if (objective !== null && !coveredByIdentity('objective', objective.suite, scenario?.criteria ?? [])) {
-        registerTrack('objective', objective.suite, scenario?.criteria ?? [])
+      // The objective plan is authorised by the objective pack itself. Reusing review criteria
+      // here can leave the pack unresolved (notably when review has no matching scenario), which
+      // makes the queued plan lose the pack identity that its later evaluation ticket requires.
+      const objectiveCase = objective?.cases?.[0] ?? null
+      const objectiveSuite = objective === null ? null : { ...objective.suite,
+        ...(typeof objectiveCase?.caseId === 'string' ? { caseId: objectiveCase.caseId } : {}) }
+      const objectiveCriteria = Array.isArray(objectiveCase?.criteria) ? objectiveCase.criteria : []
+      if (objective !== null) {
+        // A request manifest is a bounded set of hashes only. It lets the core distinguish a
+        // metadata-only plan migration from genuinely new paid work without retaining prompts.
+        const hashes = objectiveRequestHashes(objective, withScope.route, STEP_OUTPUT_TOKENS)
+        if (coveredByIdentity('objective', objectiveSuite, objectiveCriteria, hashes)) continue
+        if (registered < MAX_PLANS_PER_SCAN) {
+          const plan = registerFor('objective', objectiveSuite, objectiveCriteria, hashes)
+          if (plan.ok !== true) record(plan.code ?? 'auto_plan_rejected', lesson.id)
+          else if (plan.settled === true) record('objective_settled', lesson.id)
+          else if (plan.duplicate !== true) registered += 1
+        }
       }
     }
     return registered
@@ -751,10 +770,13 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
    * never reported as an improvement.
    */
   const runObjective = async (plan, lesson, runContext = {}) => {
-    const pack = lesson === null ? null : objectiveContext(lesson)
+    let pack = lesson === null ? null : objectiveContext(lesson)
     if (pack === null) {
+      if (typeof plan.ticket === 'string') {
+        try { engine.evaluationCancel({ ticket: plan.ticket }) } catch {}
+      }
       engine.autoPlanUpdate({ queueKey: plan.queueKey, planHash: plan.planHash, stage: 'blocked',
-        reason: 'review_missing_criteria' })
+        ticket: null, reason: 'review_missing_criteria' })
       return 'blocked'
     }
     const decisionRoute = route({ lessonId: plan.lessonId, source: plan.source })
@@ -769,14 +791,36 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
     const reserved = 2
     const existing = typeof plan.ticket === 'string'
       ? engine.ticketContinuation({ ticket: plan.ticket, kind: 'evaluation' }) : null
+    if (existing?.ok === true && pack.packId === 'package-json-structure-v1') {
+      let frozenReplay
+      try { frozenReplay = engine.taskEvidenceReplayCases({ ticket: plan.ticket, projectKey: pack.projectKey }) }
+      catch { frozenReplay = { ok: false, code: 'task_replay_unverifiable' } }
+      if (frozenReplay?.ok !== true || !Array.isArray(frozenReplay.cases) || frozenReplay.cases.length === 0) {
+        try { engine.evaluationCancel({ ticket: plan.ticket }) } catch {}
+        engine.autoPlanUpdate({ queueKey: plan.queueKey, planHash: plan.planHash, stage: 'blocked', ticket: null,
+          reason: frozenReplay?.code ?? 'task_replay_evidence_changed' })
+        return 'blocked'
+      }
+      pack = { ...pack, replayCases: frozenReplay.cases }
+    }
+    const requestHashes = objectiveRequestHashes(pack, decisionRoute, STEP_OUTPUT_TOKENS)
+    const economic = requestHashes === null ? { ok: false, code: 'auto_plan_terminal_economic_identity_unknown' }
+      : engine.autoPlanEconomicAdmission({ queueKey: plan.queueKey, planHash: plan.planHash, requestHashes })
+    if (economic?.ok !== true) {
+      engine.autoPlanUpdate({ queueKey: plan.queueKey, planHash: plan.planHash, stage: 'blocked',
+        reason: economic?.code ?? 'auto_plan_terminal_economic_identity_unknown' })
+      return 'blocked'
+    }
     if (existing?.code === 'ticket_usage_unknown') {
       engine.autoPlanUpdate({ queueKey: plan.queueKey, planHash: plan.planHash, stage: 'blocked', ticket: null,
         reason: 'ticket_usage_unknown' })
       return 'blocked'
     }
     const prepared = existing?.ok === true ? { ok: true, ticket: plan.ticket } : engine.evaluationRequest({ lessonId: plan.lessonId, projectKey: pack.projectKey,
-      expectedVersion: plan.version, suiteId: pack.suiteId, cases: pack.cases, maxTokens: reserved,
-      stepwiseBudget: true, planHash: plan.planHash, queueKey: plan.queueKey })
+      expectedVersion: plan.version, packId: pack.packId, suiteId: pack.suiteId, maxTokens: reserved,
+      stepwiseBudget: true, planHash: plan.planHash, queueKey: plan.queueKey,
+      ...(pack.replayCases?.length ? { taskReplayCases: pack.replayCases.map(({ id, badFixtureHash, controlFixtureHash }) =>
+        ({ id, badFixtureHash, controlFixtureHash })) } : {}) })
     if (prepared.ok !== true || prepared.ticket === undefined) {
       return parkTemporarily(plan, prepared.skipped ?? prepared.code ?? 'review_budget')
     }
@@ -805,6 +849,23 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
         answers[testCase.caseId] = pair
         usage[testCase.caseId] = measured
       }
+      const taskReplayResults = []
+      for (const replay of pack.replayCases ?? []) {
+        const outputs = {}
+        for (const role of ['bad', 'control']) {
+          if (!stillPermitted()) throw stopError('review_cancelled')
+          const input = role === 'bad' ? replay.badInput : replay.controlInput
+          const answer = await paidCall({
+            system: `你是 package.json 结构修复器。只返回修复后的完整 JSON 对象，不要解释。方法：${pack.instruction}`,
+            prompt: input, route: decisionRoute,
+            stepKey: `objective:task-replay:${replay.id.slice(0, 16)}:${role}`,
+          }, prepared.ticket, run, spend)
+          if (answer === null) throw stopError('review_interrupted')
+          if (answer.truncated === true) throw stopError('model_incomplete')
+          outputs[role] = answer.text
+        }
+        taskReplayResults.push({ id: replay.id, badOutput: outputs.bad, controlOutput: outputs.control })
+      }
       // The core re-scores every answer with the pack's own checker and applies the shared policy;
       // the adapter never sees a verdict it could report as its own.
       if (staleRun(run)) throw stopError('review_cancelled')
@@ -822,6 +883,7 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
       const refused = commitRefusal(run)
       if (refused !== null) throw stopError(refused)
       const settled = engine.evaluate({ basis: 'host_pack', packId: pack.packId, answers, usage,
+        ...(taskReplayResults.length ? { taskReplayResults } : {}),
         instruction: pack.instruction, lessonId: plan.lessonId, expectedVersion: plan.version,
         suiteId: pack.suiteId, ticket: prepared.ticket, projectKey: pack.projectKey,
         eventId: `auto:${plan.queueKey}:${plan.attempts + 1}`, spent: spend.known })

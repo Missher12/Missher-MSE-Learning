@@ -88,7 +88,7 @@ function recordFailure(state, { eventId, toolName, failureCode }) {
 }
 
 /** Trusted host seam. None of its evidence callbacks are exposed as model-callable tools. */
-export function createHarnessBridge({ engine, createMessage, review, warn = () => {}, now = Date.now, environmentId,
+export function createHarnessBridge({ engine, createMessage, review, onRoute = () => {}, warn = () => {}, now = Date.now, environmentId,
   settlement: settlementOptions = {} }) {
   const turns = new Map(), reviews = new Set(), statuses = new Map()
   let enabled = true, disposed = false, generation = 0
@@ -467,10 +467,23 @@ export function createHarnessBridge({ engine, createMessage, review, warn = () =
           && messageText(message) === state.context))
       for await (const chunk of next()) {
         if (chunk.type === 'finish' && ['stop', 'tool-calls', 'max-tokens'].includes(chunk.reason?.kind) && !options.signal?.aborted) {
-          if (typeof options.provider === 'string' && typeof options.model === 'string') for (const state of scoped) {
-            if (active(state.generation) && turns.get(key(state.input.sessionId, state.input.turnId)) === state) {
-              state.route = { provider: options.provider, model: options.model,
-                ...(options.reasoningEffort !== undefined ? { reasoningEffort: options.reasoningEffort } : {}) }
+          for (const state of scoped) {
+            if (!active(state.generation) || turns.get(key(state.input.sessionId, state.input.turnId)) !== state) continue
+            // Prefer the concrete llm/stream route. The pre-step route is retained only when the
+            // Host stream hook omits route fields; the adapter must still validate it against the
+            // session's own request/header before publishing a source identity.
+            const streamHasRoute = typeof options.provider === 'string' && typeof options.model === 'string'
+            const streamEffortPresent = Object.hasOwn(options, 'reasoningEffort') && options.reasoningEffort !== undefined
+            const streamEffortValid = !streamEffortPresent || (typeof options.reasoningEffort === 'string'
+              && options.reasoningEffort.length > 0 && options.reasoningEffort.length <= 16
+              && /[\u0000-\u001f\u007f]/u.test(options.reasoningEffort) === false)
+            const route = streamHasRoute
+              ? (streamEffortValid ? { provider: options.provider, model: options.model,
+                  ...(typeof options.reasoningEffort === 'string' ? { reasoningEffort: options.reasoningEffort } : {}) } : null)
+              : state.route
+            if (route && typeof route.provider === 'string' && typeof route.model === 'string') {
+              state.route = route
+              try { await onRoute({ ...state.input, route: { ...route } }) } catch { /* source publication fails closed */ }
             }
           }
           for (const state of candidates) {
@@ -514,6 +527,16 @@ export function createHarnessBridge({ engine, createMessage, review, warn = () =
       state.checkId = checkId
       return true
     },
+    taskContext(sessionId, turnId) {
+      const state = turns.get(key(sessionId, turnId))
+      if (!state || !active(state.generation)) return null
+      return Object.freeze({ sessionId, turnId, projectKey: state.input.projectKey,
+        environmentId: state.input.environmentId, model: state.route?.model ?? null,
+        provider: state.route?.provider ?? null, reasoningEffort: state.route?.reasoningEffort ?? null,
+        accepted: state.accepted === true,
+        lessons: Object.freeze(state.lessonVersions.map(row => Object.freeze({ id: row.id,
+          version: row.version, methodId: row.methodId ?? null, checkId: row.checkId ?? null }))) })
+    },
     verifyArtifact({ sessionId, turnId, lessonId, source, artifact }) {
       const state = turns.get(key(sessionId, turnId))
       if (!state?.accepted || !active(state.generation) || !state.lessons.includes(lessonId)) return { ok: false, code: 'lesson_not_adopted' }
@@ -551,7 +574,7 @@ export function createHarnessBridge({ engine, createMessage, review, warn = () =
           failureCode: failureCode ?? 'unknown_tool_failure' })
       }
     },
-    toolExecution(exec, result) {
+    toolExecution(exec, result, onTrustedResult = undefined) {
       const session = exec.agent?.session
       if (!session || typeof exec.callId !== 'string') return
       const count = session.seq ?? session.events?.length ?? 0
@@ -573,6 +596,11 @@ export function createHarnessBridge({ engine, createMessage, review, warn = () =
           cancelled: failureCode === 'cancelled',
           readOnly: exec.name === 'read' || exec.name === 'read_image',
           failureCode, eventId: exec.rootCallId ?? exec.callId, toolName: exec.name })
+        if (typeof onTrustedResult === 'function') {
+          try { onTrustedResult({ sessionId: session.id, turnId: String(event.data.turn), callId: exec.rootCallId ?? exec.callId,
+            toolName: exec.name, value: result.isError === true ? undefined : result.value,
+            isError: result.isError === true }) } catch { /* task evidence is best effort; tool result accounting remains authoritative */ }
+        }
         break
       }
     },

@@ -628,6 +628,12 @@ class ReflectionDriver:
         binding["sourceBindingHash"] = source.get("bindingHash")
         if isinstance(source.get("controlGeneration"), int):
             binding["controlGeneration"] = source["controlGeneration"]
+        replay_cases = job.get("taskReplayCases")
+        if kind == "objective" and isinstance(replay_cases, list) and replay_cases:
+            binding["taskReplayCases"] = [{"id": row.get("id"),
+                "badFixtureHash": row.get("badFixtureHash"),
+                "controlFixtureHash": row.get("controlFixtureHash")} for row in replay_cases
+                if isinstance(row, dict)]
         if kind == "review":
             return call("reviewRequest", binding)
         if kind == "objective":
@@ -1728,6 +1734,12 @@ async def _multi_objective(driver, job, call, client, identity, cancel_event, st
     truncated = False
     answers = {}
     usage = {}
+    if job.get("packId") == "package-json-structure-v1" and not job.get("taskReplayCases"):
+        try:
+            call("evaluationCancel", {"ticket": state.get("ticket")})
+        except Exception:  # noqa: BLE001 — never proceed to a pack call without the gate material
+            pass
+        return {"ok": False, "wait": "task_replay_evidence_unavailable", "truncated": False}
     cursor = int((job.get("objective") or {}).get("cursor") or 0)
     walk = 0
     try:
@@ -1775,11 +1787,42 @@ async def _multi_objective(driver, job, call, client, identity, cancel_event, st
             walk += 1
             if walk > OBJECTIVE_MAX_STEPS:
                 return {"ok": False, "wait": "objective_step_budget", "truncated": truncated}
+        task_replay_results = []
+        replay_cases = job.get("taskReplayCases")
+        if isinstance(replay_cases, list):
+            for replay in replay_cases:
+                if not isinstance(replay, dict) or not isinstance(replay.get("id"), str):
+                    return {"ok": False, "wait": "task_replay_unverifiable", "truncated": truncated}
+                outputs = {}
+                for role in ("bad", "control"):
+                    if _multi_cancelled(cancel_event, job):
+                        return {"ok": False, "wait": "cancelled", "truncated": truncated}
+                    material = replay.get("badInput" if role == "bad" else "controlInput")
+                    if not isinstance(material, str):
+                        return {"ok": False, "wait": "task_replay_unverifiable", "truncated": truncated}
+                    step_key = "objective:task-replay:%s:%s" % (replay["id"][:16], role)
+                    step = await _multi_step(driver, client, identity,
+                        {"system": "Repair the package.json witness using this method: %s. Return only the complete JSON object." %
+                         str(job.get("instruction") or "validate package.json structure and known field types"),
+                         "text": material, "maxTokens": 128, "stepKey": step_key,
+                         "refresh": lambda: call("ticketContinuation", {"ticket": state["ticket"], "kind": "evaluation"})},
+                        state, budget, {"armChars": 32000, "verdictBytes": 32000}, call)
+                    if step.get("ok") is not True:
+                        return {"ok": False, "wait": step.get("wait"), "truncated": truncated}
+                    answer = _multi_arm(step["content"], state)
+                    if answer.get("truncated") is True:
+                        return {"ok": False, "wait": "model_incomplete", "truncated": True}
+                    outputs[role] = answer["text"]
+                    known, unknown = driver._absorb_step(call, state, {role: answer})
+                task_replay_results.append({"id": replay["id"], "badOutput": outputs["bad"],
+                                            "controlOutput": outputs["control"]})
         if _multi_cancelled(cancel_event, job):
             return {"ok": False, "wait": "cancelled", "truncated": truncated}
         payload = {"ticket": state["ticket"], "lessonId": job.get("lessonId"),
                    "projectKey": job.get("projectKey"), "expectedVersion": job.get("version"),
                    "answers": answers, "usage": usage, "truncated": truncated, "sourceBinding": True}
+        if task_replay_results:
+            payload["taskReplayResults"] = task_replay_results
         if known > 0:
             payload["spent"] = known
         result = call("objectiveResult", payload)

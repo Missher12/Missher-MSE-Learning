@@ -1707,3 +1707,73 @@ class IdentityMappingTests(unittest.TestCase):
         self.assertIsNone(module.session_identity("line\nbreak"))
         self.assertIsNone(module.session_identity("\u0000nul"))
         self.assertIsNotNone(module.session_identity("a" * 512))
+
+
+class PackageJsonArtifactTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(prefix="mse-hermes-package-json-")
+        self.addCleanup(self.directory.cleanup)
+        self.environment = patch.dict(os.environ, {"MSE_LEARN_CLI": str(ROOT / "src/cli.mjs"),
+                                    "MSE_NODE_EXECUTABLE": shutil.which("node"), "MSE_REFLECTION_ENABLED": "0"})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+        self.root = Path(self.directory.name) / "project"
+        self.root.mkdir()
+        self.state = Path(self.directory.name) / "state"
+        self.hooks = module.Hooks(config={"stateRoot": str(self.state), "adapterId": "hermes",
+                                          "maxContextBytes": 768})
+        self.hooks.pre_llm_call(session_id="package-session", turn_id="1", project_key=str(self.root),
+                                user_message="修复 package.json 结构，确保 scripts 字段类型正确")
+        self.hooks.pre_api_request(session_id="package-session", turn_id="1", provider="openai",
+                                   model="gpt-test", api_request_id="package-request",
+                                   request={"body": {"model": "gpt-test", "reasoning_effort": "medium"}})
+        self.hooks.terminal_backend_resolver = lambda: os.environ.get("TERMINAL_ENV", "local")
+        self.addCleanup(self.hooks.dispose)
+
+    def write_event(self, call_id, content, *, reported_content=None):
+        path = self.root / "package.json"
+        path.write_text(content, encoding="utf-8")
+        result = {"files_modified": [str(path)], "resolved_path": str(path)}
+        self.hooks.pre_tool_call(session_id="package-session", turn_id="1", tool_call_id=call_id,
+                                 tool_name="write_file", args={"path": "package.json"})
+        self.hooks.post_tool_call(session_id="package-session", turn_id="1", tool_call_id=call_id,
+                                  status="ok", tool_name="write_file",
+                                  args={"path": "package.json", "content": content if reported_content is None else reported_content},
+                                  result=json.dumps(result))
+
+    def test_successful_host_file_facts_are_checked_and_paired(self):
+        self.write_event("bad-package", '{"scripts":{"test":17}}')
+        self.write_event("good-package", '{"scripts":{"test":"node --test"},"extension":true}')
+        status = self.hooks.call("taskEvidenceStatus", {})
+        self.assertEqual(status["records"], 2)
+        self.assertEqual(status["replayCases"], 1)
+
+    def test_tool_result_content_claim_must_match_the_file_readback(self):
+        self.write_event("mismatched-package", '{"scripts":{"test":"node --test"}}',
+                         reported_content='{"scripts":{"test":17}}')
+        self.assertEqual(self.hooks.call("taskEvidenceStatus", {})["records"], 0)
+
+    def test_hermes_intake_refuses_nonlocal_terminal_backend(self):
+        with patch.dict(os.environ, {"TERMINAL_ENV": "ssh"}):
+            self.write_event("remote-backend", '{"scripts":{"test":17}}')
+        self.assertEqual(self.hooks.call("taskEvidenceStatus", {})["records"], 0)
+
+    def test_hermes_intake_rejects_remote_same_name_paths_and_symlink_targets(self):
+        remote = Path(self.directory.name) / "other" / "package.json"
+        remote.parent.mkdir()
+        remote.write_text('{}', encoding="utf-8")
+        row = {"base": {"projectKey": str(self.root), "sessionId": "s", "environmentId": None}}
+        route = {"provider": "openai", "model": "gpt-test", "reasoningEffort": "medium"}
+        kwargs = {"tool_name": "write_file", "status": "ok", "tool_call_id": "remote-write",
+                  "result": {"files_modified": [str(remote)], "resolved_path": str(remote)},
+                  "args": {"path": str(remote), "content": "{}"}}
+        self.assertIsNone(module.Hooks._project_manifest_write(kwargs, row, route))
+
+        outside = Path(self.directory.name) / "outside.json"
+        outside.write_text('{}', encoding="utf-8")
+        package = self.root / "package.json"
+        package.symlink_to(outside)
+        symlink_result = {"files_modified": [str(package)], "resolved_path": str(package)}
+        kwargs.update({"tool_call_id": "symlink-write", "result": symlink_result,
+                       "args": {"path": "package.json", "content": "{}"}})
+        self.assertIsNone(module.Hooks._project_manifest_write(kwargs, row, route))

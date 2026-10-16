@@ -309,8 +309,61 @@ const PACK = Object.freeze({
   cases: Object.freeze(RAW_CASES.map(canonicalCase)),
 })
 
+const PACKAGE_PACK_ID = 'package-json-structure-v1'
+const packageRows = [
+  ['repair_scripts', 'development', '{"scripts":{"test":17},"extension":true}',
+    '{"scripts":{"test":"node --test"},"extension":true}', '把 scripts.test 修正为字符串 node --test，保留其他字段。'],
+  ['repair_dependencies', 'development', '{"dependencies":{"alpha":true},"private":true}',
+    '{"dependencies":{"alpha":"^1.0.0"},"private":true}', '把 dependencies.alpha 修正为版本范围 ^1.0.0，保留 private。'],
+  ['repair_private', 'development', '{"private":"yes","keywords":["mse"]}',
+    '{"private":true,"keywords":["mse"]}', '把 private 改为布尔 true，保留 keywords。'],
+  ['repair_keywords', 'development', '{"keywords":"mse,plugin","custom":7}',
+    '{"keywords":["mse","plugin"],"custom":7}', '把 keywords 改为字符串数组 [mse, plugin]，保留 custom。'],
+  ['add_script', 'development', '{"name":"sample","custom":"keep"}',
+    '{"name":"sample","custom":"keep","scripts":{"test":"node --test"}}', '新增 scripts.test，目标字符串必须是 node --test；不能替换或删除既有字段。'],
+  ['add_dependency', 'development', '{"dependencies":{"alpha":"^1.0.0"},"private":true}',
+    '{"dependencies":{"alpha":"^1.0.0","beta":"~2.0.0"},"private":true}', '在 dependencies 中新增 beta: ~2.0.0，保留 alpha 和 private。'],
+  ['preserve_extension', 'development', '{"scripts":{"test":17},"extensionField":"allowed"}',
+    '{"scripts":{"test":"node --test"},"extensionField":"allowed"}', '将 scripts.test 修正为 node --test，完整保留真实 host 读回中的未知扩展字段。'],
+  ['repair_author', 'development', '{"author":{"name":17},"description":"keep"}',
+    '{"author":{"name":"Ada"},"description":"keep"}', '把 author.name 修正为字符串 Ada，保留 description。'],
+  ['repair_browser', 'development', '{"browser":17,"main":"index.js"}',
+    '{"browser":{"./node.js":"./browser.js"},"main":"index.js"}', '将 browser 改为映射对象，保留 main。'],
+  ['repair_bundle', 'development', '{"bundleDependencies":"all","dependencies":{"alpha":"1"}}',
+    '{"bundleDependencies":true,"dependencies":{"alpha":"1"}}', '将 bundleDependencies 改为布尔 true，保留 dependencies。'],
+  ['repair_person_list', 'development', '{"contributors":[{"name":17}],"private":false}',
+    '{"contributors":["Ada Lovelace"],"private":false}', '将 contributors 修正为字符串简写人员数组，保留 private。'],
+  ['repair_dev_dependency', 'development', '{"devDependencies":{"tool":false},"files":["src"]}',
+    '{"devDependencies":{"tool":"^3.0.0"},"files":["src"]}', '修复 devDependencies.tool 的字符串类型，保留 files。'],
+  ['holdout_engine', 'holdout', '{"engines":{"node":22},"custom":true}',
+    '{"engines":{"node":">=22"},"custom":true}', '将 engines.node 改为字符串 >=22，保留 custom。'],
+  ['holdout_funding', 'holdout', '{"funding":17,"name":"sample"}',
+    '{"funding":"https://example.test/fund","name":"sample"}', '将 funding 改为字符串 URL，保留 name。'],
+  ['holdout_bundle_alias', 'holdout', '{"bundledDependencies":false,"version":"1.0.0"}',
+    '{"bundledDependencies":["alpha"],"version":"1.0.0"}', '将 bundledDependencies 改为名称数组，保留 version。'],
+  ['holdout_browser', 'holdout', '{"browser":17,"x-project":{"retain":[1,2]}}',
+    '{"browser":"./browser.js","x-project":{"retain":[1,2]}}', '将 browser 改为入口字符串并完整保留项目扩展对象。'],
+]
+const PACKAGE_PACK = Object.freeze({ packId: PACKAGE_PACK_ID, version: 2,
+  title: 'package.json 工件修复与字段保留域',
+  scope: '仅覆盖 package.json 有限 JSON 编辑验证域，由固定 checker 核对目标语义、标准字段类型及无关字段保留；不执行脚本，不证明项目逻辑。',
+  predicate: Object.freeze({ minTerms: 2,
+    subjects: Object.freeze(['package.json', 'package json', 'manifest', 'package manifest', '依赖', 'dependencies', 'scripts', '字段']),
+    mechanisms: Object.freeze(['json', '结构', 'structure', '类型', 'type', '校验', '验证', 'validation', 'syntax']),
+    forbidden: Object.freeze([]) }),
+  cases: Object.freeze(packageRows.map(([family, split, document, expected, instruction], index) => canonicalCase({
+    caseId: `${PACKAGE_PACK_ID}.${index + 1}`, family, split,
+    prompt: `编辑 package.json 工件。输入 JSON：${document}\n任务：${instruction}\n只输出完整 JSON 对象，不要解释或代码围栏。不得执行脚本。`,
+    checker: { kind: 'json-deep-equal-v1', expected }, forbidden: [],
+    criteria: [
+      { id: 'package_json_artifact_exact', kind: 'structured', statement: `输出必须解析为与 ${expected} 结构相同的 JSON 工件。` },
+      { id: 'target_semantics_and_preservation', kind: 'judgement', statement: '必须完成指定字段修复或添加，并保留全部无关标准字段和扩展字段；空对象或解释文本不合格。' },
+    ],
+  }))),
+})
+
 /** The registry itself. Frozen, keyed by `packId`, and the only place a pack is ever registered. */
-export const DOMAIN_PACKS = Object.freeze({ [PACK.packId]: PACK })
+export const DOMAIN_PACKS = Object.freeze({ [PACK.packId]: PACK, [PACKAGE_PACK.packId]: PACKAGE_PACK })
 
 /** Bounded index rows for a picker or a plan: counts only, never the case bodies. */
 export function listDomainPacks() {

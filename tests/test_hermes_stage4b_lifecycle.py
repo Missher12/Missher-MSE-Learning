@@ -139,7 +139,7 @@ class RegistrationTests(unittest.TestCase):
         self.assertTrue(hooks._reflectionDriverReady())
         # Ten native hooks plus the profile-bound driver factory is the whole registration.
         self.assertEqual(sorted(ctx.hooks), sorted(["pre_llm_call", "pre_api_request", "post_api_request",
-            "post_llm_call", "post_tool_call", "on_session_end", "on_session_reset", "on_session_finalize",
+            "post_llm_call", "pre_tool_call", "post_tool_call", "on_session_end", "on_session_reset", "on_session_finalize",
             "subagent_start", "subagent_stop"]))
         self.assertTrue(ctx.unload)
         # A read-only status call reports the capability and writes nothing.

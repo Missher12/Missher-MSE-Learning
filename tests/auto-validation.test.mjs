@@ -5,9 +5,10 @@
 // the host supplies the verdict.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
 import { LearningEngine } from '../src/index.mjs'
 import { packCases, packCaseCriteriaHash, packCriteriaHash, packScenarioHash, packSuiteId } from '../src/domains.mjs'
 import { parseVerdict, planHash } from '../src/review.mjs'
@@ -60,6 +61,144 @@ test('a queue key dedupes the work while the execution binding follows the route
     // A stale binding can never advance the plan it no longer describes.
     assert.throws(() => f.engine.autoPlanUpdate({ queueKey: first.plan.queueKey, planHash: first.plan.planHash,
       stage: 'running' }), error => error.code === 'auto_plan_mismatch')
+  } finally { f.cleanup() }
+})
+
+test('cold scans preserve terminal objective plans across legacy and canonical pack suite shapes', () => {
+  const terminalOutcomes = [
+    ['done', 'no_improvement'], ['rejected', 'evaluation_rejected'], ['accepted', 'accepted'],
+    ['abstained', 'abstained'], ['unknown_cost', 'ticket_usage_unknown'],
+  ]
+  for (const [outcome, reason] of terminalOutcomes) {
+    const f = fixture()
+    try {
+      const lesson = candidate(f)
+      const source = { kind: 'turn', sessionId: 'session-abc', turnId: '3',
+        route: { provider: 'deepseek-account', model: 'deepseek-flash', reasoningEffort: 'max' } }
+      const criteria = packCases('mse-lifecycle-v1')[0].criteria
+      const requestHashes = ['request-a', 'request-b'].map(value => createHash('sha256').update(value).digest('hex')).sort()
+      // 0.9.1 persisted the suite as its public domain-pack ID. 0.10.0 registers the same
+      // suite with the structured packId/version fields. These are one execution, not new evidence.
+      const legacy = f.engine.autoPlanRegister({ lessonId: lesson.id, version: lesson.version,
+        environment: 'default', track: 'objective', source })
+      assert.equal(legacy.ok, true, outcome)
+      f.engine.autoPlanUpdate({ queueKey: legacy.plan.queueKey, planHash: legacy.plan.planHash,
+        stage: outcome === 'done' || outcome === 'accepted' ? 'done' : 'blocked',
+        evidence: 'host_pack', reason, attempts: 1 })
+      // Model the legacy store: it has the durable per-step economic receipt, but predates the
+      // top-level requestHashes field introduced for future terminal-plan comparisons.
+      const storePath = join(f.stateRoot, 'lessons-v1.json')
+      const raw = JSON.parse(readFileSync(storePath, 'utf8'))
+      raw.autoPlans[0].progress = { steps: requestHashes.map((requestHash, index) => ({
+        stepKey: `objective:case-${index}:arm`, requestHash, text: `saved-${index}`, truncated: false, tokens: 1,
+      })) }
+      writeFileSync(storePath, JSON.stringify(raw))
+
+      // A cold engine instance reads the durable terminal row, just as the next Host start does.
+      const restarted = new LearningEngine({ stateRoot: f.stateRoot, adapterId: 'dsh', now: f.now,
+        evaluationTokensPerDay: 20_000, evaluationCallsPerDay: 3 })
+      const before = restarted.autoPlans()[0]
+      const migrated = restarted.autoPlanRegister({ lessonId: lesson.id, version: lesson.version,
+        environment: 'default', track: 'objective', source,
+        suite: { packId: 'mse-lifecycle-v1', version: 1, caseId: 'mse-lifecycle-v1.1' }, criteria, requestHashes })
+      assert.equal(migrated.ok, true, outcome)
+      assert.equal(migrated.duplicate, true, `${outcome}: canonical suite encoding is an idempotent duplicate`)
+      assert.equal(migrated.plan.planHash, before.planHash, `${outcome}: identity remains stable after restart`)
+      assert.equal(restarted.autoPlans().length, 1, `${outcome}: no replacement plan is queued`)
+      assert.equal(restarted.autoPlans()[0].stage, before.stage, `${outcome}: terminal state is preserved`)
+      assert.equal(restarted.status().evaluationCallsLast24h, 0, `${outcome}: no paid task is introduced`)
+      assert.equal(restarted.status().evaluationTokensReserved24h, 0, `${outcome}: no reservation is introduced`)
+    } finally { f.cleanup() }
+  }
+})
+
+test('a new request set can replace a terminal objective binding, while an active checkpoint is retained', () => {
+  const f = fixture()
+  try {
+    const lesson = candidate(f)
+    const base = { ...planInput(f, lesson), track: 'objective',
+      suite: { suiteId: packSuiteId({ packId: 'mse-lifecycle-v1', version: 1 }) } }
+    const first = f.engine.autoPlanRegister(base)
+    f.engine.autoPlanUpdate({ queueKey: first.plan.queueKey, planHash: first.plan.planHash,
+      stage: 'done', evidence: 'host_pack', reason: 'no_improvement', attempts: 1 })
+    const oldHash = createHash('sha256').update('old request').digest('hex')
+    const newHash = createHash('sha256').update('new request').digest('hex')
+    const knownSteps = { steps: [{ stepKey: 'objective:case:baseline', requestHash: oldHash,
+      text: 'saved', truncated: false, tokens: 1 }] }
+    const storePath = join(f.stateRoot, 'lessons-v1.json')
+    const raw = JSON.parse(readFileSync(storePath, 'utf8'))
+    raw.autoPlans[0].progress = knownSteps
+    raw.lessons.find(row => row.id === lesson.id).auto.objective.requestHashes = [oldHash]
+    writeFileSync(storePath, JSON.stringify(raw))
+    const restarted = new LearningEngine({ stateRoot: f.stateRoot, adapterId: 'dsh', now: f.now,
+      evaluationTokensPerDay: 20_000, evaluationCallsPerDay: 3 })
+    const changed = restarted.autoPlanRegister({ ...base,
+      source: { ...base.source, route: { ...base.source.route, model: 'deepseek-v4.1-flash' } },
+      suite: { packId: 'mse-lifecycle-v1', version: 1, caseId: 'mse-lifecycle-v1.1' },
+      requestHashes: [newHash] })
+    assert.equal(changed.ok, true, 'a new exact request identity is eligible for a new comparison')
+    assert.equal(changed.duplicate, false)
+
+    const activeSource = { ...base.source, turnId: '4',
+      route: { ...base.source.route, model: 'deepseek-v4.1-flash' } }
+    const active = restarted.autoPlanRegister({ ...base, source: activeSource, requestHashes: [newHash] })
+    assert.equal(active.ok, true)
+    restarted.autoPlanUpdate({ queueKey: active.plan.queueKey, planHash: active.plan.planHash,
+      stage: 'running', ticket: 'ticket-active', attempts: 1 })
+    const thirdHash = createHash('sha256').update('third request').digest('hex')
+    const different = restarted.autoPlanRegister({ ...base,
+      source: activeSource,
+      suite: { packId: 'mse-lifecycle-v1', version: 1, caseId: 'mse-lifecycle-v1.1' },
+      requestHashes: [thirdHash] })
+    assert.equal(different.ok, false)
+    assert.equal(different.code, 'auto_plan_active_checkpoint_conflict')
+    assert.equal(restarted.autoPlans()[0].ticket, 'ticket-active', 'the live paid checkpoint remains attached')
+  } finally { f.cleanup() }
+})
+
+test('partial request overlap and an evicted legacy receipt both fail closed', () => {
+  const f = fixture()
+  try {
+    const lesson = candidate(f)
+    const source = { kind: 'turn', sessionId: 'session-abc', turnId: '3',
+      route: { provider: 'deepseek-account', model: 'deepseek-flash', reasoningEffort: 'max' } }
+    const old = f.engine.autoPlanRegister({ lessonId: lesson.id, version: lesson.version,
+      environment: 'default', track: 'objective', source })
+    f.engine.autoPlanUpdate({ queueKey: old.plan.queueKey, planHash: old.plan.planHash,
+      stage: 'done', evidence: 'host_pack', reason: 'no_improvement', attempts: 1 })
+    const a = createHash('sha256').update('old request a').digest('hex')
+    const b = createHash('sha256').update('old request b').digest('hex')
+    const novel = createHash('sha256').update('novel request').digest('hex')
+    const storePath = join(f.stateRoot, 'lessons-v1.json')
+    const raw = JSON.parse(readFileSync(storePath, 'utf8'))
+    raw.autoPlans[0].progress = { steps: [a, b].map((requestHash, index) => ({
+      stepKey: `objective:old:${index}`, requestHash, text: 'saved', truncated: false, tokens: 1,
+    })) }
+    writeFileSync(storePath, JSON.stringify(raw))
+
+    const overlap = f.engine.autoPlanRegister({ lessonId: lesson.id, version: lesson.version,
+      environment: 'default', track: 'objective', source: { ...source,
+        route: { ...source.route, model: 'new-route' } },
+      suite: { packId: 'mse-lifecycle-v1', version: 1, caseId: 'mse-lifecycle-v1.1' },
+      criteria: packCases('mse-lifecycle-v1')[0].criteria, requestHashes: [a, novel] })
+    assert.equal(overlap.ok, false, 'one new request cannot make the repeated portion payable again')
+    assert.equal(overlap.code, 'auto_plan_request_overlap')
+    assert.equal(f.engine.autoPlans()[0].planHash, old.plan.planHash)
+    assert.equal(f.engine.autoPlans()[0].stage, 'done')
+
+    // A bounded working-set eviction leaves only the legacy lesson outcome, which has no request
+    // receipt. Changing route or pack metadata cannot convert that unknown history into permission.
+    const evicted = JSON.parse(readFileSync(storePath, 'utf8'))
+    evicted.autoPlans = []
+    writeFileSync(storePath, JSON.stringify(evicted))
+    const unknown = f.engine.autoPlanRegister({ lessonId: lesson.id, version: lesson.version,
+      environment: 'default', track: 'objective', source: { ...source,
+        route: { ...source.route, model: 'another-route' } },
+      suite: { packId: 'mse-lifecycle-v1', version: 1, caseId: 'mse-lifecycle-v1.1' },
+      criteria: packCases('mse-lifecycle-v1')[0].criteria, requestHashes: [novel] })
+    assert.equal(unknown.ok, false)
+    assert.equal(unknown.code, 'auto_plan_terminal_economic_identity_unknown')
+    assert.equal(f.engine.autoPlans().length, 0)
   } finally { f.cleanup() }
 })
 

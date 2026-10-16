@@ -4,7 +4,7 @@
 
 为 DSH 保存按项目隔离的用户纠错与方法候选，在相关任务中限额召回，并记录可信宿主确认的采用和验证结果。它不训练模型权重，也不保证模型永不犯错。
 
-包名：`@missher/dsh-mse-learning`。当前版本 **0.9.1** 包含自动评审、有限试用、限定领域的客观验证、预算档位和跨窗口续跑。0.9.1 修正设置页用量读取，分别显示保守预算占用与已测 Token，缺失数据保持“未上报”。[正式下载与校验和](https://github.com/Missher12/Missher-MSE-Learning/releases/tag/v0.9.1) · [交付范围](PUBLICATION.md) · [验证记录](VALIDATION.md)。下载或更新源码不会自动升级你正在使用的插件。
+包名：`@missher/dsh-mse-learning`，版本 0.10.0。提供宿主来源任务证据、受限 package.json 工件检查、坏/正常轨迹回放，以及 DSH/Hermes 适配。当前证据按验收层分别列于[验证记录](VALIDATION.md)；功能与能力边界见[实施说明](docs/AUTONOMY_0.10.0.md)。原生桌面与官方 Web 的界面复验、包校验和下载说明见[0.10.0 交付记录](PUBLICATION.md)。完整测试套件、各电脑日常安装及真实付费模型效果不在本次已验证范围内。
 
 alpha.17 的宿主会话标题选择器继续保留。标题仅用于显示，不改变经验归属、召回身份或预算。本轮共享学习核心发生变化，DSH 的自动调度不等于其他 Agent 已具备同样的宿主接线。它与历史产品 `dsh-missher-evolution` 不同，不读取或迁移后者的数据。
 
@@ -30,30 +30,42 @@ alpha.17 的宿主会话标题选择器继续保留。标题仅用于显示，�
 
 试用每轮最多 **1 条**、排在纠错与已验证方法之后，计入既有 **总2条/默认768B、每会话1536B**，不另加上下文额度；试用有期限，可因可信失败/纠错撤回。暂停或关闭自动验证会停止后续步骤，重启后的不确定请求保留中断事实和保守费用，不把同一次请求静默重放。总览、经验详情、状态与诊断读取不写入学习库，也不触发付费任务。设置页还提供人类主动发起的配置保存、启用/暂停与手动复盘/验证操作；这些是写入或调度入口，开启自动验证后可按预算触发后台评测。取消、恢复与预算的已测范围及未测边界见 [验收记录](VALIDATION.md)。
 
-## 下载与安装
+## 安装状态
 
-从 [0.9.1 正式 Release](https://github.com/Missher12/Missher-MSE-Learning/releases/tag/v0.9.1) 下载 `missher-dsh-mse-learning-0.9.1.tgz` 并核对 SHA256SUMS。备份学习库和配置，在 DSH 的插件管理中添加或更新该包，完成活动任务后按宿主提示正常重启，再检查版本、加载状态和设置。Hermes 使用独立的 `mse-learning-hermes-0.9.1.tar.gz`，按其宿主安装要求另行安装；两种宿主不可共享同一个可写学习库。
+0.10.0 已完成下列隔离验收。请从[正式下载页](https://github.com/Missher12/Missher-MSE-Learning/releases/tag/v0.10.0)获取对应安装包并核对校验值；Git 和下载包更新不表示各电脑已安装。具体范围见[交付记录](PUBLICATION.md)。
 
 ## 开始使用自动验证
 
-1. 下载对应宿主的正式包，核对校验和并备份学习库及配置后安装。
+1. 从项目正式 Release 页面确认版本与校验和后再安装。
 2. 开启 **自动验证**。对缺少可恢复来源的历史候选，显式选择一个已配置模型路线的**验证会话**；该会话只提供 provider、模型和推理档，不改变经验原项目。
 3. 在评测预算中设置你接受的**非零 token 额度**，并确认评测次数额度允许执行。保存后查看实际控制确认、队列阶段与阻塞原因；有候选不代表会立即晋升。
 4. 区分“已记录”“试用”和“已验证”：安全评审可以进入试用，客观验证通过后才在登记领域内标为 validated。关闭自动验证可停止后续自动步骤；自动复盘另有独立开关和频次限制。
 
 默认仍是**自动验证关闭、token 额度为 0、任务额度为 2**；旧配置缺失预算字段也按 0/2 处理。预算档位由用户明确选择并保存。任务数与真实物理请求数分别统计；页面只读查看不启动模型。
 
+## 设置页示例
+
+以下两张图使用同一 0.10.0 安装包、隔离配置和合成数据，自动验证关闭。
+
+官方 npm DSH 0.2.1-alpha.5 的实际 Web 中文设置页；保存、刷新回读与放弃编辑已验证。
+
+![官方 alpha.5 中文设置页（合成数据）](docs/images/official-alpha5-zh-r11.png)
+
+社区 Desktop 0.2.1-alpha.2.20261014.1 在 Linux 上的真实最小窗口（520×600）；英文导航使用宿主下拉菜单，五项均可打开正确页面。
+
+![原生最小窗口的英文导航（合成数据）](docs/images/native-en-minimum-r11.png)
+
+[旧版英文截图](docs/images/en-normal.png)仅保留历史布局，不代表当前界面。
+
 ## 验收证据与平台边界
 
 | 环境 | 证据与边界 |
 | --- | --- |
-| 当前 0.9.1：用量显示修复 | 最终包组件/契约检查 30/30，独立预算档位检查 2/2。后端与 0.9.0 逐字节一致，复用其 14 个真实 DSH Host 服务、47 次合成请求、独立进程冷重建及 36 项源码检查；这些隔离验收的真实供应商请求为 0。详见 [PUBLICATION](PUBLICATION.md) 和 [VALIDATION](VALIDATION.md)。 |
+| 0.10.0 核心与宿主证据 | 自动调度 11/11；Hermes 单实例完整链路 61.156 秒；官方 npm DSH alpha.5 Loader 在正常、缺少 fs、缺少 tools 三种条件下通过。范围及限制见 [验证记录](VALIDATION.md)。 |
 | alpha.18 Intel Mac 历史候选 | 303/303 Node、125/125 离线适配器、189/189 受控 UI，以及 4 次真实评审调用都只属于历史候选。不能将其作为当前候选、日常安装或本轮真实 provider 证据。 |
 | 纯官方 DSH、后续 DSH 版本、Windows、Ubuntu | 本次不宣称完整通过；宽松 peer `*` 只表示不锁宿主版本，不等于接口兼容。 |
-| Hermes 0.21.1 | 复用未变字节的 Hermes 适配器与真实核心 Stage 4c 离线集成 21/21；含 20K 窗口、重建 driver/pass 和原 session 可信路由事件。不是新的原生 PluginManager 或真实供应商测试。 |
+| Hermes 0.21.1 | 历史适配器/核心层 Stage 4c 离线集成 21/21，含 20K 窗口、重建 driver/pass 和原 session 可信路由事件；本轮隔离原生 PluginManager 单实例验收另列于上方，不重复计数，也不是真实供应商调用。 |
 | 其他 Agent | 可使用 Node SDK/JSON CLI，但需要编写可信生命周期适配；不是安装后自动适配所有 Agent，也不是浏览器 SDK。 |
-
-维护目标是支持合理的宿主版本范围并持续适配最新版。测试记录中的版本是验证基线，不表示只能使用该版本；最低接口要求、已验证范围和已知限制分别记录。0.9.1 的验收与后端证据复用见 [PUBLICATION](PUBLICATION.md)。
 
 DSH 必须提供 Cordis、LLM、Typert、Schemastery 与 commands/settings 等服务。完整设置页还需要 `@deepseek-ai/dsh-client-ui-primitives` 静态模块和对应设置扩展点；当前已测组合是 Missher 桌面版。官方依赖由宿主提供，本包不内嵌另一套宿主或兼容包。缺少能力时请附宿主版本及脱敏加载错误反馈，不用版本豁免代替验证。
 
@@ -69,7 +81,7 @@ dsh plugin --profile web remove @missher/dsh-mse-learning
 
 插件没有卸载删除数据的脚本；包卸载不会主动清除学习库。要删除个人数据，须先停止相关宿主，并由你自行处理备份及该目录。不要删除整个 DSH 数据根或其他插件目录。DSH 与 Hermes 不共用正在写入的学习库；检测到旧 `missherEvolutionCore` 时，新控制器会暂停。
 
-历史 alpha.15/alpha.16→alpha.17 同属 schema 2、无需迁移。0.9.1 继续使用 schema 2 的可选字段；正式升级时仍应先保留完整新鲜备份。schema 1 必须显式迁移；降级到不支持持久结算的旧包前，应先让待结算项结束，或同时恢复对应旧包与升级前的完整备份。详见[数据与回退契约](docs/BEHAVIOR.zh.md#数据升级与回退)。
+历史 alpha.15/alpha.16→alpha.17 同属 schema 2、无需迁移。0.10.0 继续使用 schema 2 的可选字段；正式升级时仍应先保留完整新鲜备份。schema 1 必须显式迁移；降级到不支持持久结算的旧包前，应先让待结算项结束，或同时恢复对应旧包与升级前的完整备份。详见[数据与回退契约](docs/BEHAVIOR.zh.md#数据升级与回退)。
 
 ## 开发与验证
 
@@ -84,9 +96,9 @@ node scripts/verify-package.mjs
 
 每次使用新的源码副本或输出目录；打包器拒绝覆盖已有候选。`MSE_SOURCE_COMMIT` 可标注无 `.git` 导出快照的40位来源提交。隔离 Host 验证脚本接收明确的 tarball、Host modules 和 pnpm 路径；UI脚本要求显式 `MSE_DSH_SOURCE`、`MSE_PLAYWRIGHT_ANCHOR`，不会寻找维护者的电脑路径。历史 alpha8 跨版本探针可用 `MSE_ALPHA4_ENGINE` / `MSE_ALPHA6_ENGINE` 指定旧引擎文件。
 
-[行为细节](docs/BEHAVIOR.zh.md) · [适配协议](docs/ADAPTER_PROTOCOL.md) · [持久结算](docs/DURABLE_SETTLEMENT_OUTBOX.md) · [召回规则](docs/RECALL_2026-09-30.md)
+[自动改进实施说明](docs/AUTONOMY_0.10.0.md) · [行为细节](docs/BEHAVIOR.zh.md) · [适配协议](docs/ADAPTER_PROTOCOL.md) · [持久结算](docs/DURABLE_SETTLEMENT_OUTBOX.md) · [召回规则](docs/RECALL_2026-09-30.md)
 
-任意自由中文条件尚不能可靠解释，会保守不召回；单元/隔离测试、设置页可读和计数增长均不证明长期真实模型收益。本轮隔离验收没有真实 provider 调用；alpha.18 的历史真实评审不属于 0.9.1。日常安装与原生窗口状态需要在各目标环境单独核验，不能用下载成功或隔离测试替代。
+任意自由中文条件尚不能可靠解释，会保守不召回；单元/隔离测试、设置页可读和计数增长均不证明长期真实模型收益。本轮没有真实 provider 调用；alpha.18 的历史真实评审不属于当前版本证据。界面截图只证明社区 alpha.2 英文设置页的合成数据布局，不代表 alpha.5 原生 UI 或日常安装验收。
 
 ## 许可证与来源
 

@@ -15,11 +15,17 @@ import { SENSITIVE_PATTERN, AUTHORITY_PATTERN, problemLoopValid, problemLoopOf, 
   problemFeedView, problemConsiderOf, ensureProblemConsider, problemConsiderValid, rankedRecoverableProblems,
   PROBLEM_DEFER_CODES, PROBLEM_FEED_LIMIT, PROBLEM_DEFER_MAX_MS,
   PROBLEM_KINDS, PROBLEM_SOURCES, PROBLEM_FAILURE_CLASSES, INDEPENDENT_THRESHOLD } from './problems.mjs'
-import { ADOPTION_CONTRACT, adoptionIndexValid, adoptionView, ensureRecentAdoptions,
+import { ADOPTION_CONTRACT, ADOPTION_TTL_MS, adoptionIndexValid, adoptionView, ensureRecentAdoptions,
   recordAdoptionInState, pruneRecentAdoptions, recentAdoptionsOf, resolveAdoptionAttribution } from './adoptions.mjs'
 import { SOURCE_DRIVERS, sourceLedgerOf, ensureSourceLedger, sourceLedgerValid, sourceOf, sourceAtRevision,
   publishInState, releaseInState, pruneSourcesInState, holdSourceInState, sourceIdentity, sourceRouteId,
   sourceKey, identityOf, normalizeEndpoint, REASONING_STATES } from './sources.mjs'
+import { canonicalTaskContract, taskEvidenceDigest, validateTaskEvidenceBinding, taskEvidenceLedgerValid,
+  ensureTaskEvidenceLedger, taskEvidenceAuthorityFor, taskFamilyHashOf, taskReplayFixtureValid,
+  recordReplayPairInState } from './task-evidence.mjs'
+import { runRegisteredProjectTests } from './project-test-runner.mjs'
+import { packageJsonReplayWitness, verifyPackageJsonArtifact, verifyPackageJsonReplayOutput } from './package-json-checker.mjs'
+import { replayTaskFixture } from './task-profiles.mjs'
 
 export { LearningError }
 /**
@@ -228,6 +234,7 @@ function recoverySummaryText(row) {
   const label = { tool_failure: '工具失败', task_failure: '任务失败', checker_failure: '宿主校验未通过',
     user_correction: '用户纠正' }[row.kind] ?? '宿主记录的问题'
   const taskSummary = [`宿主记录的问题（${label}）`, row.toolName === null ? null : `工具 ${row.toolName}`,
+    row.taskClass === null ? null : `任务 ${row.taskClass}`,
     row.failureClass === null ? null : `类别 ${row.failureClass}`, `独立出现 ${row.count} 次`]
     .filter(part => part !== null).join('；').slice(0, 800)
   const resultSummary = `${row.summary}（证据版本 ${row.evidenceRevision}，尚未完成复盘）`.slice(0, 1200)
@@ -428,6 +435,50 @@ function completeInState(engine, state, now, canonical) {
 }
 
 /**
+ * Bind already durable, source-turn-bound Host checker facts when that exact turn's receipt is
+ * actually accepted. This is pure over the caller's transaction state: evidence may arrive before
+ * or after acceptance, retries are idempotent, and prepare/cancel never create an attribution.
+ */
+function attributeTaskEvidenceInState(engine, state, now, adoptions) {
+  if (state.taskEvidence === undefined || !Array.isArray(adoptions) || adoptions.length === 0) return 0
+  const ledger = ensureTaskEvidenceLedger(state)
+  let attributed = 0
+  for (const row of ledger.records) {
+    const source = row.sourceBinding
+    const evidence = row.evidence
+    if (source === null || source === undefined || source.sourceKind !== 'structured_task' || evidence.verdict !== 'fail'
+      || evidence.validatorId !== 'package-json-structural-checker'
+      || !['dsh-file-editor-v1', 'hermes-file-tools-v1'].includes(evidence.toolchain)) continue
+    for (const adoption of adoptions) {
+      if (source.sessionHash !== adoption.sessionHash || source.turnHash !== adoption.turnHash
+        || source.scope !== adoption.scope || source.environment !== adoption.environment
+        || !Number.isFinite(adoption.at) || adoption.at + ADOPTION_TTL_MS <= now
+        || !Array.isArray(adoption.lessons) || adoption.lessons.length !== 1) continue
+      const binding = adoption.lessons[0]
+      const lesson = state.lessons.find(item => item.id === binding.id && item.version === binding.version
+        && item.scope === source.scope && item.environment === source.environment)
+      if (!lesson || lesson.kind !== 'method' || !packAdmits('package-json-structure-v1', domainTextOf(lesson)).ok) continue
+      const exists = ledger.adoptionAttributions.some(item => item.evidenceDigest === row.digest
+        && item.lessonId === lesson.id && item.version === lesson.version)
+      if (exists) continue
+      if (ledger.adoptionAttributions.length >= 256) ledger.adoptionAttributions.shift()
+      ledger.adoptionAttributions.push({ evidenceDigest: row.digest, sessionHash: source.sessionHash,
+        turnHash: source.turnHash, scope: source.scope, environment: source.environment, sourceKind: source.sourceKind,
+        lessonId: lesson.id, version: lesson.version, at: now })
+      if (lesson.status === 'validated') {
+        lesson.failed += 1
+        engine.withdraw(state, lesson, now, 'regression')
+      } else if (lesson.trial?.state === 'trial') {
+        engine.withdrawTrialInState(state, lesson, now, 'task_checker_failure')
+      }
+      attributed += 1
+      break
+    }
+  }
+  return attributed
+}
+
+/**
  * Bounded, optional durable-settlement state.
  *
  * These accessors never create a field: a read-only status call on an old schema-2 document must
@@ -594,16 +645,23 @@ function releaseHoldInState(state, owner, sessionHash) {
 function sourceCapability(identity) {
   if (!isPlainObject(identity) || !SOURCE_DRIVERS.includes(identity.driver)) return 'provider_driver_unsupported'
   if (!hex64(identity.routeId)) return 'provider_driver_unsupported'
-  if (identity.apiMode !== 'chat_completions') return 'provider_driver_unsupported'
-  // The reasoning identity must be PROVEN. `explicit` names the value that goes on the wire;
-  // `unspecified` is the host stating that the body it built carries no such field. The other two
-  // states are not a licence: `unknown` means nobody can say what was sent, and `not_applicable`
-  // is a claim about a protocol this build does not dispatch through anyway.
+  // The DSH adapter dispatches only through its real Cordis `ctx.llm.stream` Host route. It does
+  // not know or claim the provider protocol or endpoint, so those fields must stay unknown; the
+  // actual provider/model/reasoning values are checked against the Host's session route separately.
+  if (identity.driver === 'dsh_host_stream') {
+    if (identity.apiMode !== null || identity.endpointFingerprint !== null) return 'provider_driver_unsupported'
+  } else {
+    if (identity.driver !== 'async_openai_chat' || identity.apiMode !== 'chat_completions') {
+      return 'provider_driver_unsupported'
+    }
+    if (identity.endpointFingerprint === null || identity.endpointFingerprint === undefined) {
+      return 'source_endpoint_unavailable'
+    }
+  }
+  // The reasoning identity must be PROVEN. `explicit` names the value the Host route reports;
+  // `unspecified` means the route itself omitted it. `unknown` is never promoted to a default.
   if (identity.reasoningState !== 'explicit' && identity.reasoningState !== 'unspecified') {
     return 'source_reasoning_unavailable'
-  }
-  if (identity.endpointFingerprint === null || identity.endpointFingerprint === undefined) {
-    return 'source_endpoint_unavailable'
   }
   return null
 }
@@ -1450,6 +1508,7 @@ function validateState(state) {
   // Stage 4b: the bounded source-identity ledger. Again an absent field is the empty read-only
   // view, so a document written before this build keeps validating.
   check(sourceLedgerValid(state), 'invalid_source_ledger')
+  check(state.taskEvidence === undefined || taskEvidenceLedgerValid(state.taskEvidence), 'invalid_task_evidence_ledger')
   check(Array.isArray(state.sessions) && state.sessions.length <= 256 && state.sessions.every(s =>
     /^[a-f0-9]{64}$/u.test(s.id) && Number.isSafeInteger(s.bytes) && s.bytes >= 0 && s.bytes <= 1536
       && Array.isArray(s.offered) && s.offered.length <= 32), 'invalid_store')
@@ -1502,6 +1561,23 @@ function validateState(state) {
             || (Number.isSafeInteger(row.measuredTokens) && row.measuredTokens >= 0))
           && (row.known === undefined || row.known === null || typeof row.known === 'boolean')
           && (row.dispatched === undefined || typeof row.dispatched === 'boolean')))), 'invalid_store')
+    for (const job of state.jobs) {
+      if (job.taskReplayCases === undefined) continue
+      check(job.packId === 'package-json-structure-v1' && Array.isArray(job.taskReplayCases)
+        && job.taskReplayCases.length >= 1 && job.taskReplayCases.length <= 2
+        && new Set(job.taskReplayCases.map(row => row?.id)).size === job.taskReplayCases.length
+        && Buffer.byteLength(JSON.stringify(job.taskReplayCases), 'utf8') <= 64 * 1024
+        && job.taskReplayCases.every(row => {
+          if (!isPlainObject(row) || !/^[a-f0-9]{64}$/u.test(row.id)
+            || !/^[a-f0-9]{64}$/u.test(row.badFixtureHash)
+            || !/^[a-f0-9]{64}$/u.test(row.controlFixtureHash)) return false
+          const keys = Object.keys(row).sort().join(',')
+          if (keys === 'badFixtureHash,controlFixtureHash,id') return true // old ticket; query refuses and cancels it
+          return keys === 'badFixture,badFixtureHash,controlFixture,controlFixtureHash,id,validatorHash'
+            && /^[a-f0-9]{64}$/u.test(row.validatorHash)
+            && isPlainObject(row.badFixture) && isPlainObject(row.controlFixture)
+        }), 'invalid_task_replay_ticket')
+    }
     for (const l of state.lessons) {
       check(typeof l.hypothesis === 'string' && /^[a-f0-9]{64}$/u.test(l.hypothesis), 'invalid_store')
       check(l.methodId === null || typeof l.methodId === 'string', 'invalid_store')
@@ -2103,8 +2179,10 @@ function autoOutcomeValid(auto) {
   if (!isPlainObject(auto)) return false
   return Object.keys(auto).every(key => ['review', 'objective'].includes(key))
     && Object.values(auto).every(row => isPlainObject(row)
-      && Object.keys(row).every(name => ['planHash', 'state', 'at'].includes(name))
+      && Object.keys(row).every(name => ['planHash', 'state', 'at', 'requestHashes'].includes(name))
       && hex64(row.planHash) && Number.isFinite(row.at)
+      && (row.requestHashes === undefined || (Array.isArray(row.requestHashes)
+        && row.requestHashes.length > 0 && row.requestHashes.length <= 64 && row.requestHashes.every(hex64)))
       && ['done', 'blocked', 'inconclusive', 'reviewed', 'rejected', 'accepted', 'failed'].includes(row.state))
 }
 
@@ -2112,7 +2190,7 @@ function autoPlanRowValid(row) {
   return isPlainObject(row) && Object.keys(row).every(key => ['queueKey', 'planHash', 'lessonId', 'version', 'environment',
     'track', 'stage', 'evidence', 'source', 'ticket', 'generation', 'attempts', 'maxAttempts', 'nextAttemptAt',
     'reason', 'updatedAt', 'sourceBinding', 'packId', 'packVersion', 'caseId', 'scenarioHash',
-    'criteriaHash', 'attempt', 'progress'].includes(key))
+    'criteriaHash', 'attempt', 'progress', 'requestHashes'].includes(key))
     && hex64(row.queueKey) && hex64(row.planHash)
     // Stage 4c: the optional published SOURCE IDENTITY a bound registration froze. It is bounded to
     // the two scalars it is made of, so a stored plan can never carry an unbounded or unknown row.
@@ -2135,6 +2213,8 @@ function autoPlanRowValid(row) {
         && typeof step.truncated === 'boolean'
         && (step.tokens === null || (Number.isSafeInteger(step.tokens) && step.tokens >= 0)))
       && Buffer.byteLength(JSON.stringify(row.progress), 'utf8') <= 300_000))
+    && (row.requestHashes === undefined || (Array.isArray(row.requestHashes)
+      && row.requestHashes.length > 0 && row.requestHashes.length <= 64 && row.requestHashes.every(hex64)))
     && (row.sourceBinding === undefined || (isPlainObject(row.sourceBinding)
       && Object.keys(row.sourceBinding).every(key => key === 'revision' || key === 'bindingHash')
       && Number.isSafeInteger(row.sourceBinding.revision) && row.sourceBinding.revision >= 1
@@ -2350,11 +2430,21 @@ function reviewLicenceCurrent(lesson, job) {
  * bounded NEW attempt a genuinely different execution instead of a replay of the one that settled.
  */
 function autoPlanHash({ lessonId, version, environment, track, route, source, suite, criteria, renewalAttempt,
-  sourceBinding }) {
+  sourceBinding, requestHashes }) {
+  // `domain-pack:<id>:v<version>` was the released suite representation before plan registration
+  // began carrying `{ packId, version }`. Treat those two wire shapes as the same pack identity:
+  // otherwise a cold scan after upgrade changes only the encoding, invalidates a terminal plan,
+  // and buys the same objective comparison again.
+  const legacyPack = typeof suite?.suiteId === 'string'
+    ? /^domain-pack:(.+):v([1-9][0-9]*)$/u.exec(suite.suiteId) : null
+  const suiteIdentity = suite?.packId !== undefined && suite?.packId !== null
+    ? [suite.packId, suite.version ?? null]
+    : legacyPack !== null ? [legacyPack[1], Number(legacyPack[2])]
+      : [suite?.suiteId ?? null, suite?.version ?? null]
   return hash(JSON.stringify([lessonId, version, environment, track,
     [route?.provider ?? null, route?.model ?? null, route?.reasoningEffort ?? null],
     [source?.kind ?? null, source?.sessionId ?? null, source?.turnId ?? null, source?.backfilled === true],
-    [suite?.packId ?? suite?.suiteId ?? null, suite?.version ?? null],
+    suiteIdentity,
     Array.isArray(criteria) ? criteria.map(row => [row.id, row.kind, row.statement]) : null,
     ...(Number.isSafeInteger(renewalAttempt) && renewalAttempt >= 0 ? [renewalAttempt] : []),
     // Stage 4c: the published SOURCE IDENTITY a bound registration freezes. It is appended ONLY for
@@ -2362,7 +2452,39 @@ function autoPlanHash({ lessonId, version, environment, track, route, source, su
     // `null`/`false`/`0` for a caller that has no binding would re-hash every existing plan and make
     // already-settled work, queue-eviction dedupe and terminal rows look like new work.
     ...(sourceBinding === undefined || sourceBinding === null
-      ? [] : [[sourceBinding.revision, sourceBinding.bindingHash]])]))
+      ? [] : [[sourceBinding.revision, sourceBinding.bindingHash]]),
+    // Optional exact economic request identity for automatic objective work. Older plan hashes
+    // without this field remain stable; current plans bind the frozen route/prompt/output set.
+    ...(requestHashes === undefined || requestHashes === null ? [] : [requestHashes])]))
+}
+
+/** Compare request hashes as multisets: equality proves idempotency; any intersection is unsafe. */
+function requestSetRelation(previous, next) {
+  if (!Array.isArray(previous) || previous.length === 0 || !previous.every(hex64)
+    || !Array.isArray(next) || next.length === 0 || !next.every(hex64)) return 'unknown'
+  const left = [...previous].sort(), right = [...next].sort()
+  if (left.length === right.length && left.every((value, index) => value === right[index])) return 'same'
+  const remaining = new Map()
+  for (const value of right) remaining.set(value, (remaining.get(value) ?? 0) + 1)
+  const overlap = left.some(value => {
+    const count = remaining.get(value) ?? 0
+    if (count <= 0) return false
+    remaining.set(value, count - 1)
+    return true
+  })
+  return overlap ? 'overlap' : 'disjoint'
+}
+function requestSetContains(manifest, completed) {
+  if (!Array.isArray(manifest) || manifest.length === 0 || !manifest.every(hex64)
+    || !Array.isArray(completed) || completed.length === 0 || !completed.every(hex64)) return false
+  const remaining = new Map()
+  for (const value of manifest) remaining.set(value, (remaining.get(value) ?? 0) + 1)
+  for (const value of completed) {
+    const count = remaining.get(value) ?? 0
+    if (count <= 0) return false
+    remaining.set(value, count - 1)
+  }
+  return true
 }
 
 /**
@@ -3202,6 +3324,8 @@ export class LearningEngine {
       if (accepted.length > 0) {
         recordAdoptionInState(ensureRecentAdoptions(state), now, { sessionHash: row.sessionHash,
           scope: row.scope, environment: row.environment, turnHash: row.turn, lessons: accepted })
+        attributeTaskEvidenceInState(this, state, now, [{ sessionHash: row.sessionHash, turnHash: row.turn, at: now,
+          scope: row.scope, environment: row.environment, lessons: accepted }])
       }
       return { ok: true }
     })
@@ -4277,6 +4401,10 @@ export class LearningEngine {
     // case a caller asked for would queue work nobody can review.
     check(input.caseId === undefined || input.caseId === null
       || (typeof input.caseId === 'string' && boundedLabel(input.caseId, 64)), 'invalid_auto_plan')
+    check(input.requestHashes === undefined || (Array.isArray(input.requestHashes)
+      && input.requestHashes.length > 0 && input.requestHashes.length <= 64
+      && input.requestHashes.every(hex64)), 'invalid_auto_plan')
+    const requestHashes = input.requestHashes === undefined ? undefined : [...input.requestHashes].sort()
     const queueKey = planHash({ lessonId, version, environment, track })
     // The refusal is decided READ-ONLY first: a store transaction rewrites the document even when its
     // callback changed nothing, and a scan that keeps offering a waiting edition would otherwise pay a
@@ -4319,22 +4447,69 @@ export class LearningEngine {
       // reproducible identity instead of a `null` criteria slot nothing could ever match.
       const planHashValue = autoPlanHash({ lessonId, version, environment, track, route: source.route, source,
         suite: input.suite, criteria: packCase === null ? input.criteria : packCase.criteria,
-        renewalAttempt: renewalAttemptFor(current, track), sourceBinding })
+        renewalAttempt: renewalAttemptFor(current, track), sourceBinding, requestHashes })
       const existing = (state.autoPlans ?? []).find(row => row.queueKey === queueKey)
+      let economicNewWork = false
+      const settled = current?.auto?.[track]
       if (existing !== undefined) {
-        // A re-registration with the SAME execution binding is a duplicate; a different binding
-        // replaces the plan and invalidates the old one, because its result can no longer match.
-        if (existing.planHash === planHashValue) return { ok: true, duplicate: true, plan: autoPlanSummary(existing) }
-        state.autoPlans = state.autoPlans.filter(row => row.queueKey !== queueKey)
+        const terminal = ['done', 'blocked', 'failed'].includes(existing.stage)
+        const activeTicket = typeof existing.ticket === 'string'
+          && ['queued', 'running', 'interrupted'].includes(existing.stage)
+        const priorHashes = Array.isArray(existing.requestHashes) ? existing.requestHashes
+          : Array.isArray(existing.progress?.steps)
+            ? existing.progress.steps.map(step => step.requestHash).filter(hex64).sort() : []
+        if (requestHashes !== undefined && existing.track === 'objective'
+          && (terminal && existing.evidence === 'host_pack' || activeTicket)) {
+          // A previous terminal outcome takes precedence over a later partial ticket. In particular,
+          // an upgrade may not spend the uncompleted tail of a newly minted ticket when the earlier
+          // terminal objective result has no receipt that proves this is new economic work.
+          if (settled !== undefined && settled.planHash !== existing.planHash) {
+            const relation = requestSetRelation(settled.requestHashes, requestHashes)
+            if (relation === 'same') return { ok: true, duplicate: true, settled: true,
+              economicDuplicate: true, plan: autoPlanSummary(existing) }
+            if (relation === 'overlap') return { ok: false, code: 'auto_plan_request_overlap' }
+            if (relation !== 'disjoint') return { ok: false, code: 'auto_plan_terminal_economic_identity_unknown' }
+          }
+          const relation = requestSetRelation(priorHashes, requestHashes)
+          if (relation === 'same') return { ok: true, duplicate: true, ...(terminal ? { settled: true } : {}),
+            economicDuplicate: true, plan: autoPlanSummary(existing) }
+          if (activeTicket) {
+            if (!requestSetContains(requestHashes, priorHashes)) {
+              return { ok: false, code: 'auto_plan_active_checkpoint_conflict' }
+            }
+            if (settled !== undefined && settled.planHash !== existing.planHash) {
+              return { ok: false, code: 'auto_plan_terminal_economic_identity_unknown' }
+            }
+            // A first-ever incomplete plan may resume: all already-paid requests are still in the
+            // proposed manifest, and the real DSH call path will read the ticket checkpoints.
+            existing.requestHashes = requestHashes
+            return { ok: true, duplicate: true, plan: autoPlanSummary(existing) }
+          }
+          if (relation === 'overlap') return { ok: false, code: 'auto_plan_request_overlap' }
+          if (relation !== 'disjoint') return { ok: false, code: 'auto_plan_terminal_economic_identity_unknown' }
+          economicNewWork = true
+        } else if (existing.planHash === planHashValue) {
+          return { ok: true, duplicate: true, plan: autoPlanSummary(existing) }
+        }
       }
       // The SAME binding already reached a terminal decision for this lesson version. The plan row
       // may have been evicted to make room for other work, but the outcome is kept on the lesson, so
       // registering it again would pay a second time for a comparison that is already decided.
       // A different binding (route, scheme, criteria, suite) hashes differently and is registered.
-      const settled = state.lessons.find(row => row.id === lessonId && row.version === version)?.auto?.[track]
-      if (settled !== undefined && settled.planHash === planHashValue) {
+      if (settled !== undefined && track === 'objective' && requestHashes !== undefined
+        && settled.planHash !== planHashValue) {
+        const relation = requestSetRelation(settled.requestHashes, requestHashes)
+        if (relation === 'same') return { ok: true, duplicate: true, settled: true, plan: null }
+        if (relation === 'overlap') return { ok: false, code: 'auto_plan_request_overlap' }
+        if (relation !== 'disjoint') return { ok: false, code: 'auto_plan_terminal_economic_identity_unknown' }
+        economicNewWork = true
+      }
+      if (!economicNewWork && settled !== undefined && settled.planHash === planHashValue) {
         return { ok: true, duplicate: true, settled: true, plan: null }
       }
+      // Keep the previous row until every settled-economic-identity check above has admitted a
+      // replacement. A refusal must preserve its durable ticket, progress and visible block reason.
+      if (existing !== undefined) state.autoPlans = state.autoPlans.filter(row => row.queueKey !== queueKey)
       let plans = [...(state.autoPlans ?? [])]
       // 64 is a bounded WORKING SET, not a lifetime quota: a finished, blocked or stale plan has
       // already delivered its evidence (kept on the lesson, in `experiments` and in the day's
@@ -4350,6 +4525,7 @@ export class LearningEngine {
       }
       const plan = { queueKey, planHash: planHashValue, lessonId, version, environment, track,
         stage: 'queued', evidence: 'none', source,
+        ...(requestHashes === undefined ? {} : { requestHashes }),
         ...(packCase === null ? {} : { packId: packCase.pack.packId, packVersion: packCase.pack.version,
           caseId: packCase.testCase.caseId, scenarioHash: packCase.scenarioHash,
           criteriaHash: packCase.criteriaHash }),
@@ -4387,6 +4563,10 @@ export class LearningEngine {
     const sourceBinding = normalizePlanSourceBinding(input.sourceBinding)
     check(input.caseId === undefined || input.caseId === null
       || (typeof input.caseId === 'string' && boundedLabel(input.caseId, 64)), 'invalid_auto_plan')
+    check(input.requestHashes === undefined || (Array.isArray(input.requestHashes)
+      && input.requestHashes.length > 0 && input.requestHashes.length <= 64 && input.requestHashes.every(hex64)),
+    'invalid_auto_plan')
+    const requestHashes = input.requestHashes === undefined ? undefined : [...input.requestHashes].sort()
     // The read-only twin reads the SAME attempt identity the registration would carry, from the same
     // state: a comparison that used a different component would either miss a legitimate new attempt
     // or look like one where there is none.
@@ -4397,8 +4577,38 @@ export class LearningEngine {
     const queueKey = planHash({ lessonId, version, environment, track })
     const planHashValue = autoPlanHash({ lessonId, version, environment, track, route: source.route, source,
       suite: input.suite, criteria: packCase === null ? input.criteria : packCase.criteria,
-      renewalAttempt: renewalAttemptFor(current, track), sourceBinding })
+      renewalAttempt: renewalAttemptFor(current, track), sourceBinding, requestHashes })
     return { ok: true, queueKey, planHash: planHashValue }
+  }
+  /** Read-only paid-work gate checked immediately before an objective plan can resume. */
+  autoPlanEconomicAdmission(input = {}) {
+    const queueKey = String(input.queueKey ?? '')
+    check(hex64(queueKey) && hex64(input.planHash) && Array.isArray(input.requestHashes)
+      && input.requestHashes.length > 0 && input.requestHashes.length <= 64 && input.requestHashes.every(hex64),
+    'invalid_auto_plan')
+    const state = this.store.read(); validateState(state); check(state.schema === 2, 'migration_required')
+    const plan = (state.autoPlans ?? []).find(row => row.queueKey === queueKey)
+    if (plan === undefined || plan.planHash !== input.planHash) return { ok: false, code: 'auto_plan_mismatch' }
+    if (plan.track !== 'objective') return { ok: true, code: 'not_objective' }
+    const hashes = [...input.requestHashes].sort()
+    const savedManifest = Array.isArray(plan.requestHashes) ? plan.requestHashes : null
+    const completed = Array.isArray(plan.progress?.steps)
+      ? plan.progress.steps.map(step => step.requestHash).filter(hex64) : []
+    if (savedManifest !== null && requestSetRelation(savedManifest, hashes) !== 'same') {
+      return { ok: false, code: 'auto_plan_active_checkpoint_conflict' }
+    }
+    if (completed.length > 0 && !requestSetContains(hashes, completed)) {
+      return { ok: false, code: 'auto_plan_active_checkpoint_conflict' }
+    }
+    const lesson = state.lessons.find(row => row.id === plan.lessonId && row.version === plan.version)
+    const prior = lesson?.auto?.objective
+    if (prior !== undefined && prior.planHash !== plan.planHash) {
+      const relation = requestSetRelation(prior.requestHashes, hashes)
+      if (relation === 'same') return { ok: false, code: 'auto_plan_economic_duplicate' }
+      if (relation === 'overlap') return { ok: false, code: 'auto_plan_request_overlap' }
+      if (relation !== 'disjoint') return { ok: false, code: 'auto_plan_terminal_economic_identity_unknown' }
+    }
+    return { ok: true, code: 'new_economic_request_set' }
   }
   /**
    * Read-only: the method candidates an automatic pass may consider, across every scope.
@@ -4843,9 +5053,12 @@ export class LearningEngine {
       // queue pay for the same version a second time.
       if (['done', 'blocked', 'failed'].includes(plan.stage)) {
         const lesson = state.lessons.find(row => row.id === plan.lessonId && row.version === plan.version)
-        if (lesson !== undefined) {
+        const economicHold = ['auto_plan_active_checkpoint_conflict', 'auto_plan_request_overlap',
+          'auto_plan_terminal_economic_identity_unknown', 'auto_plan_economic_duplicate'].includes(plan.reason)
+        if (lesson !== undefined && !economicHold) {
           lesson.auto = { ...(lesson.auto ?? {}),
-            [plan.track]: { planHash: plan.planHash, state: plan.stage === 'done' ? 'done' : 'blocked', at: now } }
+            [plan.track]: { planHash: plan.planHash, state: plan.stage === 'done' ? 'done' : 'blocked', at: now,
+              ...(plan.requestHashes === undefined ? {} : { requestHashes: [...plan.requestHashes] }) } }
         }
       }
       return { ok: true, plan: { ...autoPlanSummary(plan), source: { ...plan.source } } }
@@ -4869,6 +5082,16 @@ export class LearningEngine {
     return changed
   }
   evaluate(input) {
+    if (input.taskReplayResults !== undefined) {
+      check(Array.isArray(input.taskReplayResults) && input.taskReplayResults.length >= 1
+        && input.taskReplayResults.length <= 2 && input.taskReplayResults.every(row => isPlainObject(row)
+          && Object.keys(row).sort().join(',') === 'badOutput,controlOutput,id'
+          && /^[a-f0-9]{64}$/u.test(row.id) && typeof row.badOutput === 'string'
+          && Buffer.byteLength(row.badOutput, 'utf8') <= 32_000 && typeof row.controlOutput === 'string'
+          && Buffer.byteLength(row.controlOutput, 'utf8') <= 32_000)
+        && new Set(input.taskReplayResults.map(row => row.id)).size === input.taskReplayResults.length,
+        'invalid_task_replay_result')
+    }
     // Three bases, in increasing distance from the host's own algorithm:
     //  • `registered_algorithm` — the fixed fixtures of a registered checker;
     //  • `host_pack` — a host-registered domain scenario pack. The CALLER supplies only the model's
@@ -4979,6 +5202,33 @@ export class LearningEngine {
             environment: hex64(lesson.environment) ? lesson.environment : null })
           if (gate.ok !== true) return refuseTicket(gate.code)
         }
+        if (job.packId === 'package-json-structure-v1') {
+          const bindings = job.taskReplayCases
+          const results = input.taskReplayResults
+          if (!Array.isArray(bindings) || bindings.length < 1 || bindings.length > 2
+            || !Array.isArray(results) || results.length !== bindings.length) return refuseTicket('task_replay_gate_required')
+          const byId = new Map(results.map(row => [row.id, row]))
+          for (const frozen of bindings) {
+            const result = byId.get(frozen.id)
+            if (result === undefined || Object.keys(frozen).sort().join(',')
+              !== 'badFixture,badFixtureHash,controlFixture,controlFixtureHash,id,validatorHash'
+              || hash(JSON.stringify(frozen.badFixture)) !== frozen.badFixtureHash
+              || hash(JSON.stringify(frozen.controlFixture)) !== frozen.controlFixtureHash) {
+              return refuseTicket('task_replay_evidence_changed')
+            }
+            const badFixture = replayTaskFixture(frozen.badFixture), controlFixture = replayTaskFixture(frozen.controlFixture)
+            if (badFixture.status !== 'fail' || controlFixture.status !== 'pass'
+              || badFixture.oracleHash !== controlFixture.oracleHash
+              || frozen.validatorHash !== hash(JSON.stringify(['package-json-structural-checker', 1, badFixture.oracleHash]))) {
+              return refuseTicket('task_replay_unverifiable')
+            }
+            const badResult = verifyPackageJsonReplayOutput(frozen.badFixture, result.badOutput, 'bad')
+            const controlResult = verifyPackageJsonReplayOutput(frozen.controlFixture, result.controlOutput, 'control')
+            if (badResult.status !== 'pass' || controlResult.status !== 'pass') {
+              return refuseTicket('task_replay_gate_failed')
+            }
+          }
+        } else if (input.taskReplayResults !== undefined) return refuseTicket('task_replay_not_applicable')
         const persistedTokens = (state.spends.find(x => x.ticket === ticket)?.tokens) ?? 0
         const spent = Math.max(trials.reduce((sum, x) => sum + (x.baseline.tokens ?? job.tokens)
           + (x.candidate.tokens ?? job.tokens), 0), persistedTokens)
@@ -6186,6 +6436,300 @@ export class LearningEngine {
     return { ok: true, ...inspectArtifact({ methodId: lesson.methodId, source: input.source, artifact: input.artifact }),
       lessonId: lesson.id, version: lesson.version }
   }
+  taskEvidenceContext(authority, { sessionId, turnId, projectKey, environmentId, sourceKind = 'structured_task',
+    lessonId = undefined, version = undefined }) {
+    check(authority !== undefined && authority === taskEvidenceAuthorityFor(this), 'untrusted_task_evidence')
+    check(identity(sessionId) && identity(turnId), 'invalid_task_evidence')
+    check(['calibration', 'project_test', 'structured_task'].includes(sourceKind), 'invalid_task_evidence')
+    if (lessonId !== undefined) check(/^lesson_[a-f0-9]{24}$/u.test(lessonId)
+      && Number.isSafeInteger(version) && version > 0, 'invalid_task_evidence')
+    const state = this.store.read(); validateState(state)
+    const sessionHash = hash(sessionId), turnHash = turnKey({ sessionId, turnId })
+    const adoption = recentAdoptionsOf(state).sessions.find(row => row.sessionHash === sessionHash
+      && row.turnHash === turnHash && row.at + ADOPTION_TTL_MS > this.now())
+    const lesson = lessonId === undefined ? null : state.lessons.find(row => row.id === lessonId && row.version === version)
+    const adopted = adoption !== undefined && lesson !== null && lesson !== undefined
+      && lesson.kind === 'method' && packAdmits('package-json-structure-v1', domainTextOf(lesson)).ok
+      && adoption.scope === lesson.scope && adoption.environment === lesson.environment
+      && adoption.lessons.some(binding => binding.id === lesson.id && binding.version === lesson.version)
+    if (lessonId !== undefined && !adopted) return null
+    const scope = scopeFor(projectKey, this.adapter, this.instance)
+    const environment = environmentFor({ environmentId })
+    if (adoption && (adoption.scope !== scope || adoption.environment !== environment)) return null
+    return { scope, environment, methodId: adopted ? (lesson.methodId ?? lesson.id) : 'registered-preserve-null-v1',
+      methodVersion: adopted ? lesson.version : 1,
+      adoptionSessionHash: adopted ? sessionHash : null, adoptionTurnHash: adopted ? turnHash : null,
+      taskContext: Object.freeze({ sessionId, turnId: String(turnId), projectKey: projectKey ?? null,
+        environmentId: environmentId ?? null, sourceKind }) }
+  }
+  /** Run the one built-in project manifest and record its output without accepting caller verdicts. */
+  runRegisteredProjectTests(authority, input) {
+    check(authority !== undefined && authority === taskEvidenceAuthorityFor(this), 'untrusted_task_evidence')
+    const keys = ['environmentId', 'eventId', 'manifestId', 'model', 'projectKey', 'provider', 'reasoningEffort', 'sessionId', 'turnId']
+    check(isPlainObject(input) && Object.keys(input).sort().join(',') === keys.sort().join(',')
+      && identity(input.sessionId) && identity(input.turnId) && typeof input.eventId === 'string'
+      && input.eventId.length > 0 && input.eventId.length <= 512 && !/[\u0000-\u001f\u007f]/u.test(input.eventId)
+      && ['string', 'undefined'].includes(typeof input.provider) && ['string', 'undefined'].includes(typeof input.model)
+      && (input.projectKey === null || typeof input.projectKey === 'string')
+      && (input.environmentId === null || typeof input.environmentId === 'string')
+      && (input.reasoningEffort === null || typeof input.reasoningEffort === 'string'), 'invalid_task_evidence')
+    const run = runRegisteredProjectTests(input.manifestId)
+    check(run !== null, 'project_test_manifest_unavailable')
+    check(typeof input.provider === 'string' && input.provider.length > 0
+      && typeof input.model === 'string' && input.model.length > 0, 'task_evidence_route_unavailable')
+    const model = `${input.provider}/${input.model}${typeof input.reasoningEffort === 'string' ? `/${input.reasoningEffort}` : ''}`
+    const identity = this.taskEvidenceContext(authority, { sessionId: input.sessionId, turnId: input.turnId,
+      projectKey: input.projectKey ?? undefined, environmentId: input.environmentId ?? undefined, sourceKind: 'project_test' })
+    check(identity !== null, 'task_evidence_scope_mismatch')
+    const hash = value => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex')
+    const fixture = run.fixture, artifactHash = hash(fixture)
+    const sourceEventId = `src-${hash(input.eventId).slice(0, 60)}`
+    const contractInput = { contractId: run.manifestId, version: run.version, scope: identity.scope,
+      environment: identity.environment, taskFamily: 'mse-project-tests', model,
+      toolchain: 'mse-registered-runner-v1', methodId: 'mse-project-test-v1', methodVersion: 1,
+      validatorId: 'mse-project-test-runner', validatorVersion: 1, sourceEventId, artifactHash,
+      adoptionSessionHash: identity.adoptionSessionHash, adoptionTurnHash: identity.adoptionTurnHash }
+    const { contract, hash: contractHash } = canonicalTaskContract(contractInput)
+    const eventId = `ev-${hash(`${input.sessionId}\u0000${input.turnId}\u0000${input.eventId}`).slice(0, 61)}`
+    const validatorHash = hash([contract.validatorId, contract.validatorVersion, run.oracleHash])
+    const evidence = { eventId, contractHash, validatorHash, scope: identity.scope, environment: identity.environment,
+      model, toolchain: contract.toolchain, methodId: contract.methodId, methodVersion: contract.methodVersion,
+      validatorId: contract.validatorId, validatorVersion: contract.validatorVersion,
+      adoptionSessionHash: identity.adoptionSessionHash, adoptionTurnHash: identity.adoptionTurnHash,
+      artifactHash, verdict: run.status, failedChecks: run.status === 'fail' ? [run.reason] : [], at: this.now() }
+    const recorded = this.recordTaskEvidence(authority, { contract, evidence, hostResultHash: hash(run),
+      taskFamilyHash: taskFamilyHashOf(contract), fixture, taskContext: identity.taskContext })
+    return { ...run, evidence: recorded }
+  }
+  /** Verify a real host-read package.json under fixed standard-field type checks. */
+  recordPackageJsonArtifact(authority, input) {
+    check(authority !== undefined && authority === taskEvidenceAuthorityFor(this), 'untrusted_task_evidence')
+    const keys = ['adapterId', 'content', 'environmentId', 'eventId', 'fileHash', 'filename', 'model',
+      'lessonId', 'lessonVersion', 'projectKey', 'provider', 'reasoningEffort', 'sessionId', 'toolchain', 'turnId']
+    check(isPlainObject(input) && Object.keys(input).sort().join(',') === keys.sort().join(',')
+      && identity(input.sessionId) && identity(input.turnId) && typeof input.eventId === 'string'
+      && input.eventId.length > 0 && input.eventId.length <= 512 && !/[\u0000-\u001f\u007f]/u.test(input.eventId)
+      && input.filename === 'package.json' && typeof input.content === 'string'
+      && Buffer.byteLength(input.content, 'utf8') <= 32_000 && /^[a-f0-9]{64}$/u.test(input.fileHash)
+      && input.fileHash === createHash('sha256').update(input.content).digest('hex')
+      && ['dsh', 'hermes'].includes(input.adapterId)
+      && ['dsh-file-editor-v1', 'hermes-file-tools-v1'].includes(input.toolchain)
+      && typeof input.provider === 'string' && input.provider.length > 0
+      && typeof input.model === 'string' && input.model.length > 0
+      && (input.projectKey === null || typeof input.projectKey === 'string')
+      && (input.environmentId === null || typeof input.environmentId === 'string')
+      && ((input.lessonId === null && input.lessonVersion === null)
+        || (typeof input.lessonId === 'string' && /^lesson_[a-f0-9]{24}$/u.test(input.lessonId)
+          && Number.isSafeInteger(input.lessonVersion) && input.lessonVersion > 0))
+      && (input.reasoningEffort === null || typeof input.reasoningEffort === 'string'), 'invalid_project_manifest_evidence')
+    const checked = verifyPackageJsonArtifact(input.content, input.filename)
+    check(checked.status !== 'unknown', 'project_manifest_unverifiable')
+    const context = this.taskEvidenceContext(authority, { sessionId: input.sessionId, turnId: input.turnId,
+      projectKey: input.projectKey ?? undefined, environmentId: input.environmentId ?? undefined,
+      sourceKind: 'structured_task', ...(input.lessonId === null ? {} : { lessonId: input.lessonId,
+        version: input.lessonVersion }) })
+    check(context !== null, 'task_evidence_scope_mismatch')
+    const routeModel = `${input.provider}/${input.model}${typeof input.reasoningEffort === 'string'
+      ? `/${input.reasoningEffort}` : ''}`
+    const artifactHash = input.fileHash
+    const witness = packageJsonReplayWitness(checked)
+    const fixture = { fixtureId: `package-${artifactHash.slice(0, 24)}`, oracleHash: checked.oracleHash,
+      source: [{ field: 'witness', value: witness ?? '{"scripts":{"test":17}}' }],
+      artifact: [{ field: 'status', value: checked.status }, { field: 'reason', value: checked.reason },
+        { field: 'violations', value: checked.violations }] }
+    const shortHash = value => createHash('sha256').update(typeof value === 'string' ? value : JSON.stringify(value)).digest('hex')
+    const contractInput = { contractId: 'npm-package-json-shape', version: 1, scope: context.scope,
+      environment: context.environment, taskFamily: 'package_json_structure', model: routeModel,
+      toolchain: input.toolchain, methodId: context.methodId, methodVersion: context.methodVersion,
+      validatorId: 'package-json-structural-checker', validatorVersion: 1,
+      sourceEventId: `src-${shortHash(input.eventId).slice(0, 60)}`, artifactHash,
+      adoptionSessionHash: context.adoptionSessionHash, adoptionTurnHash: context.adoptionTurnHash }
+    const { contract, hash: contractHash } = canonicalTaskContract(contractInput)
+    const eventId = `ev-${shortHash(`${input.sessionId}\u0000${input.turnId}\u0000${input.eventId}`).slice(0, 61)}`
+    const validatorHash = shortHash([contract.validatorId, contract.validatorVersion, checked.oracleHash])
+    const evidence = { eventId, contractHash, validatorHash, scope: context.scope, environment: context.environment,
+      model: routeModel, toolchain: contract.toolchain, methodId: contract.methodId, methodVersion: context.methodVersion,
+      validatorId: contract.validatorId, validatorVersion: 1, adoptionSessionHash: context.adoptionSessionHash,
+      adoptionTurnHash: context.adoptionTurnHash, artifactHash, verdict: checked.status,
+      failedChecks: checked.status === 'fail' ? [checked.reason] : [], at: this.now() }
+    return { ...checked, evidence: this.recordTaskEvidence(authority, { contract, evidence,
+      hostResultHash: shortHash([input.eventId, input.fileHash]), taskFamilyHash: taskFamilyHashOf(contract),
+      fixture, taskContext: context.taskContext }) }
+  }
+  /** Persist one result verified from a real Host tool event under an adapter-held authority. */
+  recordTaskEvidence(authority, input) {
+    check(authority !== undefined && authority === taskEvidenceAuthorityFor(this), 'untrusted_task_evidence')
+    check(isPlainObject(input) && Object.keys(input).sort().join(',') === 'contract,evidence,fixture,hostResultHash,taskContext,taskFamilyHash'
+      && /^[a-f0-9]{64}$/u.test(input.hostResultHash) && /^[a-f0-9]{64}$/u.test(input.taskFamilyHash)
+      && taskReplayFixtureValid(input.fixture) && isPlainObject(input.taskContext)
+      && Object.keys(input.taskContext).sort().join(',') === 'environmentId,projectKey,sessionId,sourceKind,turnId'
+      && identity(input.taskContext.sessionId) && identity(input.taskContext.turnId)
+      && (input.taskContext.projectKey === null || typeof input.taskContext.projectKey === 'string')
+      && (input.taskContext.environmentId === null || typeof input.taskContext.environmentId === 'string')
+      && ['calibration', 'project_test', 'structured_task'].includes(input.taskContext.sourceKind), 'invalid_task_evidence')
+    const { contract, hash: contractHash } = canonicalTaskContract(input.contract)
+    check(validateTaskEvidenceBinding(contract, input.evidence, contractHash), 'invalid_task_evidence')
+    check(input.taskFamilyHash === taskFamilyHashOf(contract), 'invalid_task_family')
+    const digest = taskEvidenceDigest(input.evidence)
+    return this.transaction((state, now) => {
+      const evidence = input.evidence
+      const contextScope = scopeFor(input.taskContext.projectKey ?? undefined, this.adapter, this.instance)
+      const contextEnvironment = environmentFor({ environmentId: input.taskContext.environmentId ?? undefined })
+      check(contextScope === evidence.scope && contextEnvironment === evidence.environment, 'task_evidence_scope_mismatch')
+      const ledger = ensureTaskEvidenceLedger(state)
+      const existing = ledger.records.find(row => row.evidence.eventId === evidence.eventId)
+      if (existing) return existing.digest === digest && existing.hostResultHash === input.hostResultHash
+        ? { ok: true, duplicate: true, digest, contractHash }
+        : { ok: false, code: 'task_evidence_event_conflict' }
+      const hasAdoption = evidence.adoptionSessionHash !== null
+      if (hasAdoption) {
+        const adoption = recentAdoptionsOf(state).sessions.find(row => row.sessionHash === evidence.adoptionSessionHash
+          && row.turnHash === evidence.adoptionTurnHash && row.scope === evidence.scope
+          && row.environment === evidence.environment && row.at + ADOPTION_TTL_MS > now)
+        const adopted = state.lessons.find(row => (row.methodId === contract.methodId || row.id === contract.methodId)
+          && row.version === contract.methodVersion
+          && row.scope === contract.scope && row.environment === contract.environment)
+        check(adoption && adopted && adoption.lessons.some(binding => binding.id === adopted.id
+          && binding.version === adopted.version), 'task_evidence_adoption_unbound')
+        check(packAdmits('package-json-structure-v1', domainTextOf(adopted)).ok,
+          'task_evidence_method_outside_domain')
+      }
+      const fixtureHash = fixture => createHash('sha256').update(JSON.stringify(fixture)).digest('hex')
+      const sameOutcome = input.taskContext.sourceKind === 'calibration' || input.taskContext.sourceKind === 'project_test'
+        ? ledger.records.find(row => row.taskFamilyHash === input.taskFamilyHash
+          && row.evidence.validatorHash === evidence.validatorHash && row.evidence.environment === evidence.environment
+          && row.evidence.verdict === evidence.verdict && fixtureHash(row.fixture) === fixtureHash(input.fixture))
+        : null
+      if (sameOutcome) return { ok: true, duplicate: true, digest: sameOutcome.digest, contractHash,
+        reason: 'same_verified_fixture_outcome' }
+      // Evidence is retained as a rolling window. Replay pairs below contain their own frozen
+      // fixture snapshots, so old evidence rows are not needed by an existing replay.
+      if (ledger.records.length >= 256) {
+        const evicted = ledger.records.shift()
+        ledger.adoptionAttributions = ledger.adoptionAttributions.filter(row => row.evidenceDigest !== evicted.digest)
+      }
+      const sourceSessionHash = hash(identity(input.taskContext.sessionId))
+      const sourceTurnHash = turnKey({ sessionId: input.taskContext.sessionId, turnId: input.taskContext.turnId })
+      ledger.records.push({ digest, evidence: structuredClone(evidence), hostResultHash: input.hostResultHash,
+        taskFamilyHash: input.taskFamilyHash, fixture: structuredClone(input.fixture), sourceBinding: {
+          sessionHash: sourceSessionHash, turnHash: sourceTurnHash, scope: evidence.scope,
+          environment: evidence.environment, sourceKind: input.taskContext.sourceKind } })
+      attributeTaskEvidenceInState(this, state, now, recentAdoptionsOf(state).sessions)
+      const validatorHash = input.evidence.validatorHash
+      const opposite = ledger.records.slice(0, -1).find(row => row.taskFamilyHash === input.taskFamilyHash
+        && row.evidence.validatorHash === validatorHash && row.evidence.environment === evidence.environment
+        && row.fixture.fixtureId !== input.fixture.fixtureId
+        && row.evidence.verdict !== evidence.verdict && row.evidence.verdict !== 'unknown')
+      let replayCase = null
+      if (opposite) {
+        const badRow = evidence.verdict === 'fail' ? ledger.records.at(-1) : opposite
+        const controlRow = evidence.verdict === 'pass' ? ledger.records.at(-1) : opposite
+        replayCase = recordReplayPairInState(ledger.replayCases, { contractHash: input.taskFamilyHash, validatorHash,
+          environment: evidence.environment, scope: evidence.scope, badFixtureHash: fixtureHash(badRow.fixture), controlFixtureHash: fixtureHash(controlRow.fixture),
+          badFixture: badRow.fixture, controlFixture: controlRow.fixture,
+          badVerdict: 'fail', controlVerdict: 'pass' }, now)
+      }
+      let problem = null
+      if (evidence.verdict === 'fail' && input.taskContext.sourceKind !== 'calibration') {
+        try {
+          const sessionHash = hash(input.taskContext.sessionId)
+          const turnHash = hash(JSON.stringify([sessionHash, String(input.taskContext.turnId)]))
+          const source = sourceOf(sourceLedgerOf(state), ownerOf(this), sessionHash)
+          const sourceIdentity = source === null ? null : identityOf(source)
+          const route = sourceIdentity === null ? undefined : { provider: sourceIdentity.provider, model: sourceIdentity.model,
+            ...(sourceIdentity.reasoningState === 'explicit' && typeof sourceIdentity.reasoningValue === 'string'
+              ? { reasoningEffort: sourceIdentity.reasoningValue } : {}) }
+          const checkedReason = input.fixture.artifact.find(row => row.field === 'reason')?.value ?? 'checker_failure'
+          const violations = input.fixture.artifact.find(row => row.field === 'violations')?.value
+          const violationIds = Array.isArray(violations) ? violations.filter(value =>
+            typeof value === 'string' && /^[a-z][a-zA-Z0-9_]{0,31}$/u.test(value)).slice(0, 8) : []
+          const evidenceRef = evidence.digest?.slice?.(0, 12) ?? digest.slice(0, 12)
+          problem = observeInState(state, now, { eventId: evidence.eventId, kind: 'checker_failure', source: 'host_checker',
+            scope: evidence.scope, environment: evidence.environment, owner: ownerOf(this), taskClass: contract.taskFamily,
+            toolName: 'project_manifest_file', failureClass: 'checker_contract_failure',
+            summary: `package.json checker ${checkedReason}; fields=${violationIds.join(',') || 'none'}; ref=${evidenceRef}`,
+            turnHash, sessionId: input.taskContext.sessionId,
+            ...(route === undefined ? {} : { route, routeId: sourceLedgerRouteId(state, ownerOf(this), sessionHash) }) })
+        } catch (error) { problem = { ok: false, code: error?.code ?? 'problem_observation_unavailable' } }
+      }
+      return { ok: true, duplicate: false, digest, contractHash, replayCase, problem }
+    })
+  }
+  taskEvidenceStatus() {
+    const state = this.store.read(); validateState(state)
+    const ledger = state.taskEvidence
+    return { ok: true, records: ledger?.records.length ?? 0,
+      replayCases: ledger?.replayCases.cases.length ?? 0,
+      latest: ledger?.records.slice(-8).map(row => ({ digest: row.digest, eventId: row.evidence.eventId,
+        verdict: row.evidence.verdict, at: row.evidence.at })) ?? [] }
+  }
+  /** Read a bounded, scope-bound page of synthetic replay fixtures for the paid objective gate. */
+  taskEvidenceReplayCases(input = {}) {
+    check(isPlainObject(input) && Object.keys(input).every(key => ['projectKey', 'environmentId', 'limit', 'ids', 'ticket'].includes(key))
+      && (input.projectKey === undefined || input.projectKey === null || typeof input.projectKey === 'string')
+      && (input.environmentId === undefined || input.environmentId === null || typeof input.environmentId === 'string')
+      && (input.limit === undefined || (Number.isSafeInteger(input.limit) && input.limit >= 1 && input.limit <= 2))
+      && (input.ids === undefined || (Array.isArray(input.ids) && input.ids.length >= 1 && input.ids.length <= 2
+        && input.ids.every(id => /^[a-f0-9]{64}$/u.test(id)) && new Set(input.ids).size === input.ids.length))
+      && (input.ticket === undefined || (typeof input.ticket === 'string' && boundedLabel(input.ticket, 64))),
+      'invalid_task_replay_query')
+    let scope = scopeFor(input.projectKey ?? undefined, this.adapter, this.instance)
+    let environment = environmentFor({ environmentId: input.environmentId ?? undefined })
+    const state = this.store.read(); validateState(state)
+    const ledger = state.taskEvidence
+    let ids = input.ids
+    let frozenPairs = null
+    if (input.ticket !== undefined) {
+      const job = state.jobs.find(row => row.ticket === input.ticket && row.kind === 'evaluation'
+        && row.packId === 'package-json-structure-v1' && Array.isArray(row.taskReplayCases))
+      const lesson = job === undefined ? undefined : state.lessons.find(row => row.id === job.lessonId
+        && row.version === job.version)
+      if (job === undefined || lesson === undefined) return { ok: false, code: 'task_replay_evidence_changed' }
+      if ((input.projectKey !== undefined && scope !== lesson.scope)
+        || (input.environmentId !== undefined && environment !== lesson.environment)) {
+        return { ok: false, code: 'task_replay_evidence_changed' }
+      }
+      scope = lesson.scope
+      environment = lesson.environment
+      const frozenIds = job.taskReplayCases.map(row => row.id)
+      if (ids !== undefined && (ids.length !== frozenIds.length || ids.some((id, index) => id !== frozenIds[index]))) {
+        return { ok: false, code: 'task_replay_evidence_changed' }
+      }
+      ids = frozenIds
+      frozenPairs = job.taskReplayCases
+    }
+    if (ledger === undefined && frozenPairs === null) return { ok: true, cases: [] }
+    const scoped = (ledger?.replayCases?.cases ?? []).filter(row => {
+      if (row.environment !== environment) return false
+      const rowScope = row.scope ?? ledger.records.find(item => item.taskFamilyHash === row.contractHash
+        && item.evidence.environment === row.environment)?.evidence.scope
+      return rowScope === scope
+    })
+    const selected = frozenPairs ?? (ids === undefined ? scoped.slice(-(input.limit ?? 2))
+      : ids.map(id => scoped.find(row => row.id === id)).filter(Boolean))
+    if (ids !== undefined && selected.length !== ids.length) {
+      return { ok: false, code: 'task_replay_evidence_changed' }
+    }
+    const cases = []
+    for (const row of selected) {
+      if (frozenPairs !== null && (Object.keys(row).sort().join(',') !== 'badFixture,badFixtureHash,controlFixture,controlFixtureHash,id,validatorHash'
+        || hash(JSON.stringify(row.badFixture)) !== row.badFixtureHash
+        || hash(JSON.stringify(row.controlFixture)) !== row.controlFixtureHash)) {
+        return { ok: false, code: 'task_replay_evidence_changed' }
+      }
+      const bad = replayTaskFixture(row.badFixture), control = replayTaskFixture(row.controlFixture)
+      if (bad.status !== 'fail' || control.status !== 'pass' || bad.oracleHash !== control.oracleHash
+        || row.validatorHash !== hash(JSON.stringify(['package-json-structural-checker', 1, bad.oracleHash]))) {
+        return { ok: false, code: 'task_replay_unverifiable' }
+      }
+      const badInput = row.badFixture.source.find(item => item.field === 'witness')?.value
+      const controlInput = row.controlFixture.source.find(item => item.field === 'witness')?.value
+      if (typeof badInput !== 'string' || typeof controlInput !== 'string') return { ok: false, code: 'task_replay_unverifiable' }
+      cases.push({ id: row.id, badFixtureHash: row.badFixtureHash, controlFixtureHash: row.controlFixtureHash,
+        badInput, controlInput })
+    }
+    return { ok: true, cases }
+  }
   exportLesson(input) {
     const state = this.store.read(); validateState(state); check(state.schema === 2, 'migration_required')
     const lesson = this.findLesson(state, input)
@@ -6222,6 +6766,15 @@ export class LearningEngine {
       check(pack !== undefined, 'domain_pack_required')
       check(input.suiteId === undefined || input.suiteId === packSuiteId(pack), 'invalid_evaluation')
       cases = packCases(pack.packId).map(row => ({ caseId: row.caseId, family: row.family, split: row.split }))
+    } else if (input.packId !== undefined && input.packId !== null) {
+      // Automatic DSH plans carry a core-owned pack while the adapter rechecks live session,
+      // archive and route permission before every step. The plan remains the authority for which
+      // pack may run, and caller-provided question lists are discarded.
+      check(input.queueKey !== undefined, 'domain_pack_required')
+      pack = getDomainPack(String(input.packId))
+      check(pack !== undefined && this.planPackId(input.queueKey) === pack.packId, 'domain_pack_required')
+      check(input.suiteId === undefined || input.suiteId === packSuiteId(pack), 'invalid_evaluation')
+      cases = packCases(pack.packId).map(row => ({ caseId: row.caseId, family: row.family, split: row.split }))
     }
     identity(pack === null ? input.suiteId : packSuiteId(pack))
     check(Array.isArray(cases) && cases.length >= 12 && cases.length <= 128, 'invalid_evaluation')
@@ -6244,6 +6797,13 @@ export class LearningEngine {
         const association = planPermission(state, { queueKey: input.queueKey, planHash: input.planHash,
           lessonId: lesson.id, version: lesson.version, track: 'objective' })
         if (association.ok !== true) return { ok: true, skipped: association.code }
+        if (pack !== null) {
+          const registered = (state.autoPlans ?? []).find(row => row.queueKey === input.queueKey
+            && row.planHash === input.planHash && row.lessonId === lesson.id && row.version === lesson.version)
+          if (registered?.packId !== pack.packId || !packAdmits(pack.packId, domainTextOf(lesson)).ok) {
+            return { ok: true, skipped: 'domain_pack_required' }
+          }
+        }
       }
       // ── the automatic binding: official pack admission, live plan, frozen source/control ────────
       // Everything is resolved INSIDE this transaction, so a pack the lesson is outside of, a plan
@@ -6281,6 +6841,34 @@ export class LearningEngine {
         frozen = gate.frozen
         planRow = resolved.plan
       }
+      let taskReplayCases = []
+      if (pack?.packId === 'package-json-structure-v1') {
+        const supplied = input.taskReplayCases
+        if (!Array.isArray(supplied) || supplied.length < 1 || supplied.length > 2
+          || !supplied.every(row => isPlainObject(row)
+            && Object.keys(row).sort().join(',') === 'badFixtureHash,controlFixtureHash,id'
+            && /^[a-f0-9]{64}$/u.test(row.id) && /^[a-f0-9]{64}$/u.test(row.badFixtureHash)
+            && /^[a-f0-9]{64}$/u.test(row.controlFixtureHash))
+          || new Set(supplied.map(row => row.id)).size !== supplied.length) {
+          return { ok: true, skipped: 'task_replay_evidence_unavailable' }
+        }
+        const ledger = state.taskEvidence?.replayCases?.cases ?? []
+        for (const row of supplied) {
+          const pair = ledger.find(item => item.id === row.id && item.badFixtureHash === row.badFixtureHash
+            && item.controlFixtureHash === row.controlFixtureHash && item.environment === lesson.environment
+            && (item.scope ?? state.taskEvidence.records.find(record => record.taskFamilyHash === item.contractHash
+              && record.evidence.environment === item.environment)?.evidence.scope) === lesson.scope)
+          if (pair === undefined) return { ok: true, skipped: 'task_replay_evidence_changed' }
+          const bad = replayTaskFixture(pair.badFixture), control = replayTaskFixture(pair.controlFixture)
+          if (bad.status !== 'fail' || control.status !== 'pass'
+            || pair.validatorHash !== hash(JSON.stringify(['package-json-structural-checker', 1, bad.oracleHash]))) {
+            return { ok: true, skipped: 'task_replay_unverifiable' }
+          }
+          taskReplayCases.push({ id: pair.id, badFixtureHash: pair.badFixtureHash,
+            controlFixtureHash: pair.controlFixtureHash, validatorHash: pair.validatorHash,
+            badFixture: pair.badFixture, controlFixture: pair.controlFixture })
+        }
+      } else if (input.taskReplayCases !== undefined) return { ok: true, skipped: 'task_replay_not_applicable' }
       // ONE objective run walks the WHOLE frozen case list with two arms each, so its reservation must
       // cover that plan — not one case. A caller that cannot bound it is refused, not trusted.
       const objectiveFloor = planReservationFloor(input.stepwiseBudget === true
@@ -6298,13 +6886,15 @@ export class LearningEngine {
       state.jobs.push({ ticket, lessonId: lesson.id, version: lesson.version, tokens: input.maxTokens,
         manifestHash: hash(JSON.stringify(manifest)), expiresAt: frozen === null ? now + 30 * 60_000 : now + 48 * 60 * 60_000,
         ...(frozen === null ? (input.queueKey === undefined ? {} : { kind: 'evaluation', queueKey: input.queueKey,
-          planHash: input.planHash, stepReservations: [] }) : { stepReservations: [] }),
+          planHash: input.planHash, stepReservations: [], ...(pack === null ? {} : { packId: pack.packId,
+            packVersion: pack.version, suiteId: packSuiteId(pack),
+            ...(taskReplayCases.length === 0 ? {} : { taskReplayCases }) }) }) : { stepReservations: [] }),
         // A bound objective ticket names its own track and freezes the pack, the plan and the source
         // identity it was signed against. The result gate re-reads exactly these, and nothing the
         // caller states later can re-point them.
         ...(frozen === null ? {} : { kind: 'evaluation', sourceBound: true, ...frozen, packId: pack.packId,
           packVersion: pack.version, suiteId: packSuiteId(pack), queueKey: input.queueKey,
-          planHash: input.planHash }) })
+          planHash: input.planHash, ...(taskReplayCases.length === 0 ? {} : { taskReplayCases }) }) })
       state.spends.push({ kind: 'evaluation', ticket, tokens: input.maxTokens, at: now,
         budgetEntries: [{ at: now, tokens: input.maxTokens, stepKey: '__initial__', measuredTokens: null, known: null }] })
       if (frozen !== null) {

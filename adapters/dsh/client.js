@@ -41,6 +41,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
   const JOB_POLL_MS = 1_500
   const PAGE_SIZES = [10, 20, 50]
   const TABS = ['overview', 'lessons', 'recall', 'manual', 'budget']
+  const tabLabel = (id, dict) => id === 'overview' ? dict.tabOverview : id === 'lessons' ? dict.tabLessons
+    : id === 'recall' ? dict.tabRecall : id === 'manual' ? dict.tabManual : dict.tabBudget
   const MAX_QUERY_CHARS = 64
   const MAX_PROMPT_CHARS = 200
   const MAX_CASE_JSON_CHARS = 20_000
@@ -437,6 +439,13 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     autoValidation: '自动验证',
     autoValidate: '自动审查候选经验',
     autoValidationHint: '自动审查候选经验，符合条件后限量试用；只有客观验证通过，才记为已验证。受评测额度限制。',
+    verificationCoverage: '任务验证与宿主能力',
+    verificationCoverageHint: '当前接入仅检查 DSH 项目根目录 package.json 的 JSON 语法、顶层对象及已登记字段类型；字段可缺省、允许扩展字段，不检查 npm 语义、依赖是否可安装或测试是否通过。项目测试执行尚未接入。Hermes 前置检查由独立插件配置，本页不报告其运行状态。',
+    coverageTests: '测试执行器', coverageArtifacts: '产物接线', coverageDsh: 'DSH 前置检查',
+    coverageHermes: 'Hermes 前置检查', coverageShadow: '影子匹配',
+    coverageStatus: { not_connected: '未接入', dsh_root_package_json_checker: 'DSH 根 package.json 结构检查',
+      enforce_templates: '已配置强制模板', available_unconfigured: '可用，未配置模板', unsupported: '宿主不支持',
+      separate_plugin_not_reported: '独立插件，本页不报告', unknown: '状态未知' },
     autoReflectHint: '任务结束后提炼经验，每日最多 3 次',
     autoReflectHintFull: '沿用当前任务的模型与推理路由；24 小时内最多 3 次、间隔至少 30 分钟，单次输出不超过 384 tokens。关闭会取消本插件排队与在途的自动复盘，不影响纠错学习、召回与可信结算。',
     contextBytes: '单轮上下文上限',
@@ -469,7 +478,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     saved: '已保存并生效。',
     saveFailed: '未保存：{reason}',
     reloadNeeded: '保存被拒绝：配置可能已在别处更改，或数值超出合法范围。已重新载入宿主值，请确认后再试。',
-    saveUnavailable: '当前客户端不能写入宿主设置（非本机或只读），只显示已保存的值。',
+    saveUnavailable: '宿主设置当前不可写或不支持写入，只显示已保存的值。',
     configUnavailable: '宿主设置命名空间暂不可用，开关为只读。',
     userEnabled: '用户是否启用',
     effectiveState: '当前实际状态',
@@ -742,6 +751,13 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     autoValidate: 'Review candidate lessons automatically',
     autoValidationHint: 'Candidate lessons are reviewed automatically and, if they qualify, offered as a limited '
       + 'trial; only an objective check marks one as verified. Bounded by the evaluation budget.',
+    verificationCoverage: 'Task verification and host capabilities',
+    verificationCoverageHint: 'The connected checker validates only the DSH project-root package.json JSON syntax, top-level object, and registered field types. Fields may be omitted and extensions are allowed; it does not check npm semantics, dependency installation, or whether tests passed. Project test execution is not connected. Hermes preflight is configured by its separate plugin; this page does not report its runtime status.',
+    coverageTests: 'Test runner', coverageArtifacts: 'Artifact intake', coverageDsh: 'DSH preflight',
+    coverageHermes: 'Hermes preflight', coverageShadow: 'Shadow matches',
+    coverageStatus: { not_connected: 'Not connected', dsh_root_package_json_checker: 'DSH root package.json structure checker',
+      enforce_templates: 'Enforcing templates configured', available_unconfigured: 'Available, no templates configured',
+      unsupported: 'Host unsupported', separate_plugin_not_reported: 'Separate plugin; not reported here', unknown: 'Unknown' },
     autoReflectHint: 'Distils a lesson after a task, at most 3 per day',
     autoReflectHintFull: 'Uses the task’s own model and reasoning route; at most 3 per 24 h, at least 30 min apart, at most 384 output tokens each. Turning it off cancels this plugin’s queued and in-flight automatic reflection only; corrections, recall and trusted settlement are unaffected.',
     contextBytes: 'Per-turn context cap',
@@ -771,7 +787,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     save: 'Save', saving: 'Saving…', saved: 'Saved and in effect.',
     saveFailed: 'Not saved: {reason}',
     reloadNeeded: 'Rejected: the configuration may have changed elsewhere, or a value is out of range. Host values were reloaded.',
-    saveUnavailable: 'This client cannot write host settings (not loopback, or read-only); showing saved values.',
+    saveUnavailable: 'Host settings are unavailable, read-only, or do not support writes; showing saved values.',
     configUnavailable: 'The host settings namespace is unavailable; switches are read-only.',
     userEnabled: 'User enabled', effectiveState: 'Effective state', effectiveRunning: 'Running (waiting for task events)',
     effectivePaused: 'Paused', effectiveReasons: 'Reasons', autoReflectEffective: 'Automatic reflection',
@@ -830,9 +846,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
    *   * nothing inside the host's single scrolling column may paint its own opaque surface —
    *     the column is transparent by contract, so a filled card meets the scroll clip edge and
    *     appears to bleed under the panel header;
-   *   * the five tabs are the host's own `SegmentedTabs`, whose sliding indicator is laid out
-   *     on a grid over the full list width. Overriding its `display` desynchronises the
-   *     indicator from the labels, so no geometry class is passed to it at all.
+   *   * wide layouts keep the host's own `SegmentedTabs`, whose sliding indicator is laid out
+   *     on a grid over the full list width. Narrow content uses the Host Picker instead of
+   *     squeezing or overriding that grid.
    */
   const STYLE = `
 .mse-details{display:flex;flex-direction:column;width:100%;min-width:0;color:var(--dsw-alias-label-primary);font-size:14px;line-height:22px}
@@ -845,6 +861,10 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-pane{display:flex;flex-direction:column;min-width:0}
 .mse-details .mse-row{display:flex;gap:20px;align-items:center;padding:16px 0;border-bottom:0.5px solid var(--dsw-alias-border-l2);min-width:0}
 .mse-details .mse-row-top{align-items:flex-start}
+.mse-details .mse-row-stacked{display:block}
+.mse-details .mse-row-stacked .mse-row-side{display:flex;flex:initial;justify-content:flex-start;flex-wrap:wrap;gap:8px 18px;max-width:100%;margin-top:8px;white-space:normal;overflow-wrap:anywhere}
+.mse-details .mse-coverage-list{display:flex;flex-wrap:wrap;align-items:flex-start;gap:6px 18px;min-width:0;max-width:100%}
+.mse-details .mse-coverage-item{min-width:0;overflow-wrap:anywhere}
 .mse-details .mse-row:last-child{border-bottom:none}
 .mse-details .mse-row-main{flex:1;min-width:0}
 .mse-details .mse-row-title{font-weight:400;line-height:22px;overflow-wrap:anywhere}
@@ -1254,7 +1274,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
    * clips its popup (`overflow: hidden`), so it also behaved worse. Every choice on this page
    * uses this one control, so 会话, 经验筛选 and 候选经验 cannot drift apart visually.
    */
-  function Picker({ label, value, options, onChange, disabled = false, testId = undefined, className = '' }) {
+  function Picker({ label, value, options, onChange, disabled = false, testId = undefined, className = '',
+    triggerProps = {} }) {
     const [open, setOpen] = React.useState(false)
     const selected = options.find(option => option.id === value) ?? options[0]
     const items = options.map(option => ({ id: option.id === '' ? '__default' : option.id, label: option.label }))
@@ -1263,7 +1284,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       'data-mse-picker': testId,
       // `Button.icon` renders a LEADING icon; a picker's affordance belongs at the trailing
       // edge, after the label, which is why the chevrons are an ordinary child here.
-      anchor: h(Button, { variant: 'outline', size: 'sm', disabled, className: 'mse-picker-trigger',
+      anchor: h(Button, { ...triggerProps, variant: 'outline', size: 'sm', disabled, className: 'mse-picker-trigger',
         'aria-haspopup': 'menu', 'aria-expanded': open, 'aria-label': label,
         onClick: () => setOpen(current => !current) }, [
         // `title` is the plain-text tooltip: the label may be visually ellipsised by CSS in a
@@ -1277,6 +1298,18 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       onSelect: id => { onChange(id === '__default' ? '' : id); setOpen(false) },
       onClose: () => setOpen(false),
     })
+  }
+
+  function settingsTabNavigation(tab, onChange, dict, compact) {
+    if (compact) return h('div', { role: 'tablist', 'aria-label': dict.settingsTitle },
+      h(Picker, { label: tabLabel(tab, dict), value: tab,
+        options: TABS.map(id => ({ id, label: tabLabel(id, dict) })), onChange,
+        testId: 'settings-tabs-compact', className: 'mse-picker-wide',
+        triggerProps: { id: `mse-tab-${tab}`, role: 'tab', 'aria-selected': true,
+          'aria-controls': `mse-pane-${tab}` } }))
+    return h(SegmentedTabs, { label: dict.settingsTitle, value: tab, onChange,
+      items: TABS.map(id => ({ value: id, id: `mse-tab-${id}`, panelId: `mse-pane-${id}`,
+        label: tabLabel(id, dict) })) })
   }
 
   /**
@@ -1321,7 +1354,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
    * and a right-aligned definition list.
    */
   const row = (key, title, hint, side, options = {}) => h('div', { key,
-    className: `mse-row${options.top === true ? ' mse-row-top' : ''}` }, [
+    className: `mse-row${options.top === true ? ' mse-row-top' : ''}${options.stacked === true ? ' mse-row-stacked' : ''}` }, [
     h('div', { key: 'main', className: 'mse-row-main' }, [
       typeof title === 'string' ? h('div', { key: 't', className: 'mse-row-title' }, title) : title,
       hint === null || hint === undefined ? null : h('p', { key: 'h', className: 'mse-hint' }, hint),
@@ -1383,6 +1416,15 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       return form.subscribe(() => setSnapshot(form.getSnapshot()))
     }, [form])
     return snapshot
+  }
+
+  /** Writes require an explicit Host capability and a current writable snapshot. */
+  function canWriteSettings(form, snapshot) {
+    if (form === null || typeof form !== 'object' || typeof form.mutate !== 'function' ||
+      snapshot === null || typeof snapshot !== 'object' || snapshot.status !== 'ready' ||
+      snapshot.writable !== true) return false
+    // New ConfigFormSnapshot versions omit `mode`; older hosts must explicitly say `host`.
+    return !Object.prototype.hasOwnProperty.call(snapshot, 'mode') || snapshot.mode === 'host'
   }
 
   const defaultDraft = value => ({
@@ -1523,12 +1565,17 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
    * settings section additionally receives `form` (and therefore the switches).
    */
   function MsePanel(props) {
-    const dict = props.locale === 'en' ? en : zh
+    const locale = typeof props.useLocale === 'function'
+      ? props.useLocale(snapshot => snapshot.active) : props.locale
+    const dict = locale === 'en' ? en : zh
+    const dictRef = React.useRef(dict)
+    dictRef.current = dict
     const call = props.call
     const control = props.control
     const form = props.form
-    const locale = props.locale
     const [tab, setTab] = React.useState(props.initialTab ?? 'overview')
+    const [compactTabs, setCompactTabs] = React.useState(false)
+    const tabsHost = React.useRef(null)
     const [sessionId, setSessionId] = React.useState('')
     const [auto, setAuto] = React.useState(false)
     const [reloadToken, setReloadToken] = React.useState(0)
@@ -1568,7 +1615,21 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const snapshot = useFormSnapshot(form)
 
     const accepted = snapshot !== null && snapshot.status === 'ready' ? snapshot.value : undefined
-    const writable = snapshot !== null && snapshot.writable === true && snapshot.mode === 'host'
+    const writable = canWriteSettings(form, snapshot)
+
+    React.useLayoutEffect(() => {
+      const node = tabsHost.current
+      if (node === null || node === undefined) return undefined
+      const update = () => setCompactTabs(node.getBoundingClientRect().width < 340)
+      update()
+      if (typeof ResizeObserver === 'function') {
+        const observer = new ResizeObserver(update)
+        observer.observe(node)
+        return () => observer.disconnect()
+      }
+      window.addEventListener('resize', update)
+      return () => window.removeEventListener('resize', update)
+    }, [])
 
     React.useEffect(() => {
       generation.current += 1
@@ -1599,7 +1660,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           setShell({ status: 'ready', overview, sessions, error: null })
         } catch (error) {
           if (generation.current !== mine) return
-          setShell(current => ({ ...current, status: 'error', error: failureText(dict, error) }))
+          setShell(current => ({ ...current, status: 'error', error: failureText(dictRef.current, error) }))
         }
       })()
       if (control !== undefined && control !== null) {
@@ -1609,15 +1670,15 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
             const payload = await controlCall(control, 'status', {})
             if (generation.current !== mine) return
             setControlState(payload.ok === true ? { status: 'ready', payload }
-              : { status: 'error', error: `${codeLabel(dict, payload.code)}（${payload.code}）` })
+              : { status: 'error', error: `${codeLabel(dictRef.current, payload.code)}（${payload.code}）` })
           } catch (error) {
             if (generation.current !== mine) return
-            setControlState({ status: 'error', error: failureText(dict, error) })
+            setControlState({ status: 'error', error: failureText(dictRef.current, error) })
           }
         })()
       }
       return () => { if (generation.current === mine) generation.current += 1 }
-    }, [call, control, sessionId, reloadToken, dict])
+    }, [call, control, sessionId, reloadToken])
 
     // Recall and the session byte ledger follow the selection, not the tab, so the budget view
     // reads the same answer instead of refetching it and losing it.
@@ -1630,10 +1691,10 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           setRecall({ scopeKey, payload })
         } catch (error) {
           if (generation.current !== mine) return
-          setRecall({ scopeKey, error: failureText(dict, error) })
+          setRecall({ scopeKey, error: failureText(dictRef.current, error) })
         }
       })()
-    }, [call, sessionId, scopeKey, reloadToken, dict])
+    }, [call, sessionId, scopeKey, reloadToken])
 
     React.useEffect(() => {
       if (tab !== 'lessons') return undefined
@@ -1648,11 +1709,11 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           setLessons({ scopeKey, payload })
         } catch (error) {
           if (!mineNow()) return
-          setLessons({ scopeKey, error: failureText(dict, error) })
+          setLessons({ scopeKey, error: failureText(dictRef.current, error) })
         }
       })()
       return undefined
-    }, [call, tab, sessionId, scopeKey, listQuery, reloadToken, dict])
+    }, [call, tab, sessionId, scopeKey, listQuery, reloadToken])
 
     React.useEffect(() => {
       if (!auto) return undefined
@@ -1709,6 +1770,12 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       : { ...current, values: { ...current.values, ...patch } })
     const save = async () => {
       if (draft === null || form === undefined) return
+      let currentSnapshot
+      try { currentSnapshot = form.getSnapshot() } catch { currentSnapshot = null }
+      if (!canWriteSettings(form, currentSnapshot)) {
+        setSaveState({ kind: 'unavailable' })
+        return
+      }
       const { ops, problems } = diffOps(draft.values, accepted)
       if (problems.length > 0) { setSaveState({ kind: 'invalid', detail: problems.join('、') }); return }
       if (ops.length === 0) { setSaveState({ kind: 'saved', count: 0 }); return }
@@ -1823,7 +1890,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
               : dict.saved)
             // A refused write is not a validation problem we can name: the controller has already
             // re-read the document, so the honest next step is to look at the host's values again.
-            : saveState.kind === 'failed' ? h('span', { key: 'f', className: 'mse-error' }, dict.reloadNeeded)
+            : saveState.kind === 'unavailable' ? h('span', { key: 'f', className: 'mse-error' }, dict.saveUnavailable)
+              : saveState.kind === 'failed' ? h('span', { key: 'f', className: 'mse-error' }, dict.reloadNeeded)
               : saveState.kind === 'invalid' ? h('span', { key: 'f', className: 'mse-error' },
                 fill(dict.saveFailed, { reason: saveState.detail }))
                 : h('span', { key: 'f', className: 'mse-error' },
@@ -1863,6 +1931,15 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       // Three distinct inputs, three distinct statements: not read yet, read and failed, read.
       const sessionsSeen = shell.status === 'ready' ? shell.sessions : shell.status === 'error' ? null : undefined
       const verify = verificationSession(dict, sessionsSeen, draft.values.verificationSessionId)
+      const coverageStatus = code => dict.coverageStatus[code] ?? String(code ?? dict.unknown)
+      const coverage = h('div', { key: 'coverage', className: 'mse-coverage-list' }, [
+        [dict.coverageTests, coverageStatus(settings?.verificationCapabilities?.projectTestHostRunner)],
+        [dict.coverageArtifacts, coverageStatus(settings?.verificationCapabilities?.structuredArtifactHostIntake)],
+        [dict.coverageDsh, coverageStatus(settings?.verificationCapabilities?.dshPreflight)],
+        [dict.coverageHermes, coverageStatus(settings?.verificationCapabilities?.hermesPreflight)],
+        [dict.coverageShadow, String(Object.values(settings?.verificationCapabilities?.dshGuardShadowObservations ?? {})
+          .reduce((sum, value) => sum + (Number.isSafeInteger(value) ? value : 0), 0))],
+      ].map(([label, value]) => h('span', { key: label, className: 'mse-coverage-item' }, `${label}：${value}`)))
       return h('div', { key: 'settings' }, [
         row('enabled', dict.masterSwitch, dict.masterHint,
           h(Switch, { checked: draft.values.enabled, disabled: !writable, label: dict.masterSwitch,
@@ -1876,8 +1953,10 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         row('verifySession', dict.verifySession,
           verify.tone === 'err' ? h('span', { key: 's', className: 'mse-error' }, verify.text) : verify.text,
           h(Picker, { key: 'p', label: dict.verifySession, value: draft.values.verificationSessionId,
-            options: verify.options, disabled: !writable, testId: 'verify-session', className: 'mse-picker-scope',
-            onChange: next => edit({ verificationSessionId: next }) })),
+            options: verify.options, disabled: !writable, testId: 'verify-session', className: 'mse-picker-wide',
+            onChange: next => edit({ verificationSessionId: next }) }), { stacked: true }),
+        row('verificationCoverage', dict.verificationCoverage, dict.verificationCoverageHint,
+          coverage, { stacked: true }),
         row('bytes', dict.contextBytes, dict.contextBytesHint,
           [h(Input, { key: 'i', type: 'number', min: CONTEXT_MIN, max: CONTEXT_MAX, step: 1, disabled: !writable,
             className: 'mse-num', 'aria-label': dict.contextBytes, value: draft.values.maxContextBytes,
@@ -2353,10 +2432,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const manualPanel = h(ManualPanel, { key: 'manual', dict, locale, control, sessionId, call, job, setJob,
       onScope: setSessionId, scopeOptions: options, jobs, onCancelJob: cancelJob })
 
-    const tabs = h(SegmentedTabs, { key: 'tabs', label: dict.settingsTitle, value: tab, onChange: setTab,
-      items: TABS.map(id => ({ value: id, id: `mse-tab-${id}`, panelId: `mse-pane-${id}`,
-        label: id === 'overview' ? dict.tabOverview : id === 'lessons' ? dict.tabLessons
-          : id === 'recall' ? dict.tabRecall : id === 'manual' ? dict.tabManual : dict.tabBudget })) })
+    const tabs = h('div', { key: 'tabs', ref: tabsHost, className: 'mse-tabs-host' },
+      settingsTabNavigation(tab, setTab, dict, compactTabs))
 
     const body = tab === 'overview' ? overviewPanel : tab === 'lessons' ? lessonsPanel
       : tab === 'recall' ? recallPanel : tab === 'manual' ? manualPanel : budgetPanel
@@ -2699,7 +2776,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
    * settings section — the section it would open is one click away in the same modal.
    */
   function BundlePage(props) {
-    const dict = props.locale === 'en' ? en : zh
+    const locale = typeof props.useLocale === 'function'
+      ? props.useLocale(snapshot => snapshot.active) : props.locale
+    const dict = locale === 'en' ? en : zh
     return h('section', { className: 'mse-details', 'data-mse-details': 'pointer' }, [
       h('div', { key: 'heading', className: 'mse-heading' }, [h('h1', { key: 't' }, dict.settingsTitle)]),
       row('path', dict.settingsPath, dict.settingsPointer, null),
@@ -2728,7 +2807,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         name: 'plugins.bundle.config',
         key: BUNDLE,
         locale: NS,
-        inject: () => ({ call, control, locale: locale() }),
+        inject: () => ({ call, control, locale: locale(), hooks: { locale: ctx.locale } }),
       }, BundlePage))
       const form = ctx.configForms.get(SETTINGS_ID)
       // The section exists only while the host actually serves this namespace, so a profile
@@ -2740,7 +2819,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           order: 66,
           label: () => (locale() === 'en' ? 'Self-evolution' : '自我进化'),
           locale: NS,
-          inject: () => ({ call, control, form, locale: locale() }),
+          inject: () => ({ call, control, form, locale: locale(), hooks: { locale: ctx.locale } }),
         }, SettingsSection))))
     })
   }
@@ -2757,7 +2836,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       libraryMetrics, scopeNumbers, scopeGuideRows, observedSessions, planStageLabel, reviewLabel, trialLabel,
       verificationSession,
       notPromotedReason, lessonProgress, progressLine,
-      diffOps, defaultDraft, fill,
+      diffOps, defaultDraft, fill, canWriteSettings, settingsTabNavigation,
       MsePanel, SettingsSection, BundlePage, ManualPanel, JobRow, Picker, useFormSnapshot, CONTEXT_MIN, CONTEXT_MAX },
   }
 } })

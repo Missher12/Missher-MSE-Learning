@@ -1,5 +1,5 @@
 name: mse-learning
-version: "0.9.1"
+version: "0.10.0"
 description: "Persistent scoped correction learning with bounded context. Requires the packaged Node runtime entry."
 author: Missher
 hooks:
@@ -7,6 +7,7 @@ hooks:
   - pre_api_request
   - post_api_request
   - post_llm_call
+  - pre_tool_call
   - post_tool_call
   - on_session_end
   - on_session_reset
@@ -20,6 +21,7 @@ provides_hooks:
   - pre_api_request
   - post_api_request
   - post_llm_call
+  - pre_tool_call
   - post_tool_call
   - on_session_end
   - on_session_reset

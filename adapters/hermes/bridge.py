@@ -3,7 +3,17 @@ import hashlib
 import json
 import os
 import re
+import stat as stat_module
 from pathlib import Path
+try:
+    from .guards import check_guard, validate_guard
+except ImportError:  # Support the repository's direct-file test/smoke loaders.
+    import importlib.util
+    _guard_path = Path(__file__).with_name("guards.py")
+    _guard_spec = importlib.util.spec_from_file_location("mse_hermes_guards", _guard_path)
+    _guard_module = importlib.util.module_from_spec(_guard_spec)
+    _guard_spec.loader.exec_module(_guard_module)
+    check_guard, validate_guard = _guard_module.check_guard, _guard_module.validate_guard
 import shutil
 import subprocess
 import threading
@@ -112,6 +122,23 @@ def _reasoning_effort(kwargs):
         if isinstance(value, str):
             return value
     return None
+
+
+def _effective_terminal_backend():
+    """Read Hermes' current session-scoped terminal backend, or refuse when unavailable.
+
+    The terminal tool's own `_session_scope()` first applies profile config bridging and then calls
+    the scope-aware `_tenv`; reading os.environ here can mistake the process launch profile for the
+    current session in a multiplexed host.
+    """
+    try:
+        from tools.terminal_tool import _session_scope
+        value = _session_scope().env_type
+    except Exception:  # noqa: BLE001 — unsupported/unreadable host capability is unknown
+        return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip().lower()
 
 
 def _tool_call_id(kwargs):
@@ -715,6 +742,13 @@ def _bounded_env(name, default, maximum):
 
 
 class Hooks:
+    @staticmethod
+    def _problem_turn_hash(session, turn):
+        """Recompute the opaque checker-ledger turn key for comparison, never for disclosure."""
+        session_hash = hashlib.sha256(session.encode("utf-8")).hexdigest()
+        encoded = json.dumps([session_hash, str(turn)], ensure_ascii=False, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
     def __init__(self, config=None, call=None, review=None, enabled=None, driver=None, driver_factory=None,
                  schedule=None, cancel=None):
         self.config = config or {
@@ -722,6 +756,12 @@ class Hooks:
             "adapterId": "hermes", "maxContextBytes": 768,
         }
         self.config = dict(self.config)
+        raw_guards = self.config.get("guardTemplates", [])
+        self.guard_templates = [rule for rule in raw_guards[:32] if validate_guard(rule)] if isinstance(raw_guards, list) else []
+        self.guard_shadow = {}
+        # The effective Host resolver is capability-based and scope-aware; tests may replace only
+        # this narrow seam, while production defaults to Hermes' actual `_session_scope()`.
+        self.terminal_backend_resolver = _effective_terminal_backend
         # The ONE timer seam this instance resolves: either supplied here, or this instance's own
         # attribute (which a host or a test may set before construction completes), or a REAL
         # daemon-thread timer. The default is production behaviour, not a placeholder: both the
@@ -733,6 +773,10 @@ class Hooks:
         self.config.setdefault("evaluationCallsPerDay", _bounded_env("MSE_EVALUATION_CALLS_PER_DAY", 2, 8))
         self.call = call or self._call
         self.turns = {}
+        # Candidate registration happens after post_llm_call retires its turn row. Retain only
+        # the bounded, non-secret project identity observed for each session so a later
+        # autoCandidates row can still be resolved in its original scope.
+        self.plan_projects = {}
         self.settlement_events = []
         self.children = set()
         # Local control intent, published BEFORE any lock that can wait, so a pause or an exact
@@ -807,6 +851,9 @@ class Hooks:
         # actually ran on instead of borrowing a default one. It holds three short strings per turn
         # and is bounded; a turn that never reported a route simply binds nothing.
         self.routes = {}
+        # File-tool backend facts captured before dispatch and consumed by the matching result.
+        # A path that exists locally is not proof that a remote tool edited that local file.
+        self.terminal_calls = {}
         # Stage 4b: the FULL dispatch facts of the last real `pre_api_request` for a turn — the
         # five identity scalars plus the request body, so the driver can prove what the host was
         # about to send instead of re-deriving it. Bounded, same lifetime as `routes`, and cleared
@@ -925,13 +972,20 @@ class Hooks:
             return {"slot": "skipped", "code": "problem_not_ready"}
         origin = row.get("origin") if isinstance(row.get("origin"), dict) else {}
         session = origin.get("sessionId")
+        origin_turn_hash = origin.get("turnHash")
         if not isinstance(session, str) or session == "":
             return {"slot": "skipped", "code": "problem_not_ready"}
         with self.lock:
             turn = None
             for candidate in self.turns.values():
                 base = candidate.get("base") if isinstance(candidate, dict) else None
-                if isinstance(base, dict) and base.get("sessionId") == session                         and str(base.get("turnId")) == str(origin.get("turnId")):
+                if not isinstance(base, dict) or base.get("sessionId") != session:
+                    continue
+                exact_turn = (str(base.get("turnId")) == str(origin.get("turnId"))
+                              if origin.get("turnId") is not None
+                              else isinstance(origin_turn_hash, str)
+                              and self._problem_turn_hash(session, base.get("turnId")) == origin_turn_hash)
+                if exact_turn:
                     turn = candidate
                     break
             if turn is None or self.jobs:
@@ -960,17 +1014,16 @@ class Hooks:
                 self.reviewing = bool(self.jobs)
 
     def plan_project_of(self, session):
-        """The ORIGINAL project identity one session's trusted turn context carried, or `None`.
-
-        It is read from the SAME bounded per-turn record the lifecycle already keeps (`self.turns`
-        entries carry `base.projectKey`, written from the hook's own `project_key`, or the configured
-        `HERMES_MSE_PROJECT_KEY`), so nothing new is stored and no project table is exposed: one
-        session in, one bounded scalar out. `None` means this session never stated a project, and the
-        caller leaves the plan instance-scoped rather than inventing or downgrading an identity.
-        """
+        """Return the consistent project identity observed for this session, if any."""
         if not isinstance(session, str) or session == "":
             return None
         with self.lock:
+            remembered = self.plan_projects.get(session)
+            if remembered is not None:
+                project, ambiguous, created = remembered
+                if time.monotonic() - created < 1800:
+                    return project if not ambiguous else None
+                self.plan_projects.pop(session, None)
             for row in self.turns.values():
                 base = row.get("base") if isinstance(row, dict) else None
                 if not isinstance(base, dict) or base.get("sessionId") != session:
@@ -1058,6 +1111,25 @@ class Hooks:
         source = self.source_row(session)
         if row is None or source is None:
             return None
+        replay_cases = []
+        if plan.get("track") == "objective":
+            try:
+                if isinstance(plan.get("ticket"), str) and plan.get("ticket"):
+                    replay = self.call("taskEvidenceReplayCases", {"projectKey": self._plan_project(plan),
+                        "ticket": plan["ticket"]})
+                else:
+                    replay = self.call("taskEvidenceReplayCases", {"projectKey": self._plan_project(plan), "limit": 2})
+            except Exception:  # noqa: BLE001 — no objective material means no paid attempt
+                replay = None
+            replay_cases = replay.get("cases") if isinstance(replay, dict) and replay.get("ok") is True else []
+            if plan.get("packId") == "package-json-structure-v1" and not replay_cases:
+                ticket = plan.get("ticket")
+                if isinstance(ticket, str) and ticket:
+                    try:
+                        self.call("evaluationCancel", {"ticket": ticket})
+                    except Exception:  # noqa: BLE001 — cancellation is retried by core recovery
+                        pass
+                return None
         return {"kind": plan.get("track"), "route_provider": provider, "route_model": model,
                 "pre_api": {"provider": provider, "model": model, "base_url": base_url,
                             "api_mode": api_mode, "request": {"method": "POST", "body": body}},
@@ -1065,12 +1137,15 @@ class Hooks:
                 "problem": {}, "ticket": plan.get("ticket"), "queueKey": plan.get("queueKey"),
                 "planHash": plan.get("planHash"), "lessonId": plan.get("lessonId"),
                 "version": plan.get("version"), "projectKey": self._plan_project(plan),
+                "instruction": lesson.get("instruction"),
+                "packId": plan.get("packId"),
                 "environmentId": plan.get("environment"), "planTrack": plan.get("track"),
                 "source": {"revision": source.get("revision"), "bindingHash": source.get("bindingHash"),
                            "controlGeneration": self._control_generation()},
                 "review": {"maxTokens": REVIEW_TOKENS_BOUND},
                 "objective": {"maxTokens": OBJECTIVE_TOKENS_BOUND, "cursor": 0,
-                              "progress": plan.get("progress")}}
+                              "progress": plan.get("progress")},
+                "taskReplayCases": replay_cases if isinstance(replay_cases, list) else []}
 
     def row_for_plan(self, plan):
         """The turn row a plan's attempt belongs to, or `None` when this process has no such row.
@@ -1458,6 +1533,97 @@ class Hooks:
             return None
         return session, str(turn)
 
+    def task_context(self, session_id, turn_id):
+        """Trusted route/scope facts for one live turn; no prompt, content or credentials."""
+        key = (session_id, str(turn_id))
+        with self.lock:
+            row = self.turns.get(key)
+            route = self.routes.get(key)
+            if row is None or not isinstance(route, dict):
+                return None
+            return {"sessionId": session_id, "turnId": key[1],
+                    "projectKey": row["base"].get("projectKey"),
+                    "environmentId": row["base"].get("environmentId"),
+                    "provider": route.get("provider"), "model": route.get("model"),
+                    "reasoningEffort": route.get("reasoningEffort")}
+
+    @staticmethod
+    def _project_manifest_write(kwargs, row, route):
+        """Read back one successful root package.json write from the real file-tool result."""
+        if (kwargs.get("tool_name") not in {"write_file", "patch"}
+                or kwargs.get("status") != "ok" or kwargs.get("failed") is True
+                or kwargs.get("error") not in (None, False, "", {})):
+            return None
+        call_id = _tool_call_id(kwargs)
+        # Hermes terminal/file tools may dispatch into SSH, Docker, or another remote backend.
+        # The project path is host-local only when the effective terminal backend says local.
+        # `TERMINAL_ENV` is the backend selector consumed by Hermes' terminal dispatcher; unknown
+        # values fail closed instead of treating a same-named local path as remote evidence.
+        if kwargs.get("_mse_terminal_backend") != "local":
+            return None
+        if not call_id or not isinstance(route, dict):
+            return None
+        project = row.get("base", {}).get("projectKey")
+        if not isinstance(project, str) or not os.path.isabs(project):
+            return None
+        try:
+            root = Path(project).resolve(strict=True)
+            if not root.is_dir():
+                return None
+            expected = root / "package.json"
+            result = kwargs.get("result")
+            result_doc = result if isinstance(result, dict) else json.loads(result) if isinstance(result, str) else None
+            if not isinstance(result_doc, dict) or result_doc.get("error") or result_doc.get("resolved_path") != str(expected):
+                return None
+            modified = result_doc.get("files_modified")
+            if modified != [str(expected)]:
+                return None
+            args = kwargs.get("args")
+            if not isinstance(args, dict) or args.get("path") is None:
+                return None
+            if kwargs.get("tool_name") == "write_file" and not isinstance(args.get("content"), str):
+                return None
+            path = Path(result_doc["resolved_path"]).resolve(strict=True)
+            if path != expected or not path.is_relative_to(root):
+                return None
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(path, flags)
+            try:
+                before = os.fstat(fd)
+                if not stat_module.S_ISREG(before.st_mode) or before.st_size > 32_000:
+                    return None
+                chunks = bytearray()
+                while len(chunks) < 32_001:
+                    chunk = os.read(fd, min(8192, 32_001 - len(chunks)))
+                    if not chunk:
+                        break
+                    chunks.extend(chunk)
+                after = os.fstat(fd)
+                if len(chunks) > 32_000 or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+                        after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+                    return None
+            finally:
+                os.close(fd)
+            encoded = bytes(chunks)
+            content = encoded.decode("utf-8", errors="strict")
+            if kwargs.get("tool_name") == "write_file" and args["content"] != content:
+                return None
+            recalled_methods = [item for item in row.get("lesson_versions", [])
+                                if isinstance(item, dict) and isinstance(item.get("id"), str)
+                                and isinstance(item.get("version"), int)]
+            adopted = recalled_methods[0] if row.get("accepted") is True and len(recalled_methods) == 1 else None
+            return {"adapterId": "hermes", "content": content,
+                    "environmentId": row["base"].get("environmentId"), "eventId": call_id,
+                    "fileHash": hashlib.sha256(encoded).hexdigest(), "filename": path.name,
+                    "lessonId": adopted.get("id") if adopted else None,
+                    "lessonVersion": adopted.get("version") if adopted else None,
+                    "model": route.get("model"), "projectKey": project,
+                    "provider": route.get("provider"), "reasoningEffort": route.get("reasoningEffort"),
+                    "sessionId": row["base"]["sessionId"], "toolchain": "hermes-file-tools-v1",
+                    "turnId": row["base"]["turnId"]}
+        except (OSError, UnicodeError, ValueError, TypeError):
+            return None
+
     def _permitted(self, entry=None):
         """The host's latest permission for this entry, read without `_active`'s pause side effect.
 
@@ -1645,6 +1811,16 @@ class Hooks:
                 project = kwargs.get("project_key") or kwargs.get("projectKey") or os.environ.get("HERMES_MSE_PROJECT_KEY")
                 if project:
                     base["projectKey"] = project
+                remembered = self.plan_projects.get(ids[0])
+                if remembered is not None and now - remembered[2] < 1800:
+                    previous, ambiguous, _created = remembered
+                    self.plan_projects[ids[0]] = (previous if previous == project else None,
+                                                   ambiguous or previous != project, now)
+                else:
+                    if len(self.plan_projects) >= 256:
+                        oldest = min(self.plan_projects, key=lambda key: self.plan_projects[key][2])
+                        self.plan_projects.pop(oldest, None)
+                    self.plan_projects[ids[0]] = (project, False, now)
                 result = self._foreground_call("prepare", dict(base, prompt=prompt, origin="user"))
                 if result.get("ok") is not True:
                     return None
@@ -1671,6 +1847,7 @@ class Hooks:
         offered context has to be in the messages the host is about to send, and the success has to
         come back for the same API request id.
         """
+        publish = None
         with self.lock:
             if not self._active():
                 return
@@ -1679,23 +1856,41 @@ class Hooks:
             # before any adoption question is asked. It carries no credential and no endpoint.
             self._remember_route(ids, kwargs)
             row = self.turns.get(ids)
-            if not row or not row["receipt"] or row["accepted"]:
-                return
-            messages = kwargs.get("request_messages") or []
-            user = next((m for m in reversed(messages) if isinstance(m, dict) and m.get("role") == "user"), {})
-            text = user.get("content")
-            if isinstance(text, list):
-                text = "\n".join(p.get("text", "") for p in text if isinstance(p, dict)
-                                 and p.get("type") in {"text", "input_text"} and isinstance(p.get("text"), str))
-            n = row["prompt_size"]
-            matched = (isinstance(text, str) and len(text) <= 131072
-                       and hashlib.sha256(text[:n].encode()).hexdigest() == row["prompt_hash"]
-                       and text[n:n + 2] == "\n\n" and row["context"] in text[n + 2:])
-            request = kwargs.get("api_request_id")
-            row["request"] = request if matched and isinstance(request, str) and 0 < len(request) <= 512 else None
-            # An explicit record of WHAT was refused: a request whose offered context was trimmed
-            # away, and a request that carried no usable id, are different refusals.
-            row["request_check"] = "matched" if row["request"] else ("context_trimmed" if not matched else "no_request_id")
+            if ids is not None and row is not None:
+                publish = (ids, dict(row.get("base") or {}), self.pre_api.get(ids))
+            if row and row["receipt"] and not row["accepted"]:
+                messages = kwargs.get("request_messages") or []
+                user = next((m for m in reversed(messages) if isinstance(m, dict) and m.get("role") == "user"), {})
+                text = user.get("content")
+                if isinstance(text, list):
+                    text = "\n".join(p.get("text", "") for p in text if isinstance(p, dict)
+                                     and p.get("type") in {"text", "input_text"} and isinstance(p.get("text"), str))
+                n = row["prompt_size"]
+                matched = (isinstance(text, str) and len(text) <= 131072
+                           and hashlib.sha256(text[:n].encode()).hexdigest() == row["prompt_hash"]
+                           and text[n:n + 2] == "\n\n" and row["context"] in text[n + 2:])
+                request = kwargs.get("api_request_id")
+                row["request"] = request if matched and isinstance(request, str) and 0 < len(request) <= 512 else None
+                # An explicit record of WHAT was refused: a request whose offered context was trimmed
+                # away, and a request that carried no usable id, are different refusals.
+                row["request_check"] = "matched" if row["request"] else ("context_trimmed" if not matched else "no_request_id")
+        if publish is not None:
+            self._publish_source_for_turn(*publish)
+
+    def _publish_source_for_turn(self, ids, base, facts):
+        """Publish the driver's proven dispatch identity before a checker can bind evidence to it."""
+        driver = self.reflection_driver
+        if driver is None or not isinstance(facts, dict):
+            return {"ok": False, "wait": "provider_driver_unsupported"}
+        source = driver.prepare_source(self.call, {
+            "route_provider": facts.get("provider"), "route_model": facts.get("model"),
+            "pre_api": {"provider": facts.get("provider"), "model": facts.get("model"),
+                        "base_url": facts.get("base_url"), "api_mode": facts.get("api_mode"),
+                        "request": facts.get("request")},
+            "base": base, "source_session": ids[0], "problem": {"base": base}})
+        if source.get("ok") is not True:
+            self.problems["last"] = source.get("wait") or "source_route_unbound"
+        return source
 
     def post_api_request(self, **kwargs):
         with self.lock:
@@ -1716,9 +1911,15 @@ class Hooks:
         call identity) plus an availability count, and only trusted host metadata can mark a tool
         read-only. `args`, `result` and `error_message` are read for nothing and stored nowhere.
         """
+        manifest_evidence = None
+        checker_recovery = None
+        checker_turn = None
         with self.lock:
+            event_generation = self.generation
             if not self._active():
                 return
+            call_id = _tool_call_id(kwargs)
+            backend_fact = self.terminal_calls.pop(call_id, None) if call_id else None
             row = self.turns.get(self._ids(kwargs))
             if not row:
                 return
@@ -1740,6 +1941,70 @@ class Hooks:
             if kwargs.get("read_only") is not True or failed:
                 row["checks"].clear()
             row["task_failed"] = row["task_failed"] or bool(kwargs.get("failed")) or failed
+            ids = self._ids(kwargs)
+            if (ids is not None and backend_fact is not None
+                    and backend_fact == (event_generation, "local")
+                    and self.terminal_backend_resolver() == "local"):
+                manifest_evidence = self._project_manifest_write(
+                    {**kwargs, "_mse_terminal_backend": "local"}, row, self.routes.get(ids))
+        if manifest_evidence is not None:
+            # Keep the final lease check and evidence write under the same state lock. A pause,
+            # close, or generation change cannot slip between the permission read and core commit.
+            with self.lock:
+                if self.generation != event_generation or not self._active(event_generation):
+                    return
+                try:
+                    recorded = self.call("recordPackageJsonArtifact", manifest_evidence)
+                    evidence = recorded.get("evidence") if isinstance(recorded, dict) else None
+                    observation = evidence.get("problem") if isinstance(evidence, dict) else None
+                    problem = observation.get("problem") if isinstance(observation, dict) else None
+                    if (isinstance(recorded, dict) and recorded.get("status") == "fail"
+                            and isinstance(observation, dict) and isinstance(problem, dict)):
+                        ids = self._ids(kwargs)
+                        turn = self.turns.get(ids) if ids is not None else None
+                        if turn is not None:
+                            turn["task_failed"] = True
+                            if not isinstance(turn.get("result_summary"), str) or not turn["result_summary"].strip():
+                                turn["result_summary"] = "package.json 结构检查未通过，需要核对字段类型并保留扩展字段。"
+                            turn["checker_problem"] = {"id": problem.get("id"),
+                                "evidenceRevision": problem.get("evidenceRevision"),
+                                "ready": observation.get("ready") is True}
+                            if observation.get("ready") is True:
+                                checker_recovery = {"id": problem.get("id"),
+                                    "evidenceRevision": problem.get("evidenceRevision"),
+                                    "origin": problem.get("origin")}
+                                checker_turn = ids
+                except Exception:  # noqa: BLE001 — an unreadable/failed checker remains unknown
+                    pass
+        # A ready checker problem is reflected while its exact source turn is still live. The
+        # session-end generic path must never substitute an unbound reflection for this evidence.
+        if checker_recovery is not None:
+            attempt = self.problem_recovery_attempt(checker_recovery)
+            with self.lock:
+                turn = self.turns.get(checker_turn)
+                if turn is not None:
+                    turn["checker_recovery"] = {"slot": (attempt or {}).get("slot"),
+                                                "code": (attempt or {}).get("code")}
+
+    def pre_tool_call(self, **kwargs):
+        """Apply registered guards and capture the effective backend for file-tool attribution."""
+        with self.lock:
+            if self.closed or not self._active():
+                return None
+            tool_name, args = kwargs.get("tool_name"), kwargs.get("args")
+            call_id = _tool_call_id(kwargs)
+            if tool_name in {"write_file", "patch"} and call_id:
+                if len(self.terminal_calls) >= 64:
+                    self.terminal_calls.pop(next(iter(self.terminal_calls)))
+                backend = self.terminal_backend_resolver()
+                self.terminal_calls[call_id] = (self.generation, backend)
+        for rule in self.guard_templates:
+            message, matched = check_guard(rule, tool_name, args)
+            if matched and rule["mode"] == "shadow":
+                self.guard_shadow[rule["guardId"]] = min(4096, self.guard_shadow.get(rule["guardId"], 0) + 1)
+            if message:
+                return {"action": "block", "message": message}
+        return None
 
     def _remember_route(self, ids, kwargs):
         """Bind the route a REAL `pre_api_request` reported to its own turn. Bounded, no secrets.

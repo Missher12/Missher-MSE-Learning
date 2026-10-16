@@ -20,6 +20,7 @@ stand-in and the real plugin-manager registration, ContextVar profile binding an
 lifecycle belong to the native acceptance layer.
 """
 import asyncio
+import hashlib
 import importlib.util
 import json
 import os
@@ -700,6 +701,21 @@ class PerStepPermissionTests(unittest.TestCase):
 class ObjectiveWalkTests(unittest.TestCase):
     """The objective walk follows the CORE's own cursor — the full frozen case list, holdout included."""
 
+    def test_package_objective_cancels_ticket_before_any_model_call_when_replay_is_missing(self):
+        calls = []
+        def core(op, value):
+            calls.append((op, value))
+            return {"ok": True}
+        class NoMaterialDriver:
+            def _objective_material(self, *_args):
+                raise AssertionError("objective material must not be read without replay gate")
+        result = asyncio.run(driver._multi_objective(NoMaterialDriver(),
+            {"packId": "package-json-structure-v1", "taskReplayCases": []}, core, None, None,
+            threading.Event(), {"ticket": "ticket-no-replay"}, {"steps": 0}))
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["wait"], "task_replay_evidence_unavailable")
+        self.assertEqual(calls, [("evaluationCancel", {"ticket": "ticket-no-replay"})])
+
     def test_the_walk_covers_every_frozen_case_and_settles_once(self):
         holder = {}
 
@@ -726,6 +742,57 @@ class ObjectiveWalkTests(unittest.TestCase):
         self.assertIsInstance(submits[0]["value"].get("usage"), dict)
         self.assertTrue(all(isinstance(value, int) for case in submits[0]["value"]["usage"].values()
                             for value in case.values()))
+
+    def test_package_objective_runs_scoped_replay_after_all_sixteen_pack_cases(self):
+        holder = {}
+        fixture = Fixture(self, lambda body: holder["provider"](body))
+        self.addCleanup(fixture.close)
+        lesson_id = fixture.core.lesson(event_id="package-replay-lesson",
+            instruction="Validate package.json manifest structure and JSON known field types.")
+        for event_id, content in (("package-bad", '{"scripts":{"test":17}}'),
+                                  ("package-control", '{"scripts":{"test":"node --test"},"custom":true}')):
+            fixture.core("recordPackageJsonArtifact", {"adapterId": "hermes", "environmentId": "default",
+                "eventId": event_id, "filename": "package.json", "content": content,
+                "fileHash": hashlib.sha256(content.encode()).hexdigest(), "lessonId": None,
+                "lessonVersion": None, "model": MODEL, "projectKey": PROJECT, "provider": PROVIDER,
+                "reasoningEffort": EFFORT, "sessionId": SESSION, "toolchain": "hermes-file-tools-v1",
+                "turnId": event_id})
+        replay = fixture.core("taskEvidenceReplayCases", {"projectKey": PROJECT, "limit": 2})
+        self.assertTrue(replay.get("ok"), repr(replay))
+        self.assertEqual(len(replay.get("cases", [])), 1)
+        registered = fixture.core.register(lesson_id, "objective")
+        plan = registered["plan"]
+        cases = plan["proposal"]["cases"]
+        self.assertEqual(len(cases), 16)
+        self.assertEqual(sum(row["split"] == "development" for row in cases), 12)
+        self.assertEqual(sum(row["split"] == "holdout" for row in cases), 4)
+
+        class ReplayProvider(Provider):
+            def __call__(self, body):
+                messages = body.get("messages") or [{}]
+                system = messages[0].get("content", "") if isinstance(messages[0], dict) else ""
+                if "Repair the package.json witness" in system:
+                    text = messages[1].get("content", "") if len(messages) > 1 else ""
+                    content = '{"scripts":{"test":"node --test"}}' if '"test":17' in text else text
+                    self.calls += 1
+                    return {"id": "chatcmpl-replay", "object": "chat.completion", "created": 0,
+                        "model": MODEL, "choices": [{"index": 0, "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": content}}],
+                        "usage": {"prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150}}
+                return super().__call__(body)
+
+        provider = ReplayProvider(criteria_map(plan))
+        holder["provider"] = provider
+        learn_material(fixture, provider)
+        fixture.core.running(plan)
+        job = fixture.job(plan, "objective", lesson_id, taskReplayCases=replay["cases"], instruction=
+            "Validate package.json manifest structure and JSON known field types.")
+        result = fixture.run(job)
+        submits = fixture.core.ops("objectiveResult")
+        self.assertEqual(len(submits), 1, repr(result))
+        self.assertEqual(fixture.physical, 16 * 2 + 2)
+        self.assertEqual(len(submits[0]["value"].get("taskReplayResults", [])), 1)
+        self.assertEqual(submits[0]["value"]["taskReplayResults"][0]["id"], replay["cases"][0]["id"])
 
 
 @NEEDS_SDK

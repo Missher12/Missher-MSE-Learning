@@ -16,7 +16,7 @@ function loadClient() {
   assert.ok(registration, 'the bundle registers itself with the module loader')
   const react = { createElement: (type, props, ...children) => ({ type, props, children }),
     useState: initial => [initial, () => {}], useEffect: () => {}, useRef: value => ({ current: value }),
-    useCallback: value => value, Fragment: 'fragment' }
+    useLayoutEffect: () => {}, useCallback: value => value, Fragment: 'fragment' }
   // The host primitives are loaded by the shell, not by this package; the test only needs their
   // component identities so the tree can be inspected.
   // The element type stays the component identity the bundle passed to createElement, so the
@@ -94,6 +94,63 @@ test('the bundle registers the real settings section and the bundle-config entry
   assert.equal(section.options.order, 66)
   assert.equal(section.options.label(), '自我进化')
   assert.equal(section.options.inject().form, form, 'the section is handed the host config form')
+  assert.equal(bundle.options.inject().hooks.locale, ctx.locale, 'bundle page subscribes to live Host locale')
+  assert.equal(section.options.inject().hooks.locale, ctx.locale, 'settings section subscribes to live Host locale')
+})
+
+test('settings write capability accepts old and new Host contracts and rejects ambiguous/read-only states', () => {
+  const { module: mod } = loadClient()
+  const form = { mutate() {} }
+  const base = { status: 'ready', writable: true }
+  for (const snapshot of [base, { ...base, mode: 'host' }]) {
+    assert.equal(mod.__test.canWriteSettings(form, snapshot), true)
+  }
+  for (const snapshot of [
+    { ...base, writable: false }, { ...base, writable: undefined },
+    { ...base, status: 'loading' }, { ...base, status: 'unavailable' },
+    { ...base, mode: 'memory' }, { ...base, mode: 'other' }, { ...base, mode: undefined },
+  ]) assert.equal(mod.__test.canWriteSettings(form, snapshot), false)
+  assert.equal(mod.__test.canWriteSettings({}, base), false, 'a missing mutate method cannot enable controls')
+})
+
+test('live locale hooks update both panel surfaces without changing fallback props', () => {
+  const { module: mod } = loadClient()
+  let active = 'zh'
+  const useLocale = selector => selector({ active })
+  const panelProps = { locale: 'zh', useLocale, call: async () => ({ ok: true, value: {} }),
+    control: undefined, form: undefined }
+  const title = tree => elementsOf(tree).find(node => node.type === 'h1')?.children?.[0]
+  const zhPanel = mod.__test.MsePanel(panelProps)
+  const zhBundle = mod.__test.BundlePage({ locale: 'zh', useLocale })
+  active = 'en'
+  const enPanel = mod.__test.MsePanel(panelProps)
+  const enBundle = mod.__test.BundlePage({ locale: 'zh', useLocale })
+  assert.equal(title(zhPanel), mod.__test.zh.settingsTitle)
+  assert.equal(title(zhBundle), mod.__test.zh.settingsTitle)
+  assert.equal(title(enPanel), mod.__test.en.settingsTitle)
+  assert.equal(title(enBundle), mod.__test.en.settingsTitle)
+})
+
+test('compact settings navigation keeps all five full labels and the selected panel link', () => {
+  const { module: mod } = loadClient()
+  const changed = []
+  for (const locale of ['en', 'zh']) {
+    const dict = locale === 'en' ? mod.__test.en : mod.__test.zh
+    const compactTree = mod.__test.settingsTabNavigation('lessons', value => changed.push(value), dict, true)
+    const pickerElement = compactTree.children[0]
+    const menu = mod.__test.Picker(pickerElement.props)
+    assert.deepEqual(menu.props.items.map(item => item.label), [dict.tabOverview, dict.tabLessons,
+      dict.tabRecall, dict.tabManual, dict.tabBudget])
+    assert.equal(menu.props.selectedId, 'lessons')
+    assert.equal(menu.props.anchor.props.id, 'mse-tab-lessons')
+    assert.equal(menu.props.anchor.props['aria-controls'], 'mse-pane-lessons')
+    menu.props.onSelect('budget')
+    const wide = mod.__test.settingsTabNavigation('lessons', () => {}, dict, false)
+    assert.equal(wide.type.uiName, 'SegmentedTabs')
+    assert.equal(wide.props.items.length, 5)
+    assert.equal(wide.props.items[1].panelId, 'mse-pane-lessons')
+  }
+  assert.deepEqual(changed, ['budget', 'budget'])
 })
 
 test('the client descriptors mirror the Host manifest endpoint for endpoint', async () => {
@@ -219,6 +276,14 @@ test('control payloads surface their business code instead of being unwrapped aw
   assert.equal(refused.code, 'turn_required')
   await assert.rejects(() => controlCall(async () => ({ ok: false, error: { code: 'gateway/internal' } }), 'status', {}),
     /gateway\/internal/)
+})
+
+test('verification coverage uses a stacked row with wrapping items for narrow settings panels', () => {
+  assert.match(SOURCE, /row\('verificationCoverage',[\s\S]{0,180}coverage, \{ stacked: true \}\)/u)
+  assert.match(SOURCE, /\.mse-details \.mse-row-stacked\{display:block\}/u)
+  assert.match(SOURCE, /\.mse-details \.mse-row-stacked \.mse-row-side\{[^}]*flex-wrap:wrap/u)
+  assert.match(SOURCE, /\.mse-details \.mse-coverage-list\{display:flex;flex-wrap:wrap/u)
+  assert.match(SOURCE, /\.mse-details \.mse-coverage-item\{min-width:0;overflow-wrap:anywhere\}/u)
 })
 
 
@@ -382,6 +447,12 @@ test('the budget usage disclosure reads the paidBudget projection from control s
     'a missing measured-use field stays unreported instead of becoming zero')
   assert.ok(JSON.stringify(incompleteDisclosure).includes(mod.__test.zh.notRecorded),
     'a missing next-available timestamp stays unrecorded')
+  const englishTree = await renderPanel(registration, { locale: 'en', initialTab: 'budget', call, control, form: RENDER_FORM })
+  const englishDisclosure = elementsOf(englishTree)
+    .find(node => node.type === 'details' && node.props['data-mse-disclosure'] === 'usage')
+  const englishRendered = JSON.stringify(englishDisclosure)
+  assert.ok(englishRendered.includes('Budget reserved (conservative)'))
+  assert.ok(englishRendered.includes('Measured tokens'))
 })
 
 test('a read failure is reported as unknown, never as paused or as a zero', async () => {
@@ -901,7 +972,7 @@ test('常规 renders the verification picker, and a saved id missing from the di
 
   // One selection plus one switch, saved ONCE through the existing sparse-op path.
   const writes = []
-  const recordingForm = { getSnapshot: () => ({ status: 'ready', writable: true, mode: 'host', revision: 7,
+  const recordingForm = { getSnapshot: () => ({ status: 'ready', writable: true, revision: 7,
     value: { ...READY_VALUES, verificationSessionId: '' } }), subscribe: () => () => {},
     mutate: (ops, revision) => { writes.push({ ops, revision }); return true } }
   let phase = 0
@@ -928,6 +999,92 @@ test('常规 renders the verification picker, and a saved id missing from the di
     { op: 'set', path: ['autoValidationEnabled'], value: true },
     { op: 'set', path: ['verificationSessionId'], value: 'session-aaaabbbb-1111' },
   ] })
+})
+
+test('a settings save rechecks write permission and preserves the draft revision', async () => {
+  const { registration } = loadClient()
+  let snapshot = { status: 'ready', writable: true, revision: 19, value: { ...READY_VALUES } }
+  const writes = []
+  const form = { getSnapshot: () => snapshot, subscribe: () => () => {},
+    mutate: (ops, revision) => { writes.push({ ops, revision }); return true } }
+  const call = async method => ({ ok: true, value: method === 'overview'
+    ? { ok: true, version: 'test', runtime: 'dsh', budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 },
+      counts: {}, store: { readable: true, schema: 2 } }
+    : { ok: true, sessions: [] } })
+  let phase = 0
+  await renderPanel(registration, { locale: 'zh', call, control: undefined, form }, 14, ({ nodes }) => {
+    if (phase === 0) {
+      const picker = nodes.find(node => typeof node.type === 'function' && node.props?.testId === 'verify-session')
+      const input = nodes.find(node => node.type?.uiName === 'Input' && node.props?.['aria-label'] === ZH_DICT.contextBytes)
+      if (picker === undefined || input === undefined) return false
+      picker.props.onChange('session-aaaabbbb-1111')
+      input.props.onChange({ target: { value: '1024' } })
+      phase = 1
+      return false
+    }
+    const save = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === '保存')
+    if (save === undefined || save.props.disabled) return false
+    // Update the Host revision without notifying React: save must retain the draft's old revision.
+    snapshot = { ...snapshot, revision: 20 }
+    save.props.onClick()
+    phase = 2
+    return true
+  })
+  assert.equal(writes.length, 1)
+  assert.equal(writes[0].revision, 19, 'the Host call uses the revision captured by the draft')
+
+  writes.length = 0
+  snapshot = { ...snapshot, writable: true }
+  phase = 0
+  await renderPanel(registration, { locale: 'zh', call, control: undefined, form }, 14, ({ nodes }) => {
+    if (phase === 0) {
+      const input = nodes.find(node => node.type?.uiName === 'Input' && node.props?.['aria-label'] === ZH_DICT.contextBytes)
+      if (input === undefined) return false
+      input.props.onChange({ target: { value: '1280' } })
+      phase = 1
+      return false
+    }
+    const save = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === '保存')
+    if (save === undefined) return false
+    // This models the permission revoking after render but before the event handler runs.
+    snapshot = { ...snapshot, writable: false }
+    save.props.onClick()
+    phase = 2
+    return true
+  })
+  assert.equal(writes.length, 0, 'permission revoked at save time results in zero writes')
+})
+
+test('a Host mutate refusal is never presented as a successful settings save', async () => {
+  const { registration, module: mod } = loadClient()
+  const snapshot = { status: 'ready', writable: true, revision: 23, value: { ...READY_VALUES } }
+  let writes = 0
+  const form = { getSnapshot: () => snapshot, subscribe: () => () => {},
+    mutate: () => { writes += 1; return false } }
+  const call = async method => ({ ok: true, value: method === 'overview'
+    ? { ok: true, version: 'test', runtime: 'dsh', budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 },
+      counts: {}, store: { readable: true, schema: 2 } }
+    : { ok: true, sessions: [] } })
+  let phase = 0
+  const tree = await renderPanel(registration, { locale: 'zh', call, control: undefined, form }, 14, ({ nodes }) => {
+    if (phase === 0) {
+      const input = nodes.find(node => node.type?.uiName === 'Input' && node.props?.['aria-label'] === ZH_DICT.contextBytes)
+      if (input === undefined) return false
+      input.props.onChange({ target: { value: '1280' } })
+      phase = 1
+      return false
+    }
+    const save = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === '保存')
+    if (save === undefined || save.props.disabled) return false
+    save.props.onClick()
+    phase = 2
+    return true
+  })
+  assert.equal(writes, 1)
+  const rendered = JSON.stringify(tree)
+  assert.ok(rendered.includes(mod.__test.zh.reloadNeeded), 'a rejected atomic mutation requests a host reread')
+  assert.ok(!elementsOf(tree).some(node => node.props?.className === 'mse-ok'),
+    'a rejected mutation has no successful-save indicator')
 })
 
 test('常规 shows the whole library by default and the selected project beside it', async () => {

@@ -1,48 +1,45 @@
-# MSE 0.9.1 交付说明
+# MSE 0.10.0 交付与验证
 
-[返回桌面与全部插件](https://github.com/Missher12/Missher-DeepseekHarness-Desktop) · [中文用法](README.md) · [English](README.en.md) · [正式下载](https://github.com/Missher12/Missher-MSE-Learning/releases/tag/v0.9.1)
+[返回桌面与全部插件](https://github.com/Missher12/Missher-DeepseekHarness-Desktop) · [中文用法](README.md) · [English](README.en.md) · [验证边界](VALIDATION.md)
 
-0.9.1 修复设置页“当前用量”读错字段的问题；保守预留与实测 Token 分开显示，缺失数据继续标记未上报。后台学习、预算和保存行为不变。
+0.10.0 增加可追溯的问题记录与任务证据，修复后台评测在终态、跨窗口或重启后重复派发的路径。没有足够身份信息的旧检查点保持等待，保留任务、旧费用与已完成结果，不通过删除账目或重新付费来恢复。设置页将宿主实际支持的能力逐项显示，缺失能力不会假装已启用。
 
-沿用 0.9.0 增加的预算档位、持久步骤检查点和跨预算窗口续跑。自动流程可以从有来源的失败中形成候选，进行安全评审、有限试用和限定领域的客观验证，再在相关会话中召回；可信失败可以撤回方法。普通经验的有限试用仍标记为未验证，不把模型自评当作客观事实。
+## 安装与默认行为
 
-预算不足、前台抢占或重启后复用已完成的步骤；已发出但费用或结果未知的请求保持等待，不自动重放。逻辑评测任务和物理模型请求分别计数，已完成步骤不重复计费。Hermes 新进程需要原来源会话重新提供可信路线事实，缺少时明确等待。
+DSH 使用 missher-dsh-mse-learning-0.10.0.tgz；Hermes 使用 mse-learning-hermes-0.10.0.tar.gz；源码归档为 mse-learning-0.10.0-source.tar.gz。不同宿主各用独立可写学习库。升级前备份学习库和设置，结束活动任务后正常重启，回读实际加载版本。
 
-## 安装与预算
+自动验证默认关闭，默认评测 Token 额度为 0。安装不会自动开启收费评测或提高用户已保存的额度；20K/2、50K/5 等档位必须由用户选择。后台评测额度与正常聊天、开发用量分别计算。未知费用继续保留为未知，不等同于免费或已退款。
 
-DSH 下载 `missher-dsh-mse-learning-0.9.1.tgz`，Hermes 下载独立归档；按各自宿主的插件安装方式使用。升级前备份学习库与设置，完成活动任务，再正常重启并回读版本、加载状态及实际控制确认。源码更新、可下载安装包和本机安装是不同步骤。
+默认召回限制保持每轮 768 UTF-8 字节、每会话 1536 字节、最多 2 条；完整问题日志和评测记录不注入提示词。只有相关且可信的检查结果才能晋升方法；无关测试、模型自评和正常结束不算业务已验证。
 
-产品默认保持自动验证关闭、评测 Token 额度 0、任务额度 2。可选暂停、保守 20K/2、标准 50K/5、100K/10、200K/20 或自定义额度；只有明确选择并保存才生效。额度按滚动 24 小时统计，后台评测预算不包含正常聊天或开发用量。自动反思另有开关与频次约束。
+## 兼容与已验证范围
 
-召回限制保持每轮 768 UTF-8 字节、每会话 1536 字节、最多 2 条且最多 1 条试用。安装不复制用户学习数据、不自动提高已有额度，也不允许 DSH 和 Hermes 共用一个可写学习库。
+插件按实际接口检测能力，不把某一个精确 DSH 版本作为唯一可用版本。缺少必要服务时停止对应功能并报告原因；宽松 peer 范围并不意味着所有历史宿主均已验证。CLI/核心仍需要 Node.js 22.19 或更高版本。
 
-## 兼容范围
+- 冻结源码 138 文件与三个产品归档逐文件核对，所有公开说明的相对链接检查通过。后端与已验候选保持一致。客户端修复官方新设置契约误判只读、英文窄窗导航重叠及语言切换后正文不更新；30项组件检查通过，包含权限撤销后拒写、草稿版本保留与写入失败不误报成功；文档与 Hermes 打包链接闭合。
+- 调度器 11 项回归通过。过期检查点在 4 次扫描、2 次冷重建及充足合成预算下未产生新请求或新票据，旧计划、任务、花费与终态保留。
+- Hermes 真实 PluginManager/驱动的单次自动链通过，包含 355 次 CLI 子调用；本轮无 TimeoutExpired 或 lock_busy。旧失败证据保留，未声称已经确定旧 lock_busy 的最初原因。
+- 官方 npm DSH 0.2.1-alpha.5 的真实 Loader：正常服务、缺少可选文件服务、缺少必要工具服务三个场景通过。旧社区 Host 的服务/自动流程验收按运行件一致性复用。
+- 同一安装包在社区 Desktop 0.2.1-alpha.2.20261014.1（Linux x64）与纯官方 npm DSH 0.2.1-alpha.5 的真实 Web 上通过界面回归：设置保存/磁盘回读/放弃、中英文宽窄五项导航、语言切换保持当前页/会话/未保存草稿，以及正式停用后的入口与样式清理。原生最小外窗 520×600，正文 231px；宽屏正文 559px。只读、缺写入能力及权限撤销的反例是组件测试证据，不冒充实际 Host 负例。
 
-维护目标是支持合理的宿主版本范围并持续适配最新版。最低能力要求与已测试版本分开：宽松 peer 范围不会证明所有版本已通过，测试基线也不表示只有该版本可用。DSH 需提供 README 所列 Cordis、LLM、设置和客户端接口；独立 CLI/核心需要 Node.js 22.19 或更高版本。
+上述模型流使用合成 transport，不证明真实模型的长期效果。未新增 Intel Mac、Windows 原生窗口验收；下载、安装和各电脑实际运行仍需分别核对。学习库、真实会话、凭据、笔记和私有审查证据不进入公共仓库。
 
-0.9.1 后端与已验 0.9.0 逐字节一致，复用其真实 DSH Host 服务与隔离配置上的自动流程和冷重建证据。Hermes 的真实 SDK/核心集成使用合成 transport；其他宿主、完整跨平台原生界面及真实模型质量仍需各自验证。
-
-## 已验证范围
-
-- 三个冻结包及公开源码逐文件核验：DSH 46 文件、Hermes 22 文件、公开源码 124 文件；路径与文件边界检查通过。
-- 0.9.1 最终源码组件/包契约检查 30/30，独立预算档位/保存检查 2/2 通过。124 个源文件相对 0.9.0 只有界面、测试、版本 metadata 和说明共 7 个路径变化。
-- 复用后端字节未变的 0.9.0 证据：DSH 包使用 14 个真实 Host 服务运行自动链：失败来源、反思候选、评审、客观验证、召回/采用和可信失败撤回。共 47 次合成请求，包括 6 次前台、1 次反思、4 次评审和 36 次客观验证；真实供应商请求为 0。
-- 0.9.0 独立操作系统进程冷重建通过，持久会话、学习、费用与撤回保持，不重放已完成请求。
-- 0.9.0 最终公开源码 36 项独立检查通过。先前核心/DSH 108 项回归与 Hermes 21 项集成保留原证据范围；未声称在最终包上完整重跑全部历史测试。
-- 0.9.1 的独立预算组件 2 项已重新运行，覆盖各档位、自定义值与旧配置。Hermes 字节未变，复用其 20K 窗口耗尽后重建并恢复剩余步骤、检查点身份不变的证据。
-
-以上证明受控流程和恢复行为，不证明真实模型的长期收益，也不替代各电脑的日常安装和原生窗口验收。旧版真实供应商测试只属于旧版。完整历史归属见 [VALIDATION](VALIDATION.md)。
-
-## 冻结交付件
+## 冻结安装包
 
 | 文件 | SHA-256 |
 | --- | --- |
-| `missher-dsh-mse-learning-0.9.1.tgz` | `ad219a9e04a0d7df541def71764d21f7be76f665797eddbbf3848b5053307387` |
-| `mse-learning-hermes-0.9.1.tar.gz` | `6e41f9fb913a6b353c5416769b132d75c0ded6764e85885ad512aa8476e89db5` |
-| `mse-learning-0.9.1-source.tar.gz` | `8d721328307d7bbd1b730e142683b9bc443bda95bc1a10dc1a0da2d10ceab84f` |
+| missher-dsh-mse-learning-0.10.0.tgz | 023ee5c032581f3903d981f6de8b1e988a952c0d15a5b1eb10e34bba3116dafa |
+| mse-learning-hermes-0.10.0.tar.gz | eff323f59c019af45a76e174fdc4a1f9d966ab60a021db90610429a34e8992e2 |
+| mse-learning-0.10.0-source.tar.gz | b99ae85f3c6c6069cd9a85ea807078ef37cb1d9843bdf0ab769b3a47d215b32b |
 
-Git 产品代码和测试逐字节取自冻结公开源码归档；发布阶段仅更新中英文 README、VALIDATION 与本交付说明。下载归档保留构建时的文档，当前发布状态以本说明和 Release 为准。0.9.0 保留历史 Git 标签，正式安装包从 0.9.1 提供。个人学习库、会话、凭据及本机审查材料不进入公开仓库。源码采用 MIT 许可证。
+下载包保留构建后参与验收的原始字节。源码归档含冻结时的 138 个文件；Git 另附验收完成后的说明及截图，运行代码与测试代码保持一致。历史安装包和标签继续保留，源码使用 MIT 许可证。
 
-## English summary
+## 实际界面
 
-Version 0.9.1 fixes settings-page usage mapping and separates conservative reserved budget from measured tokens. Final-package component/contract checks passed 30/30, with 2/2 independent budget checks. Unchanged backend bytes reuse the 0.9.0 synthetic DSH Host flow, cold-rebuild and source evidence. Zero real-provider requests describes isolated validation, not daily operation after a user enables automatic evaluation. Automatic evaluation is off by default with a zero token allowance; users must opt into a budget. Host support follows required capabilities and evidenced version ranges, with continued adaptation to the latest release. Verify installation separately on each computer.
+官方 npm alpha.5 的中文 Web 设置，合成数据、自动验证关闭：
+
+![官方 Web 设置](docs/images/official-alpha5-zh-r11.png)
+
+社区 alpha.2 Linux 原生桌面的英文最小窗口：
+
+![原生英文窄窗导航](docs/images/native-en-minimum-r11.png)

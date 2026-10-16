@@ -56,7 +56,7 @@ export const SOURCE_TTL_MS = 24 * 60 * 60_000
 /** Extra life a row keeps once a ticket is no longer in flight, so a late commit is not orphaned. */
 export const SOURCE_GRACE_MS = 60 * 60_000
 /** Restricted driver kinds. Only the capability this build actually PROVED may be published. */
-export const SOURCE_DRIVERS = Object.freeze(['async_openai_chat'])
+export const SOURCE_DRIVERS = Object.freeze(['async_openai_chat', 'dsh_host_stream'])
 /** The four provable reasoning states. */
 export const REASONING_STATES = Object.freeze(['explicit', 'unspecified', 'not_applicable', 'unknown'])
 /** The api modes this core understands; anything else is stored as `null` (unknown), never guessed. */

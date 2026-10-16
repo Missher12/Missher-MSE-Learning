@@ -79,6 +79,26 @@ function sign(engine, sessionId, problem, bound, control, overrides = {}) {
     controlGeneration: control, ...overrides })
 }
 
+test('the Cordis stream capability keeps protocol and endpoint unknown and refuses unknown reasoning', t => {
+  const { engine } = fixture(t)
+  const bound = publish(engine, 'dsh-stream-session', { apiMode: null, baseUrl: null,
+    reasoningState: 'explicit', reasoningValue: EFFORT, driver: 'dsh_host_stream' })
+  assert.equal(bound.published, true)
+  assert.equal(bound.driver, 'dsh_host_stream')
+  assert.equal(bound.identity.apiMode, null)
+  assert.equal(bound.identity.endpointFingerprint, null)
+  assert.equal(bound.identity.reasoningState, 'explicit')
+  assert.equal(bound.identity.reasoningValue, EFFORT)
+
+  const unknown = publish(engine, 'dsh-unknown-session', { apiMode: null, baseUrl: null,
+    reasoningState: 'unknown', reasoningValue: null, driver: 'dsh_host_stream' })
+  const problem = matureProblem(engine, 'dsh-unknown-session', unknown.routeId)
+  const planned = engine.problemRecoveryPlan({ problemId: problem.id, evidenceRevision: problem.evidenceRevision })
+  assert.equal(planned.source.driver, 'dsh_host_stream')
+  assert.equal(planned.source.gateReady, false)
+  assert.equal(planned.source.code, 'source_reasoning_unavailable')
+})
+
 test('the endpoint is stored as a fingerprint and the raw URL never reaches the document', t => {
   const { engine, document } = fixture(t)
   const published = publish(engine, 'canary-session')
