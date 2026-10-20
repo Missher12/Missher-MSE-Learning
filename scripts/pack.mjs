@@ -35,7 +35,7 @@ if (!dshOnly) {
     // Preserve every local document/image linked by either public README; exclude maintainer records.
     mkdirSync(join(plugin, 'docs/images'), { recursive: true })
     for (const name of ['README.md', 'README.en.md', 'VALIDATION.md', 'LICENSE']) cpSync(join(root, name), join(plugin, name))
-    for (const name of ['AUTONOMY_0.10.0.md', 'AUTONOMY_0.11.0.md', 'ADAPTER_PROTOCOL.md', 'BEHAVIOR.zh.md', 'DURABLE_SETTLEMENT_OUTBOX.md', 'RECALL_2026-09-30.md', 'RRSI_RESEARCH_2026-09-30.md', 'LIFECYCLE_2026-10-01.md']) cpSync(join(root, 'docs', name), join(plugin, 'docs', name))
+    for (const name of ['AUTONOMY_0.10.0.md', 'AUTONOMY_0.11.0.md', 'AUTONOMY_0.11.1.md', 'ADAPTER_PROTOCOL.md', 'BEHAVIOR.zh.md', 'DURABLE_SETTLEMENT_OUTBOX.md', 'RECALL_2026-09-30.md', 'RRSI_RESEARCH_2026-09-30.md', 'LIFECYCLE_2026-10-01.md']) cpSync(join(root, 'docs', name), join(plugin, 'docs', name))
     cpSync(join(root, 'docs/images/en-normal.png'), join(plugin, 'docs/images/en-normal.png'))
     run('tar', ['-czf', join(dist, hermesName), '-C', stage, 'mse-learning'])
   } finally { rmSync(stage, { recursive: true, force: true }) }

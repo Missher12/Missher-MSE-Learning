@@ -359,20 +359,20 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     sessionBudgetHint: '在同一会话中限制经验占用。',
     evalBudgetTitle: '模型评测额度',
     evalBudgetHint: '这里仅限制自动经验评审/客观评测，不含正常聊天或自动复盘（每日最多 3 次、每次输出 384 tokens）。档位按滚动 24 小时计算；耗尽后等待到最早一笔额度到期。已用/预留与实测分开显示，未知费用不会按 0 处理。',
-    decisionBackend: '决策后端', decisionModel: '决策模型', decisionEndpoint: '服务地址',
+    decisionBackend: '模型来源', decisionModel: '决策模型', decisionModelField: '模型名称',
+    decisionBackendHost: '跟随来源会话', decisionBackendOpenAI: 'OpenAI 兼容',
+    decisionBackendJev: 'Jev', decisionBackendLaya: 'Laya HTTP', decisionEndpoint: '服务地址',
     decisionSecretRef: '密钥环境变量名', decisionLatest: '最近候选决策',
     decisionPrimary: '主意见', decisionFallback: 'Host复核',
     decisionStates: { queued: '排队中', dispatched: '处理中', complete: '已完成', wait: '等待条件',
       failed: '失败', unknown: '费用未知' },
     decisionActions: { prioritize_validation: '优先验证', suggest_merge: '建议合并生成候选', recheck: '等待复核',
       review: '进入评审', trial: '进入试用', wait: '等待新证据', reject: '拒绝候选' },
-    decisionRoutingHint: 'Host 后端使用候选来源会话中实际记录的模型路由；远程后端使用此处配置的模型与地址。开启自动验证后，每轮最多分类一个候选并计入共享额度；只有当前证据版本获准的候选才进入现有验证计划，模型意见本身不会晋级。Jev/Laya 只提供分类意见；保存设置不会发起连接或模型请求。',
-    decisionHostModelHint: '当前使用 Host：模型名取自该经验来源会话的实际路由，此字段不生效。切换远程后端后可单独配置决策模型。',
-    decisionRemoteModelHint: '远程决策使用单独配置的模型，不改变 Host 对话模型。',
-    decisionCapability: '路由能力状态', decisionHostCapability: 'Host 路由由候选来源会话决定；本页未探测宿主连接，实际可用性在运行时核验。',
-    decisionRemoteReady: '模型和服务地址已填写；这里只核对配置完整性，未测试连接。',
-    decisionRemoteIncomplete: '远程路由缺少模型或服务地址；补齐后才会尝试分类。',
-    decisionSecretRefHint: '只填写环境变量名称。密钥内容不会显示或保存到设置页。',
+    decisionRemoteModelHint: '用于候选分类，不改变聊天模型。',
+    decisionHostCapability: '使用经验来源会话的模型，无需单独配置。',
+    decisionRemoteReady: '模型和服务地址已填写；连接尚未测试。',
+    decisionRemoteIncomplete: '填写模型和服务地址后才能分类；连接尚未测试。',
+    decisionSecretRefHint: '只填写环境变量名，密钥内容不会保存在此处。',
     decisionWhy: '本次经验建议及理由', decisionNoWhy: '暂无已完成的候选决策。', decisionCost: '本次决策费用',
     decisionScopeHint: '决策详情按项目与经验隔离，请打开具体经验查看。',
     decisionHistory: '此经验的决策记录', decisionRevision: '版本 / 证据修订', decisionOutcome: '意见状态',
@@ -695,20 +695,20 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     sessionBudgetHint: 'Caps what lessons may occupy in one session.',
     evalBudgetTitle: 'Model evaluation budget',
     evalBudgetHint: 'This cap covers automatic experience review and objective evaluation only. It excludes normal chat and automatic reflection (up to 3 per day, 384 output tokens each). The window rolls over 24 hours; exhausted work waits for the earliest reservation to expire. Reserved and measured usage are shown separately; unknown cost is never treated as zero.',
-    decisionBackend: 'Decision backend', decisionModel: 'Decision model', decisionEndpoint: 'Service endpoint',
+    decisionBackend: 'Model source', decisionModel: 'Decision model', decisionModelField: 'Model name',
+    decisionBackendHost: 'Follow source session', decisionBackendOpenAI: 'OpenAI compatible',
+    decisionBackendJev: 'Jev', decisionBackendLaya: 'Laya HTTP', decisionEndpoint: 'Service endpoint',
     decisionSecretRef: 'Secret environment variable', decisionLatest: 'Latest candidate decision',
     decisionPrimary: 'Primary opinion', decisionFallback: 'Host review',
     decisionStates: { queued: 'Queued', dispatched: 'In progress', complete: 'Complete', wait: 'Waiting',
       failed: 'Failed', unknown: 'Cost unknown' },
     decisionActions: { prioritize_validation: 'Prioritize validation', suggest_merge: 'Suggest merged candidate', recheck: 'Request recheck',
       review: 'Enter review', trial: 'Enter trial', wait: 'Wait for evidence', reject: 'Reject candidate' },
-    decisionRoutingHint: 'Host uses the model route actually recorded for the candidate’s source session; remote backends use the model and endpoint configured here. With automatic validation enabled, at most one candidate is classified per scan and charged to the shared budget. Only candidates admitted for the current evidence revision enter existing validation plans; opinions never promote a candidate. Jev/Laya provide classification only; saving settings does not connect or call a model.',
-    decisionHostModelHint: 'Host is selected: the model comes from the experience source session, so this field is inactive. Switch to a remote backend to configure a separate decision model.',
-    decisionRemoteModelHint: 'Remote decisions use this separate model and do not change the Host conversation model.',
-    decisionCapability: 'Route capability', decisionHostCapability: 'Host routing follows the candidate source session. This page has not probed the Host connection; runtime availability is checked when a decision runs.',
-    decisionRemoteReady: 'Model and endpoint are present. This checks configuration completeness only; the connection has not been tested.',
-    decisionRemoteIncomplete: 'The remote route needs both a model and endpoint before classification can run.',
-    decisionSecretRefHint: 'Enter an environment variable name only. Secret values are never shown or saved in this settings page.',
+    decisionRemoteModelHint: 'For candidate classification; does not change chat routing.',
+    decisionHostCapability: 'Uses the model from the experience source session; no separate setup is needed.',
+    decisionRemoteReady: 'Model and endpoint are filled in; the connection has not been tested.',
+    decisionRemoteIncomplete: 'Enter a model and endpoint before classification; the connection has not been tested.',
+    decisionSecretRefHint: 'Enter an environment variable name only; the secret itself is never stored here.',
     decisionWhy: 'Latest experience decision and reasons', decisionNoWhy: 'No completed candidate decision yet.',
     decisionScopeHint: 'Decision details are isolated by project and experience. Open an experience to view them.',
     decisionHistory: 'Decisions for this experience', decisionRevision: 'Version / evidence revision',
@@ -911,8 +911,16 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-row-top{align-items:flex-start}
 .mse-details .mse-row-stacked{display:block}
 .mse-details .mse-row-stacked .mse-row-side{display:flex;flex:initial;width:100%;justify-content:flex-start;flex-wrap:wrap;gap:8px 18px;max-width:100%;margin-top:8px;white-space:normal;overflow-wrap:anywhere}
-.mse-details .mse-decision-input{min-width:0;max-width:100%;box-sizing:border-box}
-.mse-details .mse-decision-capability{padding:10px 0 2px;overflow-wrap:anywhere}
+.mse-details .mse-decision-settings{width:100%;max-width:100%;min-width:0}
+.mse-details .mse-decision-settings .mse-section-title{margin:14px 0 4px;color:var(--dsw-alias-label-secondary);font-size:13px;line-height:20px;font-weight:500}
+.mse-details .mse-decision-source{width:100%;max-width:100%;min-width:0;padding:2px 0}
+.mse-details .mse-decision-source-label{display:block;margin-bottom:4px;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}
+.mse-details .mse-decision-fields{width:100%;max-width:100%;min-width:0;margin-top:4px}
+.mse-details .mse-decision-fields .mse-row{display:block;padding:7px 0;border-bottom:0}
+.mse-details .mse-decision-fields .mse-row-main{width:100%;max-width:100%;overflow-wrap:anywhere}
+.mse-details .mse-decision-fields .mse-row-side{display:block;width:100%;max-width:100%;margin-top:4px}
+.mse-details .mse-decision-input{display:block;width:100%;min-width:0;max-width:100%;box-sizing:border-box}
+.mse-details .mse-decision-status{margin:4px 0 10px;padding:2px 0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px;overflow-wrap:anywhere}
 .mse-details .mse-coverage-list{display:flex;flex-wrap:wrap;align-items:flex-start;gap:6px 18px;min-width:0;max-width:100%}
 .mse-details .mse-coverage-item{min-width:0;overflow-wrap:anywhere}
 .mse-details .mse-row:last-child{border-bottom:none}
@@ -962,6 +970,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-picker-filter{max-width:140px}
 .mse-details .mse-picker-filter .mse-picker-label{max-width:104px}
 .mse-details .mse-picker-wide,.mse-details .mse-picker-wide .mse-picker-trigger{width:100%}
+.mse-details .mse-decision-source .mse-picker-wide{width:100%;max-width:100%}
 .mse-details .mse-scope .mse-picker-scope{width:245px;max-width:calc(100% - 58px)}
 .mse-details .mse-toolbar{display:flex;gap:8px;margin:12px 0 6px;align-items:center;min-width:0}
 .mse-details .mse-search{flex:1;min-width:0}
@@ -1548,7 +1557,11 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     }
     for (const [key, max] of [['decisionModel', 128], ['decisionEndpoint', 2048], ['decisionSecretRef', 256]]) {
       const saved = typeof value?.[key] === 'string' ? value[key] : ''
-      const next = typeof draft[key] === 'string' ? draft[key].trim() : null
+      const raw = typeof draft[key] === 'string' ? draft[key] : null
+      // Hidden remote fields stay exactly as stored when the operator changes only the backend.
+      // Once a field itself changes, keep the same trimming and validation rules as before.
+      if (raw === saved) continue
+      const next = raw === null ? null : raw.trim()
       if (next === null || [...next].length > max || (key === 'decisionSecretRef' && next
         && !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(next))) problems.push(`${key} invalid`)
       else if (next !== saved) ops.push({ op: 'set', path: [key], value: next })
@@ -2484,7 +2497,6 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         `${codeLabel(dict, currentRecall.payload.sessionError)}（${currentRecall.payload.sessionError}）`) : null,
       sectionTitle('e', dict.evalBudgetTitle),
       h('p', { key: 'ed', className: 'mse-hint' }, dict.evalBudgetHint),
-      h('p', { key: 'decision-hint', className: 'mse-hint' }, dict.decisionRoutingHint),
       draft === null ? h('p', { key: 'l', className: 'mse-note' }, dict.loading) : h('div', { key: 'rows' }, [
         h('p', { key: 'tier-label', className: 'mse-hint' }, fill(dict.evalTierStatus,
           { tier: draftTier?.label ?? dict.evalTierCustom })),
@@ -2500,28 +2512,40 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           h(Input, { type: 'number', min: 0, max: EVAL_CALLS_MAX, step: 1, disabled: !writable,
             className: 'mse-num', 'aria-label': dict.evalCalls, value: draft.values.evaluationCallsPerDay,
             onChange: event => edit({ evaluationCallsPerDay: event.target.value }) })),
-        filterSelect(dict.decisionBackend, [['host', 'Host LLM'], ['openai_compatible', 'OpenAI-compatible'],
-          ['jev', 'Jev'], ['laya', 'Laya HTTP']], draft.values.decisionBackend,
-        decisionBackend => edit({ decisionBackend })),
-        row('decision-capability', dict.decisionCapability, null,
-          h('p', { className: 'mse-decision-capability mse-hint', role: 'status' },
-            draft.values.decisionBackend === 'host' ? dict.decisionHostCapability
-              : draft.values.decisionModel.trim() !== '' && draft.values.decisionEndpoint.trim() !== ''
-                ? dict.decisionRemoteReady : dict.decisionRemoteIncomplete), { stacked: true }),
-        row('decision-model', dict.decisionModel,
-          draft.values.decisionBackend === 'host' ? dict.decisionHostModelHint : dict.decisionRemoteModelHint,
-          h(Input, { disabled: !writable || draft.values.decisionBackend === 'host', maxLength: 128,
-          className: 'mse-decision-input', 'aria-label': dict.decisionModel, value: draft.values.decisionModel,
-          onChange: event => edit({ decisionModel: event.target.value }) }), { stacked: true }),
-        row('decision-endpoint', dict.decisionEndpoint, null, h(Input, {
-          disabled: !writable || draft.values.decisionBackend === 'host', maxLength: 2048,
-          className: 'mse-decision-input', inputMode: 'url', 'aria-label': dict.decisionEndpoint,
-          value: draft.values.decisionEndpoint,
-          onChange: event => edit({ decisionEndpoint: event.target.value }) }), { stacked: true }),
-        row('decision-secret', dict.decisionSecretRef, dict.decisionSecretRefHint,
-          h(Input, { disabled: !writable || draft.values.decisionBackend === 'host', maxLength: 256,
-            className: 'mse-decision-input', 'aria-label': dict.decisionSecretRef, value: draft.values.decisionSecretRef,
-            onChange: event => edit({ decisionSecretRef: event.target.value }) }), { stacked: true }),
+        h('div', { key: 'decision-settings', className: 'mse-decision-settings' }, [
+          sectionTitle('decision-title', dict.decisionModel),
+          h('div', { key: 'decision-source', className: 'mse-decision-source' }, [
+            h('span', { key: 'label', className: 'mse-decision-source-label' }, dict.decisionBackend),
+            h(Picker, { key: 'picker', label: dict.decisionBackend, value: draft.values.decisionBackend,
+              options: [
+                { id: 'host', label: dict.decisionBackendHost },
+                { id: 'openai_compatible', label: dict.decisionBackendOpenAI },
+                { id: 'jev', label: dict.decisionBackendJev },
+                { id: 'laya', label: dict.decisionBackendLaya },
+              ], onChange: decisionBackend => edit({ decisionBackend }), disabled: !writable,
+              testId: 'decision-source', className: 'mse-picker-wide' }),
+          ]),
+          draft.values.decisionBackend === 'host'
+            ? h('p', { key: 'decision-status', className: 'mse-decision-status', role: 'status' },
+              dict.decisionHostCapability)
+            : h('div', { key: 'decision-fields', className: 'mse-decision-fields' }, [
+              row('decision-model', dict.decisionModelField, dict.decisionRemoteModelHint,
+                h(Input, { disabled: !writable, maxLength: 128, className: 'mse-decision-input',
+                  'aria-label': dict.decisionModelField, value: draft.values.decisionModel,
+                  onChange: event => edit({ decisionModel: event.target.value }) }), { stacked: true }),
+              row('decision-endpoint', dict.decisionEndpoint, null, h(Input, {
+                disabled: !writable, maxLength: 2048, className: 'mse-decision-input', inputMode: 'url',
+                'aria-label': dict.decisionEndpoint, value: draft.values.decisionEndpoint,
+                onChange: event => edit({ decisionEndpoint: event.target.value }) }), { stacked: true }),
+              row('decision-secret', dict.decisionSecretRef, dict.decisionSecretRefHint,
+                h(Input, { disabled: !writable, maxLength: 256, className: 'mse-decision-input',
+                  'aria-label': dict.decisionSecretRef, value: draft.values.decisionSecretRef,
+                  onChange: event => edit({ decisionSecretRef: event.target.value }) }), { stacked: true }),
+              h('p', { key: 'decision-status', className: 'mse-decision-status', role: 'status' },
+                draft.values.decisionModel.trim() !== '' && draft.values.decisionEndpoint.trim() !== ''
+                  ? dict.decisionRemoteReady : dict.decisionRemoteIncomplete),
+            ]),
+        ]),
         saveRow,
       ]),
       disclosure('usage', dict.evalUsageTitle, [

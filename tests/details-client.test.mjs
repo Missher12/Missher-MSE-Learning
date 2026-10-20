@@ -820,6 +820,87 @@ const hostCalls = payloads => async (method, input) => ({ ok: true, value: metho
 const RENDER_FORM = { getSnapshot: () => ({ status: 'ready', writable: true, mode: 'host', revision: 1,
   value: { ...READY_VALUES } }), subscribe: () => () => {}, mutate: () => true }
 
+test('decision model settings preserve remote drafts across Host and save only the backend change', async () => {
+  const { registration, module: mod } = loadClient()
+  const remoteValues = { ...READY_VALUES, decisionBackend: 'laya', decisionModel: ` ${'model-'.repeat(15)} `,
+    decisionEndpoint: ` https://example.test/${'route/'.repeat(90)} `, decisionSecretRef: 'MSE_DECISION_KEY' }
+  let snapshot = { status: 'ready', writable: true, mode: 'host', revision: 37, value: remoteValues }
+  const writes = []
+  const form = { getSnapshot: () => snapshot, subscribe: () => () => {},
+    mutate: async (ops, revision) => { writes.push({ ops, revision }); return true } }
+  const call = hostCalls({ overview: { ok: true, version: 'test', runtime: 'dsh',
+    budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 }, counts: {},
+    store: { readable: true, schema: 2 } } })
+  let phase = 0
+  await renderPanel(registration, { locale: 'zh', initialTab: 'budget', call, control: undefined, form }, 20,
+    ({ nodes }) => {
+      const picker = nodes.find(node => typeof node.type === 'function' && node.props?.testId === 'decision-source')
+      if (picker === undefined) return false
+      const decisionInputs = nodes.filter(node => node.type?.uiName === 'Input'
+        && node.props?.className === 'mse-decision-input')
+      if (phase === 0) {
+        assert.equal(picker.props.label, mod.__test.zh.decisionBackend)
+        assert.equal(picker.props.disabled, false)
+        const visibleSourceLabel = nodes.find(node => node.props?.className === 'mse-decision-source-label')
+        assert.equal(visibleSourceLabel.children[0], mod.__test.zh.decisionBackend)
+        const modelHeading = nodes.find(node => node.props?.key === 'decision-title')
+        assert.ok(JSON.stringify(modelHeading).includes(mod.__test.zh.decisionModel))
+        assert.deepEqual(picker.props.options.map(option => option.label), [mod.__test.zh.decisionBackendHost,
+          mod.__test.zh.decisionBackendOpenAI, mod.__test.zh.decisionBackendJev, mod.__test.zh.decisionBackendLaya])
+        assert.equal(decisionInputs.length, 3)
+        assert.deepEqual(decisionInputs.map(node => node.props['aria-label']).sort(), [mod.__test.zh.decisionModelField,
+          mod.__test.zh.decisionEndpoint, mod.__test.zh.decisionSecretRef].sort())
+        picker.props.onChange('host')
+        phase = 1
+        return false
+      }
+      if (phase === 1) {
+        assert.equal(decisionInputs.length, 0, 'Host hides model, endpoint and secret fields')
+        const status = nodes.find(node => node.props?.className === 'mse-decision-status')
+        assert.ok(status)
+        assert.equal(status.children[0], mod.__test.zh.decisionHostCapability)
+        assert.ok(status.children[0].includes('使用经验来源会话的模型，无需单独配置'))
+        const save = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === mod.__test.zh.save)
+        if (save === undefined || save.props.disabled) return false
+        save.props.onClick()
+        phase = 2
+        return false
+      }
+      if (phase === 2) {
+        if (writes.length === 0) return false
+        assert.deepEqual(writes[0], { revision: 37,
+          ops: [{ op: 'set', path: ['decisionBackend'], value: 'host' }] })
+        picker.props.onChange('laya')
+        phase = 3
+        return false
+      }
+      if (phase === 3) {
+        const byLabel = new Map(decisionInputs.map(node => [node.props['aria-label'], node.props.value]))
+        if (decisionInputs.length !== 3) return false
+        assert.equal(byLabel.get(mod.__test.zh.decisionModelField), remoteValues.decisionModel)
+        assert.equal(byLabel.get(mod.__test.zh.decisionEndpoint), remoteValues.decisionEndpoint)
+        assert.equal(byLabel.get(mod.__test.zh.decisionSecretRef), remoteValues.decisionSecretRef)
+        const status = nodes.find(node => node.props?.className === 'mse-decision-status')
+        assert.equal(status.children[0], mod.__test.zh.decisionRemoteReady)
+        assert.ok(mod.__test.en.decisionRemoteReady.includes('not been tested'))
+        assert.match(SOURCE, /\.mse-decision-input\{display:block;width:100%;min-width:0;max-width:100%;box-sizing:border-box\}/u)
+        assert.match(SOURCE, /\.mse-decision-source \.mse-picker-wide\{width:100%;max-width:100%\}/u)
+        phase = 4
+        return true
+      }
+      return true
+    })
+  assert.equal(phase, 4, 'the remote → Host → remote interaction completed in the same draft')
+  assert.equal(writes.length, 1)
+
+  snapshot = { ...snapshot, writable: false }
+  const readOnly = await renderPanel(registration, { locale: 'zh', initialTab: 'budget', call,
+    control: undefined, form }, 10)
+  const readOnlyPicker = elementsOf(readOnly)
+    .find(node => typeof node.type === 'function' && node.props?.testId === 'decision-source')
+  assert.equal(readOnlyPicker.props.disabled, true, 'the Host Picker remains disabled without write access')
+})
+
 test('the verification-session row never invents a session and states what is saved', () => {
   const { module: mod } = loadClient()
   const { zh, en, verificationSession, defaultDraft, diffOps } = mod.__test

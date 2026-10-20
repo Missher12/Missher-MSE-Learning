@@ -4,15 +4,15 @@ English | [中文](README.md) · [Desktop and downloads](https://github.com/Miss
 
 Persists scoped user corrections and method candidates for DSH, recalls relevant lessons within a byte budget, and records adoption and verification established by the trusted host. It does not train model weights or guarantee that a model will never repeat a mistake.
 
-Package: `@missher/dsh-mse-learning`, version **0.11.0**. It adds controlled merged-candidate generation, resumable decisions, and a once-only recovery path for a known, settled reflection failure. Opinions never grant verification or promotion credit. The frozen source, all three packages and the native recovery path passed their scoped acceptance checks. See [delivery status and checksums](PUBLICATION.md) and [validation evidence](VALIDATION.md).
+Package: `@missher/dsh-mse-learning`, version **0.11.1**. Decision model settings now show a short explanation when following the source session and reveal model, endpoint and secret-variable fields for remote services. Switching preserves drafts, with consistent field widths and spacing. All 31 client checks and the scoped Chinese/English native UI checks passed; learning core, budgets and model calls are unchanged. See [release notes](docs/AUTONOMY_0.11.1.md), [delivery status and checksums](PUBLICATION.md), and [validation evidence](VALIDATION.md).
 
-The host-title session pickers from alpha.17 remain. Titles are display-only and do not alter scope, recall identity or budgets. This upgrade changes the shared core; DSH scheduling does not establish equivalent lifecycle integration for every Agent. The historical `dsh-missher-evolution` package is a separate product; this plugin does not read or migrate its data.
+The host-title session pickers from alpha.17 remain. Titles are display-only and do not alter scope, recall identity or budgets. DSH scheduling does not establish equivalent lifecycle integration for every Agent. The historical `dsh-missher-evolution` package is a separate product; this plugin does not read or migrate its data.
 
 ## Features and cost
 
 - Capture explicit corrections from host-authenticated user input; recall them by scope, supported applicability conditions and remaining budget.
 - Keep inferred methods as candidates; safety review can admit a limited trial, while objective evidence is required for validation within a declared domain.
-- The 0.11.0 source candidate can generate a new candidate from two lessons in the same registered verifier domain and conditions; Core rechecks parents, source, budget and controls. Generation does not validate a lesson.
+- Since 0.11.0, the shared core can generate a new candidate from two lessons in the same registered verifier domain and conditions; Core rechecks parents, source, budget and controls. Generation does not validate a lesson.
 - Use **Settings → 自我进化 (Self-evolution)** for lessons, recall explanations, pause/resume, manual review, budgets and actual control acknowledgement.
 - Recover acknowledged completion settlements after restart without rerunning models or tools or crediting a result twice.
 - `/mse` shows status, `/mse why` explains recent recall, and `/mse now <task>` provides a read-only preview. They use the host command service instead of ordinary model messages.
@@ -46,9 +46,11 @@ Defaults remain **automatic validation off, token allowance 0 and task allowance
 
 ## Settings screenshot
 
-MSE 0.11.0 settings on an isolated Ubuntu community rc.2 desktop, with synthetic data and both background switches off. This is an actual native screenshot; it does not establish a pure-official desktop or other-platform acceptance.
+Actual 0.11.1 settings on an isolated Ubuntu community 0.2.1-rc.2 desktop, using synthetic data with reflection and automatic validation off. Actual content widths were approximately 311 and 559 pixels. These screenshots do not establish native display behavior on other platforms.
 
-![MSE 0.11.0 settings](docs/images/native-rc2-0.11.0-settings.png)
+![Follow-source settings](docs/images/native-rc2-0.11.1-host.png)
+
+![Remote model settings after saving](docs/images/native-rc2-0.11.1-remote.png)
 
 ## Evidence and platform boundaries
 
@@ -92,7 +94,7 @@ Use a fresh source copy or output directory for each build; packers reject exist
 
 [Autonomy implementation notes](docs/AUTONOMY_0.10.0.md) · [Adapter protocol](docs/ADAPTER_PROTOCOL.md) · [Durable settlement](docs/DURABLE_SETTLEMENT_OUTBOX.md) · [Detailed behavior, Chinese](docs/BEHAVIOR.zh.md)
 
-Arbitrary free-form Chinese conditions are not reliably understood; unclear conditions conservatively block recall. Unacknowledged work and manual model jobs do not have a cross-crash durability guarantee. Tests, readable settings and growing counters do not establish long-term model improvement. R6's bounded real-provider record is listed in [Validation](VALIDATION.md): only 2/5 Laya semantic cases matched expectations, and the decision labels were sensitive to wording. This does not establish long-term improvement or paid objective two-arm validation. The alpha.2 screenshot shows synthetic English settings only; it is separate from native UI and daily-install evidence.
+Arbitrary free-form Chinese conditions are not reliably understood; unclear conditions conservatively block recall. Unacknowledged work and manual model jobs do not have a cross-crash durability guarantee. Tests, readable settings and growing counters do not establish long-term model improvement. R6's bounded real-provider record is listed in [Validation](VALIDATION.md): only 2/5 Laya semantic cases matched expectations, and the decision labels were sensitive to wording. This does not establish long-term improvement or paid objective two-arm validation. Current screenshots and native interaction evidence come from an isolated Ubuntu community 0.2.1-rc.2 desktop; the old alpha.2 screenshot is historical.
 
 ## License and attribution
 
