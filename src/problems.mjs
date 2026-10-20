@@ -61,6 +61,11 @@ export const PROBLEM_CONSIDER_CURSOR_MAX = 4096
 export const SOURCE_DEFER_MS = 30 * 60_000
 /** Longest a host may defer a recoverable problem for a missing/unconfirmable source fact. */
 export const PROBLEM_DEFER_MAX_MS = 6 * 60 * 60_000
+/** Fixed output contract for newly issued problem-recovery reflections. */
+export const PROBLEM_RECOVERY_OUTPUT_POLICY = 'problem-recovery-reflection-v1'
+export const PROBLEM_RECOVERY_OUTPUT_TOKENS = 2048
+/** The legacy cap accepted only by the explicit, receipt-backed one-time repair entry point. */
+export const LEGACY_PROBLEM_RECOVERY_OUTPUT_TOKENS = 384
 /**
  * Restricted vocabulary for "a fact this host had to confirm was not there". A host may park a
  * recoverable problem with one of these and a POSITIVE wait; nothing else may be written as a
@@ -226,17 +231,55 @@ export function problemOriginOf(input, fallbackAt) {
     at: Number.isFinite(fallbackAt) ? fallbackAt : 0 }
 }
 
+/** Validate the durable, one-time legacy recovery authorization carried by its problem row. */
+function recoveryRepairValid(problemId, authorization) {
+  if (!isPlainObject(authorization) || !Object.keys(authorization).every(key => ['policy', 'problemId',
+    'evidenceRevision', 'priorTicket', 'authorizationId', 'authorizationRef', 'failureCode', 'finishKind',
+    'priorMaxTokens', 'priorUsage', 'state', 'authorizedAt', 'retryTicket', 'consumedAt',
+    'supersededAt'].includes(key))) return false
+  const usage = authorization.priorUsage
+  const base = authorization.policy === 'problem-recovery-reflection-repair-v1'
+    && authorization.problemId === problemId && Number.isSafeInteger(authorization.evidenceRevision)
+    && authorization.evidenceRevision >= 0
+    && bounded(authorization.priorTicket, 64) && /^[a-z0-9][a-z0-9-]{7,95}$/u.test(authorization.authorizationId)
+    && hex64(authorization.authorizationRef) && authorization.failureCode === 'reflection_invalid_json'
+    && authorization.finishKind === 'not_retained'
+    && authorization.priorMaxTokens === LEGACY_PROBLEM_RECOVERY_OUTPUT_TOKENS
+    && isPlainObject(usage) && Object.keys(usage).every(key => ['known', 'promptTokens', 'completionTokens',
+      'totalTokens'].includes(key)) && usage.known === true
+    && Number.isSafeInteger(usage.promptTokens) && usage.promptTokens >= 0
+    && usage.completionTokens === LEGACY_PROBLEM_RECOVERY_OUTPUT_TOKENS
+    && Number.isSafeInteger(usage.totalTokens)
+    && usage.totalTokens === usage.promptTokens + usage.completionTokens
+    && Number.isFinite(authorization.authorizedAt)
+  if (!base) return false
+  if (authorization.state === 'authorized') {
+    return authorization.retryTicket === undefined && authorization.consumedAt === undefined
+      && authorization.supersededAt === undefined
+  }
+  if (authorization.state === 'consumed') {
+    return bounded(authorization.retryTicket, 64) && Number.isFinite(authorization.consumedAt)
+      && authorization.supersededAt === undefined
+  }
+  if (authorization.state === 'superseded') {
+    return authorization.retryTicket === undefined && authorization.consumedAt === undefined
+      && Number.isFinite(authorization.supersededAt)
+  }
+  return false
+}
+
 /** Whether a stored problem row passes every bounded shape rule. */
 export function problemRowValid(row) {
   return isPlainObject(row)
     && Object.keys(row).every(key => ['id', 'key', 'kind', 'state', 'source', 'scope', 'environment', 'owner',
       'taskClass', 'toolName', 'failureClass', 'summary', 'evidenceRevision', 'attemptedRevision',
       'lessonId', 'lessonVersion', 'evidence', 'count', 'firstAt', 'lastAt', 'updatedAt', 'reason',
-      'nextAttemptAt', 'ticket', 'origin'].includes(key))
+      'nextAttemptAt', 'ticket', 'origin', 'recoveryRepair'].includes(key))
     // `origin` is written by this build for every NEW row and tolerated as ABSENT for a document
     // written before it existed: an old store must keep validating (it simply has nothing to
     // recover from, and the plan says so instead of borrowing a route).
     && (row.origin === undefined || row.origin === null || problemOriginValid(row.origin))
+    && (row.recoveryRepair === undefined || recoveryRepairValid(row.id, row.recoveryRepair))
     && hex64(row.id) && hex64(row.key) && PROBLEM_KINDS.includes(row.kind) && PROBLEM_STATES.includes(row.state)
     && PROBLEM_SOURCES.includes(row.source) && hex64(row.scope) && hex64(row.environment) && hex64(row.owner)
     && (row.taskClass === null || bounded(row.taskClass, 64)) && (row.toolName === null || bounded(row.toolName, 64))
@@ -338,6 +381,9 @@ export function observeInState(state, now, input) {
   row.evidenceRevision += 1
   row.lastAt = now
   row.updatedAt = now
+  if (row.recoveryRepair?.state === 'authorized') {
+    row.recoveryRepair = { ...row.recoveryRepair, state: 'superseded', supersededAt: now }
+  }
   // A reflection is IN FLIGHT: the new fact is counted, but the current ticket, attempted revision
   // and state stay untouched — a second reflection over the same problem must not start while the
   // first is still authorised. The settling result decides what the new evidence means.
@@ -371,18 +417,34 @@ export function observeInState(state, now, input) {
  * across a day boundary, and not after an abstention, a timeout, a cancellation or an unknown
  * usage. Only genuinely NEW independent host evidence advances the revision and buys a new chance.
  */
-export function problemRecoverable(row) {
-  return problemRecoveryRefusal(row) === null
+export function problemRecoverable(row, authorization = row.recoveryRepair ?? null) {
+  return problemRecoveryRefusal(row, authorization) === null
 }
 
 /** The bounded reason a row cannot be attempted right now, or `null` when it can. */
-export function problemRecoveryRefusal(row) {
+function repairRetryAuthorized(row, authorization) {
+  const usage = authorization?.priorUsage
+  const recoverableWait = (row.state === 'waiting_evidence'
+      && (row.reason === 'reflection_interrupted' || PROBLEM_DEFER_CODES.includes(row.reason)))
+    || (row.state === 'waiting_budget'
+      && (row.reason === 'reflection_budget' || PROBLEM_DEFER_CODES.includes(row.reason)))
+  return recoveryRepairValid(row.id, authorization)
+    && authorization.evidenceRevision === row.evidenceRevision
+    && recoverableWait
+    && row.evidenceRevision === row.attemptedRevision && row.ticket === null && row.lessonId === null
+    && usage.known === true
+    && authorization.state === 'authorized' && Number.isFinite(authorization.authorizedAt)
+}
+
+/** The bounded reason a row cannot be attempted right now, or `null` when it can. */
+export function problemRecoveryRefusal(row, authorization = row.recoveryRepair ?? null) {
   if (!REFLECTABLE_KINDS.has(row.kind)) return 'problem_kind_not_reflectable'
   if (row.state === 'reflecting') return 'reflection_in_flight'
   if (row.state === 'closed') return 'problem_closed'
   if (row.evidenceRevision < INDEPENDENT_THRESHOLD) return 'evidence_below_threshold'
-  if (row.evidenceRevision <= row.attemptedRevision) return 'revision_already_attempted'
-  if (!['eligible', 'observed', 'waiting_budget'].includes(row.state)) return 'problem_not_eligible'
+  const repairRetry = repairRetryAuthorized(row, authorization)
+  if (row.evidenceRevision <= row.attemptedRevision && !repairRetry) return 'revision_already_attempted'
+  if (!['eligible', 'observed', 'waiting_budget'].includes(row.state) && !repairRetry) return 'problem_not_eligible'
   return null
 }
 
@@ -394,13 +456,13 @@ export function problemRecoveryRefusal(row) {
  * not re-charged on its own) and an elapsed wait. A `waiting_budget` problem whose cooldown has
  * passed is asked again: the daily/cooldown gate re-reads live budget inside the request.
  */
-export function reflectionReady(row, now) {
-  return problemRecoverable(row) && now >= row.nextAttemptAt
+export function reflectionReady(row, now, authorization = row.recoveryRepair ?? null) {
+  return problemRecoverable(row, authorization) && now >= row.nextAttemptAt
 }
 
 /** Bind a reflection ticket to the problem INSIDE the same transaction that issued the ticket. */
-export function beginReflectionInState(row, now, ticket) {
-  check(row.ticket === null && reflectionReady(row, now), 'problem_not_reflectable')
+export function beginReflectionInState(row, now, ticket, authorization = row.recoveryRepair ?? null) {
+  check(row.ticket === null && reflectionReady(row, now, authorization), 'problem_not_reflectable')
   row.state = 'reflecting'
   row.attemptedRevision = row.evidenceRevision
   row.ticket = ticket
@@ -512,14 +574,16 @@ export function closeInState(row, now, reason) {
  * Writes nothing, calls no model and never injects lesson text or summaries into a task. The
  * `reason`/`nextAction` fields are what an operator needs to see when nothing is moving.
  */
-export function problemStatusView(loop, { now, owner, scope, limit = 20 } = {}) {
+export function problemStatusView(loop, { now, owner, scope, limit = 20, recoveryAuthorizations = new Map() } = {}) {
+  const authorizationFor = row => recoveryAuthorizations.get(row.id) ?? null
   const scoped = loop.problems.filter(row => row.owner === owner
     && (scope === undefined || row.scope === scope))
   const byState = Object.fromEntries(PROBLEM_STATES.map(state => [state, 0]))
   for (const row of scoped) byState[row.state] += 1
   const view = row => {
-    const ready = reflectionReady(row, now)
-    const refusal = problemRecoveryRefusal(row)
+    const authorization = authorizationFor(row)
+    const ready = reflectionReady(row, now, authorization)
+    const refusal = problemRecoveryRefusal(row, authorization)
     const nextAction = row.state === 'reflecting' ? 'reflection_in_flight'
       : ready ? 'reflection_ready'
       // A row that is recoverable but parked says WHICH fact it is waiting for and until when,
@@ -539,6 +603,10 @@ export function problemStatusView(loop, { now, owner, scope, limit = 20 } = {}) 
       count: row.count, firstAt: row.firstAt, lastAt: row.lastAt,
       lessonId: row.lessonId, lessonVersion: row.lessonVersion, recoverable: refusal === null, refusal,
       ready, reason: row.reason, nextAction, nextAttemptAt: row.nextAttemptAt,
+      recoveryRetry: authorization === null ? null : { policy: authorization.policy,
+        priorTicket: authorization.priorTicket, authorizationId: authorization.authorizationId,
+        authorizationRef: authorization.authorizationRef,
+        status: authorization.state, authorizedAt: authorization.authorizedAt },
       // The binding is reported as BOUNDED FACTS, never as the raw material a model would see: the
       // session handle and the frozen route are what a recovery needs, and the summary is not part
       // of this view at all (a status read must not become a prompt).
@@ -550,8 +618,8 @@ export function problemStatusView(loop, { now, owner, scope, limit = 20 } = {}) 
       evidence: row.evidence.slice(-EVIDENCE_LIMIT) }
   }
   return { ok: true, format: loop.format, total: loop.problems.length, scoped: scoped.length,
-    recoverable: scoped.filter(row => problemRecoverable(row)).length,
-    due: scoped.filter(row => reflectionReady(row, now)).length,
+    recoverable: scoped.filter(row => problemRecoverable(row, authorizationFor(row))).length,
+    due: scoped.filter(row => reflectionReady(row, now, authorizationFor(row))).length,
     dedupeWindow: SEEN_EVENT_TTL_MS, dedupeCapacity: SEEN_EVENT_LIMIT, dedupeActive: loop.seenEvents.length,
     byState, rows: scoped.slice(-limit).map(view) }
 }
@@ -588,8 +656,9 @@ export function problemConsiderValid(state) {
 }
 
 /** The recoverable rows of one owner, in the ONE stable ranking the feed rotates over. */
-export function rankedRecoverableProblems(loop, owner) {
-  return loop.problems.filter(row => row.owner === owner && problemRecoverable(row))
+export function rankedRecoverableProblems(loop, owner, recoveryAuthorizations = new Map()) {
+  return loop.problems.filter(row => row.owner === owner
+    && problemRecoverable(row, recoveryAuthorizations.get(row.id) ?? null))
     .sort((left, right) => (left.nextAttemptAt - right.nextAttemptAt) || (left.lastAt - right.lastAt)
       || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
 }
@@ -602,8 +671,10 @@ export function rankedRecoverableProblems(loop, owner) {
  * right now (`due`): a pass may consider a not-yet-due row and must not attempt it — that is what
  * keeps a parked row from becoming a hot scan while still moving the watermark forward.
  */
-export function problemFeedView(loop, { now, owner, limit = PROBLEM_FEED_LIMIT, cursor = 0 } = {}) {
-  const ranked = rankedRecoverableProblems(loop, owner)
+export function problemFeedView(loop, { now, owner, limit = PROBLEM_FEED_LIMIT, cursor = 0,
+  recoveryAuthorizations = new Map() } = {}) {
+  const authorizationFor = row => recoveryAuthorizations.get(row.id) ?? null
+  const ranked = rankedRecoverableProblems(loop, owner, recoveryAuthorizations)
   const start = ranked.length === 0 ? 0 : Math.max(0, cursor) % ranked.length
   const rotated = ranked.length === 0 ? [] : [...ranked.slice(start), ...ranked.slice(0, start)]
   const rows = rotated.slice(0, limit).map(row => ({
@@ -611,7 +682,11 @@ export function problemFeedView(loop, { now, owner, limit = PROBLEM_FEED_LIMIT, 
     taskClass: row.taskClass, toolName: row.toolName, failureClass: row.failureClass,
     evidenceRevision: row.evidenceRevision, attemptedRevision: row.attemptedRevision, count: row.count,
     firstAt: row.firstAt, lastAt: row.lastAt, reason: row.reason, nextAttemptAt: row.nextAttemptAt,
-    due: reflectionReady(row, now),
+    due: reflectionReady(row, now, authorizationFor(row)),
+    recoveryRetry: authorizationFor(row) === null ? null : {
+      policy: authorizationFor(row).policy, priorTicket: authorizationFor(row).priorTicket,
+      authorizationId: authorizationFor(row).authorizationId,
+      authorizationRef: authorizationFor(row).authorizationRef },
     origin: row.origin === undefined || row.origin === null ? null
       : { sessionId: row.origin.sessionId, turnHash: row.origin.turnHash,
         provider: row.origin.provider, model: row.origin.model, reasoningEffort: row.origin.reasoningEffort,
@@ -622,7 +697,7 @@ export function problemFeedView(loop, { now, owner, limit = PROBLEM_FEED_LIMIT, 
   return { rows, cursor: start, eligible: ranked.length, due: rows.filter(row => row.due).length,
     // Due rows in the WHOLE ranking, not only in the window: a rotated window that happens to start
     // inside the parked segment must still be able to tell that real work is waiting outside it.
-    dueTotal: ranked.filter(row => reflectionReady(row, now)).length,
+    dueTotal: ranked.filter(row => reflectionReady(row, now, authorizationFor(row))).length,
     nextDueAt: Number.isFinite(upcoming) ? upcoming : null, now }
 }
 

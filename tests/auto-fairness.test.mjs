@@ -72,6 +72,25 @@ function makeFixture(label, { tokens = 1_000_000 } = {}) {
         ...(m.route ? { route: m.route } : {}) } },
     route: ({ lessonId }) => metadata.get(lessonId).route,
     log: () => {},
+    ...(tokens === 0 ? { decisionRunner: async lesson => {
+      const projectKey = metadata.get(lesson.id).projectKey
+      const facts = engine.decisionContext({ lessonId: lesson.id, projectKey })
+      const evidence = { candidateId: facts.candidateId, version: facts.version, kind: facts.kind,
+        status: facts.status, methodRegistered: facts.methodRegistered, candidateSummary: facts.candidateSummary,
+        applicability: facts.applicability, exclusions: facts.exclusions, validators: facts.validators,
+        registeredChecker: facts.registeredChecker, evidenceCount: facts.evidenceCount,
+        counterEvidenceCount: facts.counterEvidenceCount, counterEvidenceState: facts.counterEvidenceState,
+        evidenceCapacityWaiting: facts.evidenceCapacityWaiting, evidenceRefs: facts.evidenceRefs,
+        refs: facts.evidenceRefs }
+      const request = engine.decisionRequest({ candidateId: facts.candidateId, version: facts.version,
+        evidenceRevision: facts.evidenceRevision, projectHash: facts.projectHash, evidence,
+        ruleVersion: 'experience-upgrade-v1', role: 'candidate-routing', backend: 'host',
+        provider: metadata.get(lesson.id).route.provider, model: metadata.get(lesson.id).route.model,
+        apiMode: 'host_llm_stream', reasoningEffort: 'max',
+        inputTokens: Math.max(1, Buffer.byteLength(JSON.stringify(evidence), 'utf8')), outputTokens: 512 })
+      return { ok: false, code: request.code ?? request.record?.error ?? 'decision_waiting',
+        decisionId: request.identity?.key ?? request.record?.key ?? null }
+    } } : {}),
     callModel: async request => {
       active += 1
       try {
@@ -267,7 +286,7 @@ test('phase2: every physical request carries its own alternating project/session
   } finally { await f.cleanup() }
 })
 
-test('phase2: zero budget stays separate from fairness — plans registered, 0 physical calls', async () => {
+test('phase2: zero budget persists decision waits and registers no executable plans', async () => {
   const f = makeFixture('zero-budget', { tokens: 0 })
   try {
     for (let i = 0; i < 16; i++) f.add()
@@ -275,7 +294,11 @@ test('phase2: zero budget stays separate from fairness — plans registered, 0 p
     await f.restart()
     await f.scan()
     assert.equal(f.calls.length, 0, 'no physical provider request with zero budget')
-    assert.ok(f.planCount() > 0, 'registration itself is free and must still happen')
+    assert.equal(f.planCount(), 0, 'a candidate without an admitted decision is not executable')
+    const decisions = f.engine().store.read().decisionRecords
+    assert.ok(decisions.length > 0, 'the failed classification is persisted for the candidate edition')
+    assert.ok(decisions.every(row => row.state === 'wait' && row.error === 'evaluation_budget'),
+      'budget exhaustion remains a durable decision wait')
     assert.ok(f.maxActive() <= 1)
   } finally { await f.cleanup() }
 })
@@ -614,7 +637,7 @@ test('rev2: reads (feed, facts, plans, status) never write the store document', 
   } finally { await f.cleanup() }
 })
 
-test('rev2: rotation with a zero budget registers free plans but issues zero provider calls', async () => {
+test('rev2: zero-budget decision waits rotate fairly across candidates without plans or provider calls', async () => {
   const f = makeFixture('zero-budget-rotation', { tokens: 0 })
   try {
     const ids = Array.from({ length: 48 }, () => f.add())
@@ -625,7 +648,12 @@ test('rev2: rotation with a zero budget registers free plans but issues zero pro
       await f.scan(32)
     }
     assert.equal(f.calls.length, 0, 'no physical provider request with zero budget')
-    assert.equal(f.planCount(), ids.length, 'registration itself is free and covers every candidate')
+    assert.equal(f.planCount(), 0, 'budget-blocked candidates never receive executable plans')
+    const decisions = f.engine().store.read().decisionRecords
+    assert.ok(decisions.length >= 7, 'each pass persists one candidate decision wait')
+    assert.ok(decisions.every(row => row.state === 'wait' && row.error === 'evaluation_budget'))
+    assert.ok(new Set(decisions.map(row => row.candidateId)).size > 1,
+      'persisted waits rotate across candidate editions')
     assert.ok(new Set(cursors).size > 1, 'the cursor keeps rotating with a zero budget')
     assert.ok(f.maxActive() <= 1)
   } finally { await f.cleanup() }

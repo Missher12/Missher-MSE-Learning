@@ -42,7 +42,8 @@ const SIGNATURES = {
   diagnose: 'diagnose(input?: MseDetailsRequest): Promise<MseDetailsResult>',
 }
 
-const CONTROL_METHODS = ['status', 'turns', 'planReview', 'startReview', 'planEvaluation', 'startEvaluation', 'job', 'cancel']
+const CONTROL_METHODS = ['status', 'turns', 'planReview', 'startReview', 'planEvaluation', 'startEvaluation', 'job', 'cancel',
+  'authorizeProblemRecoveryRetry']
 const CONTROL_SIGNATURES = {
   status: 'status(input?: MseControlRequest): Promise<MseControlResult>',
   turns: 'turns(input: MseControlRequest): Promise<MseControlResult>',
@@ -52,6 +53,7 @@ const CONTROL_SIGNATURES = {
   startEvaluation: 'startEvaluation(input: MseControlRequest): Promise<MseControlResult>',
   job: 'job(input: MseControlRequest): Promise<MseControlResult>',
   cancel: 'cancel(input: MseControlRequest): Promise<MseControlResult>',
+  authorizeProblemRecoveryRetry: 'authorizeProblemRecoveryRetry(input: MseControlRequest): Promise<MseControlResult>',
 }
 
 export const TYPERT = {
@@ -73,7 +75,7 @@ export const TYPERT = {
     }, {
       key: 'mseControl',
       exportName: 'MseControl',
-      summary: 'Human Settings control surface: effective state, manual review and candidate verification jobs.',
+      summary: 'Human Settings control surface: effective state, manual review, candidate verification jobs and one-time recovery authorization.',
       tags: ['settings', 'human-only'],
       members: CONTROL_METHODS.map(name => ({ kind: 'method', name, signature: CONTROL_SIGNATURES[name] })),
       types: [],

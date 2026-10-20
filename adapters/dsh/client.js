@@ -47,7 +47,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
   const MAX_PROMPT_CHARS = 200
   const MAX_CASE_JSON_CHARS = 20_000
   const METHODS = ['overview', 'sessions', 'lessons', 'lesson', 'recall', 'diagnose']
-  const CONTROL_METHODS = ['status', 'turns', 'planReview', 'startReview', 'planEvaluation', 'startEvaluation', 'job', 'cancel']
+  const CONTROL_METHODS = ['status', 'turns', 'planReview', 'startReview', 'planEvaluation', 'startEvaluation', 'job', 'cancel',
+    'authorizeProblemRecoveryRetry']
   const CONTEXT_MIN = 128
   const CONTEXT_MAX = 1536
   const EVAL_TOKENS_MAX = 1_000_000
@@ -358,6 +359,27 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     sessionBudgetHint: '在同一会话中限制经验占用。',
     evalBudgetTitle: '模型评测额度',
     evalBudgetHint: '这里仅限制自动经验评审/客观评测，不含正常聊天或自动复盘（每日最多 3 次、每次输出 384 tokens）。档位按滚动 24 小时计算；耗尽后等待到最早一笔额度到期。已用/预留与实测分开显示，未知费用不会按 0 处理。',
+    decisionBackend: '决策后端', decisionModel: '决策模型', decisionEndpoint: '服务地址',
+    decisionSecretRef: '密钥环境变量名', decisionLatest: '最近候选决策',
+    decisionPrimary: '主意见', decisionFallback: 'Host复核',
+    decisionStates: { queued: '排队中', dispatched: '处理中', complete: '已完成', wait: '等待条件',
+      failed: '失败', unknown: '费用未知' },
+    decisionActions: { prioritize_validation: '优先验证', suggest_merge: '建议合并生成候选', recheck: '等待复核',
+      review: '进入评审', trial: '进入试用', wait: '等待新证据', reject: '拒绝候选' },
+    decisionRoutingHint: 'Host 后端使用候选来源会话中实际记录的模型路由；远程后端使用此处配置的模型与地址。开启自动验证后，每轮最多分类一个候选并计入共享额度；只有当前证据版本获准的候选才进入现有验证计划，模型意见本身不会晋级。Jev/Laya 只提供分类意见；保存设置不会发起连接或模型请求。',
+    decisionHostModelHint: '当前使用 Host：模型名取自该经验来源会话的实际路由，此字段不生效。切换远程后端后可单独配置决策模型。',
+    decisionRemoteModelHint: '远程决策使用单独配置的模型，不改变 Host 对话模型。',
+    decisionCapability: '路由能力状态', decisionHostCapability: 'Host 路由由候选来源会话决定；本页未探测宿主连接，实际可用性在运行时核验。',
+    decisionRemoteReady: '模型和服务地址已填写；这里只核对配置完整性，未测试连接。',
+    decisionRemoteIncomplete: '远程路由缺少模型或服务地址；补齐后才会尝试分类。',
+    decisionSecretRefHint: '只填写环境变量名称。密钥内容不会显示或保存到设置页。',
+    decisionWhy: '本次经验建议及理由', decisionNoWhy: '暂无已完成的候选决策。', decisionCost: '本次决策费用',
+    decisionScopeHint: '决策详情按项目与经验隔离，请打开具体经验查看。',
+    decisionHistory: '此经验的决策记录', decisionRevision: '版本 / 证据修订', decisionOutcome: '意见状态',
+    decisionBasis: '模型与费用', decisionReasons: '理由', decisionMergeWait: '合并生成等待',
+    decisionEvidenceRefs: '引用证据（哈希）',
+    decisionCostUnknown: '费用未知', decisionTokens: 'tokens', decisionAdvisory: '意见范围',
+    decisionAdvisoryHint: '这是针对所列经验版本和证据版本的分流建议；不会验证或晋级经验。',
     evalUsageTitle: '当前用量与计算说明',
     evalTokensUsed: '预算已占用（保守）',
     evalCallsUsed: '评测任务已用',
@@ -439,8 +461,10 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     autoValidation: '自动验证',
     autoValidate: '自动审查候选经验',
     autoValidationHint: '自动审查候选经验，符合条件后限量试用；只有客观验证通过，才记为已验证。受评测额度限制。',
-    verificationCoverage: '任务验证与宿主能力',
-    verificationCoverageHint: '当前接入仅检查 DSH 项目根目录 package.json 的 JSON 语法、顶层对象及已登记字段类型；字段可缺省、允许扩展字段，不检查 npm 语义、依赖是否可安装或测试是否通过。项目测试执行尚未接入。Hermes 前置检查由独立插件配置，本页不报告其运行状态。',
+    verificationCoverage: '经验验证',
+    verificationCoverageHint: 'MSE 验证候选经验，确认有效后再正式启用。',
+    verificationDetails: '验证详情',
+    verificationCoverageDetails: '当前接入仅检查 DSH 项目根目录 package.json 的 JSON 语法、顶层对象及已登记字段类型；字段可缺省、允许扩展字段，不检查 npm 语义、依赖是否可安装或测试是否通过。项目测试执行尚未接入。Hermes 前置检查由独立插件配置，本页不报告其运行状态。',
     coverageTests: '测试执行器', coverageArtifacts: '产物接线', coverageDsh: 'DSH 前置检查',
     coverageHermes: 'Hermes 前置检查', coverageShadow: '影子匹配',
     coverageStatus: { not_connected: '未接入', dsh_root_package_json_checker: 'DSH 根 package.json 结构检查',
@@ -671,6 +695,28 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     sessionBudgetHint: 'Caps what lessons may occupy in one session.',
     evalBudgetTitle: 'Model evaluation budget',
     evalBudgetHint: 'This cap covers automatic experience review and objective evaluation only. It excludes normal chat and automatic reflection (up to 3 per day, 384 output tokens each). The window rolls over 24 hours; exhausted work waits for the earliest reservation to expire. Reserved and measured usage are shown separately; unknown cost is never treated as zero.',
+    decisionBackend: 'Decision backend', decisionModel: 'Decision model', decisionEndpoint: 'Service endpoint',
+    decisionSecretRef: 'Secret environment variable', decisionLatest: 'Latest candidate decision',
+    decisionPrimary: 'Primary opinion', decisionFallback: 'Host review',
+    decisionStates: { queued: 'Queued', dispatched: 'In progress', complete: 'Complete', wait: 'Waiting',
+      failed: 'Failed', unknown: 'Cost unknown' },
+    decisionActions: { prioritize_validation: 'Prioritize validation', suggest_merge: 'Suggest merged candidate', recheck: 'Request recheck',
+      review: 'Enter review', trial: 'Enter trial', wait: 'Wait for evidence', reject: 'Reject candidate' },
+    decisionRoutingHint: 'Host uses the model route actually recorded for the candidate’s source session; remote backends use the model and endpoint configured here. With automatic validation enabled, at most one candidate is classified per scan and charged to the shared budget. Only candidates admitted for the current evidence revision enter existing validation plans; opinions never promote a candidate. Jev/Laya provide classification only; saving settings does not connect or call a model.',
+    decisionHostModelHint: 'Host is selected: the model comes from the experience source session, so this field is inactive. Switch to a remote backend to configure a separate decision model.',
+    decisionRemoteModelHint: 'Remote decisions use this separate model and do not change the Host conversation model.',
+    decisionCapability: 'Route capability', decisionHostCapability: 'Host routing follows the candidate source session. This page has not probed the Host connection; runtime availability is checked when a decision runs.',
+    decisionRemoteReady: 'Model and endpoint are present. This checks configuration completeness only; the connection has not been tested.',
+    decisionRemoteIncomplete: 'The remote route needs both a model and endpoint before classification can run.',
+    decisionSecretRefHint: 'Enter an environment variable name only. Secret values are never shown or saved in this settings page.',
+    decisionWhy: 'Latest experience decision and reasons', decisionNoWhy: 'No completed candidate decision yet.',
+    decisionScopeHint: 'Decision details are isolated by project and experience. Open an experience to view them.',
+    decisionHistory: 'Decisions for this experience', decisionRevision: 'Version / evidence revision',
+    decisionOutcome: 'Opinion state', decisionBasis: 'Model and cost', decisionReasons: 'Reasons',
+    decisionEvidenceRefs: 'Evidence references (hashes)',
+    decisionMergeWait: 'Merge generation waiting',
+    decisionCost: 'Decision cost', decisionCostUnknown: 'Cost unknown', decisionTokens: 'tokens', decisionAdvisory: 'Scope',
+    decisionAdvisoryHint: 'This is a routing opinion for the listed lesson and evidence version; it does not verify or promote the lesson.',
     evalUsageTitle: 'Current usage and how it is computed',
     evalTokensUsed: 'Budget reserved (conservative)',
     evalCallsUsed: 'Evaluation tasks used',
@@ -751,8 +797,10 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     autoValidate: 'Review candidate lessons automatically',
     autoValidationHint: 'Candidate lessons are reviewed automatically and, if they qualify, offered as a limited '
       + 'trial; only an objective check marks one as verified. Bounded by the evaluation budget.',
-    verificationCoverage: 'Task verification and host capabilities',
-    verificationCoverageHint: 'The connected checker validates only the DSH project-root package.json JSON syntax, top-level object, and registered field types. Fields may be omitted and extensions are allowed; it does not check npm semantics, dependency installation, or whether tests passed. Project test execution is not connected. Hermes preflight is configured by its separate plugin; this page does not report its runtime status.',
+    verificationCoverage: 'Experience verification',
+    verificationCoverageHint: 'MSE verifies candidate lessons; only those confirmed effective are formally enabled.',
+    verificationDetails: 'Verification details',
+    verificationCoverageDetails: 'The connected checker validates only the DSH project-root package.json JSON syntax, top-level object, and registered field types. Fields may be omitted and extensions are allowed; it does not check npm semantics, dependency installation, or whether tests passed. Project test execution is not connected. Hermes preflight is configured by its separate plugin; this page does not report its runtime status.',
     coverageTests: 'Test runner', coverageArtifacts: 'Artifact intake', coverageDsh: 'DSH preflight',
     coverageHermes: 'Hermes preflight', coverageShadow: 'Shadow matches',
     coverageStatus: { not_connected: 'Not connected', dsh_root_package_json_checker: 'DSH root package.json structure checker',
@@ -862,7 +910,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-row{display:flex;gap:20px;align-items:center;padding:16px 0;border-bottom:0.5px solid var(--dsw-alias-border-l2);min-width:0}
 .mse-details .mse-row-top{align-items:flex-start}
 .mse-details .mse-row-stacked{display:block}
-.mse-details .mse-row-stacked .mse-row-side{display:flex;flex:initial;justify-content:flex-start;flex-wrap:wrap;gap:8px 18px;max-width:100%;margin-top:8px;white-space:normal;overflow-wrap:anywhere}
+.mse-details .mse-row-stacked .mse-row-side{display:flex;flex:initial;width:100%;justify-content:flex-start;flex-wrap:wrap;gap:8px 18px;max-width:100%;margin-top:8px;white-space:normal;overflow-wrap:anywhere}
+.mse-details .mse-decision-input{min-width:0;max-width:100%;box-sizing:border-box}
+.mse-details .mse-decision-capability{padding:10px 0 2px;overflow-wrap:anywhere}
 .mse-details .mse-coverage-list{display:flex;flex-wrap:wrap;align-items:flex-start;gap:6px 18px;min-width:0;max-width:100%}
 .mse-details .mse-coverage-item{min-width:0;overflow-wrap:anywhere}
 .mse-details .mse-row:last-child{border-bottom:none}
@@ -1442,6 +1492,10 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     // preset is available as an explicit action and only takes effect after the operator saves it.
     evaluationTokensPerDay: String(value?.evaluationTokensPerDay ?? 0),
     evaluationCallsPerDay: String(value?.evaluationCallsPerDay ?? 2),
+    decisionBackend: ['host', 'openai_compatible', 'jev', 'laya'].includes(value?.decisionBackend) ? value.decisionBackend : 'host',
+    decisionModel: typeof value?.decisionModel === 'string' ? value.decisionModel : '',
+    decisionEndpoint: typeof value?.decisionEndpoint === 'string' ? value.decisionEndpoint : '',
+    decisionSecretRef: typeof value?.decisionSecretRef === 'string' ? value.decisionSecretRef : '',
   })
 
   /**
@@ -1487,6 +1541,17 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const calls = number(draft.evaluationCallsPerDay, 0, EVAL_CALLS_MAX, 'evaluationCallsPerDay')
     if (calls !== null && calls !== value?.evaluationCallsPerDay) {
       ops.push({ op: 'set', path: ['evaluationCallsPerDay'], value: calls })
+    }
+    if (!['host', 'openai_compatible', 'jev', 'laya'].includes(draft.decisionBackend)) problems.push('decisionBackend invalid')
+    else if (draft.decisionBackend !== (value?.decisionBackend ?? 'host')) {
+      ops.push({ op: 'set', path: ['decisionBackend'], value: draft.decisionBackend })
+    }
+    for (const [key, max] of [['decisionModel', 128], ['decisionEndpoint', 2048], ['decisionSecretRef', 256]]) {
+      const saved = typeof value?.[key] === 'string' ? value[key] : ''
+      const next = typeof draft[key] === 'string' ? draft[key].trim() : null
+      if (next === null || [...next].length > max || (key === 'decisionSecretRef' && next
+        && !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(next))) problems.push(`${key} invalid`)
+      else if (next !== saved) ops.push({ op: 'set', path: [key], value: next })
     }
     return { ops, problems }
   }
@@ -1955,8 +2020,11 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           h(Picker, { key: 'p', label: dict.verifySession, value: draft.values.verificationSessionId,
             options: verify.options, disabled: !writable, testId: 'verify-session', className: 'mse-picker-wide',
             onChange: next => edit({ verificationSessionId: next }) }), { stacked: true }),
-        row('verificationCoverage', dict.verificationCoverage, dict.verificationCoverageHint,
-          coverage, { stacked: true }),
+        row('verificationCoverage', dict.verificationCoverage, dict.verificationCoverageHint, null),
+        disclosure('verification-capabilities', dict.verificationDetails, [
+          h('p', { key: 'scope', className: 'mse-hint' }, dict.verificationCoverageDetails),
+          coverage,
+        ], { id: 'verification-details' }),
         row('bytes', dict.contextBytes, dict.contextBytesHint,
           [h(Input, { key: 'i', type: 'number', min: CONTEXT_MIN, max: CONTEXT_MAX, step: 1, disabled: !writable,
             className: 'mse-num', 'aria-label': dict.contextBytes, value: draft.values.maxContextBytes,
@@ -2143,6 +2211,27 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         const item = payload.lesson
         // The same read-only progress the list row shows, in full, for the row that is open.
         const progress = lessonProgress(dict, item, locale)
+        const decisionDetails = (Array.isArray(item.decisions) ? item.decisions : []).slice(-8).reverse()
+          .map((decision, index) => {
+            const opinion = decision.result ?? null
+            const tokens = Number.isSafeInteger(decision.usage?.totalTokens)
+              ? `${decision.usage.totalTokens} ${dict.decisionTokens}` : dict.decisionCostUnknown
+            const models = [decision.primaryModel ? `${dict.decisionPrimary}: ${decision.primaryModel}` : null,
+              decision.fallbackModel ? `${dict.decisionFallback}: ${decision.fallbackModel}`
+                : !decision.primaryModel && decision.model ? decision.model : null].filter(Boolean).join(' + ')
+            return definition(`decision-${decision.decisionId ?? index}`, [
+              [dict.decisionRevision, `v${decision.version ?? '—'} / e${decision.evidenceRevision ?? '—'}`],
+              [dict.decisionOutcome, `${opinion?.action ? dict.decisionActions?.[opinion.action] ?? opinion.action
+                : decision.error ?? dict.decisionStates?.[decision.state] ?? decision.state} · ${dict.decisionStates?.[decision.state] ?? decision.state}`],
+              [dict.decisionBasis, `${models || dict.notRecorded} · ${tokens}`],
+              [dict.decisionReasons, Array.isArray(opinion?.reasons) && opinion.reasons.length
+                ? opinion.reasons.join('；') : decision.error ?? dict.decisionNoWhy],
+              Array.isArray(opinion?.evidenceRefs) && opinion.evidenceRefs.length
+                ? [dict.decisionEvidenceRefs, opinion.evidenceRefs.filter(ref => /^[a-f0-9]{64}$/u.test(ref))
+                  .slice(0, 8).map(ref => ref.slice(0, 12)).join('、')] : null,
+              decision.mergeStatus?.reason ? [dict.decisionMergeWait, decision.mergeStatus.reason] : null,
+            ], { left: true })
+          })
         return h('div', { key: 'body' }, [
           definition('d', [
             [dict.kind, kindLabel(dict, item.kind)],
@@ -2189,6 +2278,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           // stays a plain two-sentence explanation a normal user can read.
           item.trial?.state === 'trial' && typeof dict.trialDetail === 'string'
             ? h('p', { key: 'td', className: 'mse-hint' }, dict.trialDetail) : null,
+          decisionDetails.length ? h('div', { key: 'decisions', className: 'mse-decision-history' }, [
+            h('p', { key: 'title', className: 'mse-hint' }, dict.decisionHistory), ...decisionDetails,
+          ]) : null,
           item.experiments.length === 0 ? null : h('div', { key: 'exp' }, [
             h('p', { key: 'l', className: 'mse-hint' }, dict.experiments),
             ...item.experiments.map((record, index) => h('p', { key: `e${index}`, className: 'mse-hint' },
@@ -2364,6 +2456,21 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       Number(draft.values.evaluationTokensPerDay) === tier.tokens
       && Number(draft.values.evaluationCallsPerDay) === tier.calls) ?? null
     const paidBudget = settings?.paidBudget ?? null
+    const latestDecision = settings?.decisions?.latest?.[0] ?? null
+    const latestDecisionResult = latestDecision?.finalResult ?? latestDecision?.result ?? latestDecision?.primaryResult ?? null
+    const latestDecisionAction = latestDecisionResult?.action
+      ? dict.decisionActions?.[latestDecisionResult.action] ?? latestDecisionResult.action
+      : latestDecision?.error ?? dict.decisionStates?.[latestDecision?.state] ?? latestDecision?.state
+    const latestDecisionReasons = Array.isArray(latestDecisionResult?.reasons)
+      ? latestDecisionResult.reasons.filter(reason => typeof reason === 'string' && reason.length > 0) : []
+    const latestDecisionUsage = latestDecision?.usage
+    const latestDecisionCost = Number.isSafeInteger(latestDecisionUsage?.totalTokens)
+      ? `${latestDecisionUsage.totalTokens} ${dict.decisionTokens}` +
+        `${Number.isSafeInteger(latestDecision?.primaryUsage?.totalTokens)
+          ? ` · ${dict.decisionPrimary ?? '主意见'} ${latestDecision.primaryUsage.totalTokens}` : ''}` +
+        `${Number.isSafeInteger(latestDecision?.fallbackUsage?.totalTokens)
+          ? ` + ${dict.decisionFallback ?? 'Host复核'} ${latestDecision.fallbackUsage.totalTokens}` : ''}`
+      : dict.decisionCostUnknown
     const budgetPanel = h('div', { key: 'budget', className: 'mse-pane' }, [
       sectionTitle('c', dict.contextBudgetTitle),
       row('t', dict.turnBudget, dict.turnBudgetHint, formatBytes(overview?.budget?.turnBytes)),
@@ -2377,6 +2484,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         `${codeLabel(dict, currentRecall.payload.sessionError)}（${currentRecall.payload.sessionError}）`) : null,
       sectionTitle('e', dict.evalBudgetTitle),
       h('p', { key: 'ed', className: 'mse-hint' }, dict.evalBudgetHint),
+      h('p', { key: 'decision-hint', className: 'mse-hint' }, dict.decisionRoutingHint),
       draft === null ? h('p', { key: 'l', className: 'mse-note' }, dict.loading) : h('div', { key: 'rows' }, [
         h('p', { key: 'tier-label', className: 'mse-hint' }, fill(dict.evalTierStatus,
           { tier: draftTier?.label ?? dict.evalTierCustom })),
@@ -2392,6 +2500,28 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           h(Input, { type: 'number', min: 0, max: EVAL_CALLS_MAX, step: 1, disabled: !writable,
             className: 'mse-num', 'aria-label': dict.evalCalls, value: draft.values.evaluationCallsPerDay,
             onChange: event => edit({ evaluationCallsPerDay: event.target.value }) })),
+        filterSelect(dict.decisionBackend, [['host', 'Host LLM'], ['openai_compatible', 'OpenAI-compatible'],
+          ['jev', 'Jev'], ['laya', 'Laya HTTP']], draft.values.decisionBackend,
+        decisionBackend => edit({ decisionBackend })),
+        row('decision-capability', dict.decisionCapability, null,
+          h('p', { className: 'mse-decision-capability mse-hint', role: 'status' },
+            draft.values.decisionBackend === 'host' ? dict.decisionHostCapability
+              : draft.values.decisionModel.trim() !== '' && draft.values.decisionEndpoint.trim() !== ''
+                ? dict.decisionRemoteReady : dict.decisionRemoteIncomplete), { stacked: true }),
+        row('decision-model', dict.decisionModel,
+          draft.values.decisionBackend === 'host' ? dict.decisionHostModelHint : dict.decisionRemoteModelHint,
+          h(Input, { disabled: !writable || draft.values.decisionBackend === 'host', maxLength: 128,
+          className: 'mse-decision-input', 'aria-label': dict.decisionModel, value: draft.values.decisionModel,
+          onChange: event => edit({ decisionModel: event.target.value }) }), { stacked: true }),
+        row('decision-endpoint', dict.decisionEndpoint, null, h(Input, {
+          disabled: !writable || draft.values.decisionBackend === 'host', maxLength: 2048,
+          className: 'mse-decision-input', inputMode: 'url', 'aria-label': dict.decisionEndpoint,
+          value: draft.values.decisionEndpoint,
+          onChange: event => edit({ decisionEndpoint: event.target.value }) }), { stacked: true }),
+        row('decision-secret', dict.decisionSecretRef, dict.decisionSecretRefHint,
+          h(Input, { disabled: !writable || draft.values.decisionBackend === 'host', maxLength: 256,
+            className: 'mse-decision-input', 'aria-label': dict.decisionSecretRef, value: draft.values.decisionSecretRef,
+            onChange: event => edit({ decisionSecretRef: event.target.value }) }), { stacked: true }),
         saveRow,
       ]),
       disclosure('usage', dict.evalUsageTitle, [
@@ -2414,6 +2544,17 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           [dict.evalNext, Number.isFinite(paidBudget?.nextAvailableAt)
             ? formatTime(paidBudget.nextAvailableAt, locale) : dict.notRecorded],
           [dict.evalBudgetTitle, dict.evalBudgetState[paidBudget?.state] ?? dict.notReported],
+          [dict.decisionLatest, latestDecision === null ? dict.notRecorded
+            : `${latestDecisionAction ?? dict.notRecorded} · ${latestDecision.candidateId ?? '—'} v${latestDecision.version ?? '—'} · e${latestDecision.evidenceRevision ?? '—'}` +
+              `${latestDecision.state ? ` · ${dict.decisionStates?.[latestDecision.state] ?? latestDecision.state}` : ''}` +
+              `${latestDecision.primaryModel ? ` · ${dict.decisionPrimary ?? '主意见'}:${latestDecision.primaryModel}`
+                : latestDecision.model ? ` · ${latestDecision.model}` : ''}` +
+              `${latestDecision.fallbackModel ? ` · ${dict.decisionFallback ?? 'Host复核'}:${latestDecision.fallbackModel}` : ''}`],
+          [dict.decisionWhy, latestDecision === null ? (settings?.decisions?.scopeRequired === true
+            ? dict.decisionScopeHint : dict.decisionNoWhy)
+            : latestDecisionReasons.length ? latestDecisionReasons.join('；') : latestDecision.error ?? dict.decisionNoWhy],
+          [dict.decisionCost, latestDecision === null ? dict.notRecorded : latestDecisionCost],
+          [dict.decisionAdvisory, dict.decisionAdvisoryHint],
           [dict.autoReflectEffective, review === null ? dict.unknown
             : fill(dict.autoReflectOn, { used: review.usedLast24h ?? dict.unknown, limit: review.perDay })],
           [dict.evalJobsOpen, String(controlState?.status === 'ready' ? controlState.payload.runtime?.jobs?.length ?? 0 : 0)],

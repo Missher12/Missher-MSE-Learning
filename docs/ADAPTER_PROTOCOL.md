@@ -1,5 +1,11 @@
 # MSE trusted adapter protocol 2
 
+## Controlled candidate merge (0.11.0)
+
+`decisionMergePlan({decisionId,projectKey?})` returns only the frozen, same-scope candidate targets. A `suggest_merge` opinion is advisory; the adapter may call the existing reflection pipeline only for a listed target and must pass the returned generation identity to `reflectionRequest`. Core rechecks both parent versions/content, source identity and revision, shared registered verifier, conditions, control state, expiry, and the shared paid evaluation budget immediately before physical dispatch. The generated result is always a separate unverified candidate; it receives no method ID or validation credit.
+
+Generation requests share the evaluation token/call budget. The paired reflection ticket is counted once as a logical reflection. A request refused before dispatch releases both reservations; a dispatched request interrupted without a trusted result is unknown and cannot be replayed. Startup recovery returns undispatched generations to waiting, while dispatched generations remain unknown. DSH uses its existing reflection slot; Hermes uses its existing `ReflectionDriver` and must perform the Core dispatch permit directly before provider dispatch.
+
 The adapter owns user identity, project identity, model routing, request evidence and verifier provenance. The core owns persistent state, bounded recall, versioning, evaluation decisions and rollback. The JSON CLI is a local trusted transport, not a model tool server.
 
 ## Runtime lifecycle

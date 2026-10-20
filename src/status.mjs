@@ -114,6 +114,22 @@ export function formatRecallStatus(report, { detail = false, lessons = [] } = {}
       + `${(row.lessons ?? []).length ? `：${byId(row.lessons)}` : ''} ${row.bytes ?? 0} 字节`
       + `${row.outcome === undefined ? '' : ` → ${label(OUTCOME_LABELS)(row.outcome)}`}`)
   }
+  const decisions = (report?.decisions ?? []).slice(-4).reverse()
+  if (decisions.length) {
+    lines.push('最近候选决策（按作用域，本地持久记录）：')
+    for (const decision of decisions) {
+      const result = decision.result ?? null
+      const cost = decision.state === 'unknown' || !Number.isSafeInteger(decision.usage?.totalTokens)
+        ? '费用未知' : `${decision.usage.totalTokens} tokens`
+      lines.push(`- ${String(decision.candidateId ?? '').replace(/^lesson_/u, '')} v${decision.version ?? '?'} `
+        + `e${decision.evidenceRevision ?? '?'}：${result?.action ?? decision.error ?? decision.state}；`
+        + `${decision.model ?? '模型未知'}；${cost}`
+        + `${decision.mergeStatus?.reason ? `；合并生成等待：${decision.mergeStatus.reason}` : ''}`
+        + `${Array.isArray(result?.reasons) && result.reasons.length ? `；${preview(result.reasons.join('；'), 180)}` : ''}`
+        + `${Array.isArray(result?.evidenceRefs) && result.evidenceRefs.length
+          ? `；证据引用：${result.evidenceRefs.map(ref => String(ref).slice(0, 12)).join(', ')}` : ''}`)
+    }
+  }
   if (report?.reasons) lines.push(`协议原因码共 ${report.reasons.length} 项。`)
   return lines.join('\n')
 }

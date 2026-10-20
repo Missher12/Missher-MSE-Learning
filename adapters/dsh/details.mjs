@@ -868,8 +868,13 @@ export class MseDetails extends TypertRemoteService {
     } catch (error) { historyError = text(error?.code ?? 'history_unavailable', 60) }
     const reviewRunTokens = this.autoOf(core, engine).auto?.reviewTokens ?? null
     const plan = this.planIndex(engine).get(planKey(row.id, row.version)) ?? null
+    let decisions = []
+    try { decisions = engine.decisionHistory({ lessonId: id,
+      ...(scope.projectKey === undefined ? {} : { projectKey: scope.projectKey }),
+      ...(core.environmentId === undefined ? {} : { environmentId: core.environmentId }), limit: 8 }).rows ?? [] }
+    catch { decisions = [] }
     return { ok: true, generatedAt: Date.now(), scope: this.scopeInfo(engine, scope, core),
-      lesson: { ...projectDetail(row, experiments), ...progressFields(projectRow(row), row, plan, reviewRunTokens) },
+      lesson: { ...projectDetail(row, experiments), ...progressFields(projectRow(row), row, plan, reviewRunTokens), decisions },
       historyError }
   }
 

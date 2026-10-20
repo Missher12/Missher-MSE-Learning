@@ -13,28 +13,38 @@ import { MAX_PAGE_SIZE, MAX_QUERY_CHARS, MAX_TITLE_CHARS, clipCodePoints, filter
 /**
  * `details.mjs` is a Cordis Remote service: it imports the Host's Typert protocol, which the unit
  * suite deliberately does not install (the packaged gateway script stages the real one and checks
- * the real markers). Two symbols are all this module needs to load, so they are supplied here —
- * `Remote` marks nothing and `remoteMethods` reports the six marks the module expects — which lets
- * the SERVICE ITSELF run: its scope resolution, its bounding and its reads, against a real engine.
+ * the real markers). Two symbols are all these modules need to load, so they are supplied here —
+ * `Remote` marks methods by function and `remoteMethods` reports only the marks on the queried
+ * prototype — which lets the services themselves run against a real engine.
  */
 const PROTOCOL_STUB = `
-const marked = []
-export const Remote = method => () => { marked.push({ method }) }
+const marked = new WeakMap()
+export const Remote = method => (fn, context) => { marked.set(fn, context.name) }
 export class TypertRemoteService { constructor(ctx, name) { this.ctx = ctx; this.namespace = name } }
-export const remoteMethods = () => marked
+export const remoteMethods = service => {
+  const prototype = Object.getPrototypeOf(service)
+  return Object.getOwnPropertyNames(prototype)
+    .filter(name => marked.get(prototype[name]) === name).map(method => ({ method }))
+}
+`
+const LLM_STUB = `
+export const createUserMessage = () => { throw new Error('unexpected_dsh_llm_call') }
 `
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier === '@deepseek-ai/dsh-typert-protocol') return { url: 'mse-test:typert-protocol', shortCircuit: true }
+    if (specifier === '@deepseek-ai/dsh-llm') return { url: 'mse-test:dsh-llm', shortCircuit: true }
     return next(specifier, context)
   },
   load(url, context, next) {
     if (url === 'mse-test:typert-protocol') return { format: 'module', source: PROTOCOL_STUB, shortCircuit: true }
+    if (url === 'mse-test:dsh-llm') return { format: 'module', source: LLM_STUB, shortCircuit: true }
     return next(url, context)
   },
 })
 const { MseDetails, autoStatusOf, libraryOf, plansDerivedStatus, progressRow, reviewOf, trialOf, unreadableLibrary } =
   await import('../adapters/dsh/details.mjs')
+const { MseControl } = await import('../adapters/dsh/control.mjs')
 
 
 const DAY = 86_400_000
@@ -54,6 +64,22 @@ const seed = f => {
   // `inspect` is the read-only projection with saved provenance; `list` stays the display view.
   return f.engine.inspect({ projectKey: f.projectKey }).lessons
 }
+
+test('the authenticated recovery RPC rejects extra fields before forwarding its allowlisted request', () => {
+  const input = { problemId: 'a'.repeat(64), projectKey: '/synthetic/project', evidenceRevision: 2,
+    priorTicket: 'synthetic-prior-ticket', authorizationId: 'test-recovery-authority-once',
+    authorizationRef: 'b'.repeat(64), failureCode: 'reflection_invalid_json', finishKind: 'not_retained',
+    priorMaxTokens: 384 }
+  let forwarded = null
+  const core = { settings: () => ({}), permissions: () => ({}), resolveScope: () => ({}),
+    jobs: { list: () => [] }, engine: { problemRecoveryAuthorize: value => { forwarded = value; return { ok: true } } } }
+  const control = new MseControl({ get: name => name === 'mseLearning' ? core : null })
+  assert.deepEqual(control.authorizeProblemRecoveryRetry({ ...input, outputTokens: 8192 }),
+    { ok: false, code: 'invalid_problem_recovery_authorization' })
+  assert.equal(forwarded, null, 'unrecognized transport data never reaches the engine')
+  assert.deepEqual(control.authorizeProblemRecoveryRetry(input), { ok: true })
+  assert.deepEqual(forwarded, input, 'the endpoint forwards only the documented direct input object')
+})
 
 test('lesson projections are bounded and never invent values', () => {
   const f = fixture()

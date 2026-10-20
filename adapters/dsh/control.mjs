@@ -1,14 +1,16 @@
 /**
- * Human settings control Remote: the only half of MSE that can *start* work.
+ * Human settings control Remote: the only half of MSE that can start work or register the
+ * explicitly authorized, one-time recovery repair.
  *
  * `mseDetails` answers questions. This service does things, and that difference is the whole
  * reason it is a separate namespace with a separate client contribution:
  *
  *  - It is reachable only from the authenticated Settings RPC the operator's own browser is
- *    attached to. It registers **no model tool**, so no agent can call it, and its methods
- *    reject anything that looks like a scope, a path, a state root, a ticket, evidence or an
- *    engine operation name. The browser contributes a session id, a lesson id and a version;
- *    the Host maps the id through its own session directory and re-reads everything else.
+ *    attached to. It registers **no model tool**, so no agent can call it. Existing methods map
+ *    session, lesson and version ids through Host-owned state; the sole exception is the narrowly
+ *    allowlisted `authorizeProblemRecoveryRetry` operation, which forwards one exact receipt
+ *    binding to a core transaction that independently re-reads its ticket, event and spend.
+ *    No arbitrary engine operation, scope selector or state path is exposed.
  *  - It never trusts the browser about money: the model route of a review is the route the
  *    chosen turn actually logged, and the verification budget is read from the core.
  *  - Every job it starts runs under the same permission decision as automatic learning
@@ -30,7 +32,8 @@ import { planIdentity } from './plan-identity.mjs'
 import { latestRoute, readTurns, reviewability, outcomeOf, MAX_TURNS_LISTED } from './session-digest.mjs'
 import { bool, boundedList, int, oneOf, text } from './project.mjs'
 
-const ENDPOINTS = ['status', 'turns', 'planReview', 'startReview', 'planEvaluation', 'startEvaluation', 'job', 'cancel']
+const ENDPOINTS = ['status', 'turns', 'planReview', 'startReview', 'planEvaluation', 'startEvaluation', 'job', 'cancel',
+  'authorizeProblemRecoveryRetry']
 export const CONTROL_NAMESPACE = 'mseControl'
 
 /** Token accounting bound for one paired model call (prompt + answer), not an output cap. */
@@ -575,6 +578,41 @@ export class MseControl extends TypertRemoteService {
     const id = text(input.id, 64)
     const result = core.jobs.cancel(id, 'user_cancelled')
     return { ok: result.ok === true, code: result.ok === true ? null : result.code, job: result.job ?? null }
+  }
+
+  /**
+   * Register one receipt-backed legacy problem-reflection repair through the authenticated
+   * settings Remote. This endpoint has no UI and never starts a reflection; the engine re-reads
+   * the durable ticket/event/spend under its transaction before writing the one-time marker.
+   */
+  authorizeProblemRecoveryRetry(input = {}) {
+    const allowed = ['problemId', 'projectKey', 'environmentId', 'evidenceRevision', 'priorTicket',
+      'authorizationId', 'authorizationRef', 'failureCode', 'finishKind', 'priorMaxTokens']
+    if (!isPlainObject(input) || Object.keys(input).some(key => !allowed.includes(key))) {
+      return { ok: false, code: 'invalid_problem_recovery_authorization' }
+    }
+    const core = this.core()
+    if (!this.usable(core)) return { ok: false, code: 'core_unavailable' }
+    const engine = this.engineOf(core)
+    if (engine === null || typeof engine.problemRecoveryAuthorize !== 'function') {
+      return { ok: false, code: 'problem_recovery_unavailable' }
+    }
+    try {
+      return engine.problemRecoveryAuthorize({
+        problemId: input.problemId,
+        projectKey: input.projectKey,
+        ...(Object.hasOwn(input, 'environmentId') ? { environmentId: input.environmentId } : {}),
+        evidenceRevision: input.evidenceRevision,
+        priorTicket: input.priorTicket,
+        authorizationId: input.authorizationId,
+        authorizationRef: input.authorizationRef,
+        failureCode: input.failureCode,
+        finishKind: input.finishKind,
+        priorMaxTokens: input.priorMaxTokens,
+      })
+    } catch (error) {
+      return { ok: false, code: boundedError(error) || 'problem_recovery_refused' }
+    }
   }
 }
 

@@ -16,6 +16,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createAutoValidation } from '../adapters/dsh/auto.mjs'
+import { JobQueue } from '../adapters/dsh/jobs.mjs'
 import { stage3dHost, countedProvider, stateDigest } from './pump-host.mjs'
 import { LearningEngine } from '../src/index.mjs'
 import { getDomainPack, packAdmits } from '../src/domains.mjs'
@@ -36,7 +37,7 @@ const withStore = async (fn) => {
 }
 
 /** A scheduler wired the way the adapter wires it, with an explicit admission + checker. */
-const scheduler = ({ admission, check, engine, calls = [] }) => createAutoValidation({
+const scheduler = ({ admission, check, engine, calls = [], decisionRunner = null }) => createAutoValidation({
   engine,
   context: () => null,
   route: () => null,
@@ -45,6 +46,7 @@ const scheduler = ({ admission, check, engine, calls = [] }) => createAutoValida
   busy: () => false,
   reviewAdmission: () => admission,
   registeredCheck: check,
+  decisionRunner,
 })
 
 const ORDINARY = { id: 'lesson-ordinary', version: 1, instruction: '提交前先运行测试并核对失败输出，再决定是否继续提交。' }
@@ -60,6 +62,7 @@ test('an ordinary method with a registered checker is settled WITHOUT any paid p
     engine, calls,
     // No official pack admits it — which is exactly the ordinary case.
     admission: { ok: false, reason: 'no_applicable_pack:domain_forbidden:排序' },
+    decisionRunner: async () => { calls.push('decision'); return { ok: true, action: 'review' } },
     check: (lesson) => ({ ok: true, attempted: true, state: 'accepted', lessonId: lesson.id }),
   })
   const audit = await auto.scan([{ ...ORDINARY, methodId: 'mse-registered-1' }])
@@ -67,7 +70,7 @@ test('an ordinary method with a registered checker is settled WITHOUT any paid p
   assert.equal(audit.waitingValidator, 0)
   assert.equal(audit.registered, 0, 'no PAID plan is registered for it')
   assert.deepEqual(registered, [], 'the paid tracks are never entered')
-  assert.deepEqual(calls, [], 'no model call, so no budget is spent')
+  assert.deepEqual(calls, [], 'free checker settles before the paid decision path')
 })
 
 test('a checker that RAN and refused is terminal, not retried as a paid review', async () => {
@@ -89,6 +92,45 @@ test('a checker that RAN and refused is terminal, not retried as a paid review',
   assert.deepEqual(calls, [])
 })
 
+test('decision pass unwraps the real JobQueue result and rotates a blocked first candidate', async () => {
+  const jobs = new JobQueue({ schedule: () => null, cancelTimer: () => {} })
+  const decided = []
+  const engine = { autoPlans: () => [], maintainLearning: () => ({ rows: [] }),
+    autoConsiderAdvance: () => ({ ok: true }) }
+  const auto = createAutoValidation({ engine, context: () => ({ suite: { packId: 'fixture', version: 1 }, criteria: [] }), objectiveContext: () => null,
+    route: () => null, callModel: async () => null, enabled: () => true, busy: () => false,
+    slot: { submit: spec => jobs.submit(spec), whenSettled: id => jobs.whenSettled(id) },
+    decisionRunner: async candidate => {
+      decided.push(candidate.id)
+      return { ok: true, action: decided.length === 1 ? 'wait' : 'reject' }
+    } })
+  try {
+    const rows = [{ id: 'lesson-first', version: 1 }, { id: 'lesson-second', version: 1 }]
+    await auto.scan(rows)
+    await auto.scan(rows)
+    assert.deepEqual(decided, ['lesson-first', 'lesson-second'])
+  } finally { auto.dispose(); jobs.dispose() }
+})
+
+test('an existing paid checkpoint runs ahead of new decisions while free gates still run', async () => {
+  const calls = []
+  const registrations = []
+  const scenario = { suite: { packId: 'fixture', version: 1 }, criteria: [] }
+  const engine = { autoPlans: () => [], maintainLearning: () => ({ rows: [] }),
+    status: () => ({ evaluationJobsOpen: 1 }), autoConsiderAdvance: () => ({ ok: true }),
+    autoPlanRegister: value => { registrations.push(value); return { ok: true, duplicate: false } } }
+  const auto = createAutoValidation({ engine, context: () => scenario, objectiveContext: () => null,
+    route: () => null, callModel: async () => null, enabled: () => true, busy: () => false,
+    reviewAdmission: () => ({ ok: true }),
+    registeredCheck: () => { calls.push('free-check'); return { ok: false, attempted: false } },
+    decisionRunner: async () => { calls.push('decision'); return { ok: true, action: 'review' } } })
+  try {
+    await auto.scan([{ id: 'lesson-new', version: 1, instruction: '使用可复核证据验证新版本。' }])
+    assert.deepEqual(calls, ['free-check'], 'free gates stay available while an older ticket owns the budget')
+    assert.deepEqual(registrations, [], 'a second paid plan waits behind the existing checkpoint')
+  } finally { await auto.dispose() }
+})
+
 test('ordinary experience with NO validator waits READABLY and is never promoted', async () => {
   const calls = []
   const registered = []
@@ -99,12 +141,13 @@ test('ordinary experience with NO validator waits READABLY and is never promoted
   const auto = scheduler({
     engine, calls,
     admission: { ok: false, reason: 'no_applicable_pack:domain_forbidden:排序' },
+    decisionRunner: async () => { calls.push('decision'); return { ok: true, action: 'review' } },
     check: () => ({ ok: false, attempted: false, code: 'no_registered_checker' }),
   })
   const audit = await auto.scan([ORDINARY])
   assert.equal(audit.waitingValidator, 1, 'the candidate is visibly waiting for an applicable validator')
   assert.deepEqual(registered, [], 'nothing is charged for work no validator can settle')
-  assert.deepEqual(calls, [], 'and nothing is invented by a model to fill the gap')
+  assert.deepEqual(calls, [], 'and decisionRunner is never invoked without an applicable validator')
 })
 
 test('the counter reports real zeros once a pass ran, and NOTHING before the first pass', async () => {

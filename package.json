@@ -1,6 +1,6 @@
 {
   "name": "@missher/dsh-mse-learning",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
   "type": "module",
   "description": "Scoped persistent lessons with bounded context for Agent adapters",
@@ -29,6 +29,8 @@
     "./checks": "./src/checks.mjs",
     "./evaluation": "./src/evaluation.mjs",
     "./task-evidence": "./src/task-evidence.mjs",
+    "./decision": "./src/decision.mjs",
+    "./decision-providers": "./src/decision-providers.mjs",
     "./guards": "./src/guards.mjs",
     "./cases": "./src/cases.mjs",
     "./adapters/dsh": "./adapters/dsh/index.mjs",

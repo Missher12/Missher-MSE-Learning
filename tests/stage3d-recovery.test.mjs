@@ -7,6 +7,7 @@
 // stream entrance.
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { DAY, TICK_MS, countedProvider, failures, flush, manualScheduler, runTurn, sessionRow,
   stage3dHost, stateDigest, successTurn } from './pump-host.mjs'
 
@@ -63,6 +64,38 @@ async function parkedProblem(f, { turn = 2 } = {}) {
 const dueNow = (f, problem) => {
   const row = f.host.problem(problem.id)
   f.clock.now = Math.max(f.clock.now, row.nextAttemptAt) + 1
+}
+
+const sha256 = value => createHash('sha256').update(value).digest('hex')
+
+/** Install a synthetic, already-settled legacy receipt in this temporary test store. */
+function seedLegacyRepairReceipt(f, problem, { ticket = 'legacy-reflection-ticket', dispatched = false,
+  unknownUsage = false, fillBudget = false } = {}) {
+  const at = f.clock.now
+  const usage = unknownUsage ? { known: false } : {
+    known: true, promptTokens: 329, completionTokens: 384, totalTokens: 713, at }
+  const input = { problemId: problem.id, projectKey: PROJECT, environmentId: f.host.service.environmentId,
+    evidenceRevision: problem.evidenceRevision, priorTicket: ticket,
+    authorizationId: 'test-recovery-authority-once', authorizationRef: 'f'.repeat(64),
+    failureCode: 'reflection_invalid_json', finishKind: 'not_retained', priorMaxTokens: 384 }
+  f.host.reader.store.update(state => {
+    const row = state.problemLoop.problems.find(item => item.id === problem.id)
+    row.state = 'waiting_evidence'
+    row.reason = 'reflection_interrupted'
+    row.attemptedRevision = row.evidenceRevision
+    row.ticket = null
+    row.lessonId = null
+    state.events.push({ id: sha256(`event:${ticket}`), fingerprint: sha256(`fingerprint:${ticket}`), at,
+      reflection: true, scope: row.scope, environment: row.environment, ticket,
+      settled: true, terminal: 'cancelled', problemId: row.id,
+      problemEvidenceRevision: row.evidenceRevision, sourceBindingHash: 'a'.repeat(64),
+      sourceSessionHash: sha256(row.origin.sessionId), usage,
+      ...(dispatched ? { requestPolicy: 'problem-recovery-reflection-v1', requestMaxTokens: 384,
+        requestHash: 'b'.repeat(64), requestDispatchAt: at } : {}) })
+    state.spends.push({ kind: 'reflection', at, tokens: 0, ticket, usage })
+    if (fillBudget) state.spends.push({ kind: 'reflection', at, tokens: 0, ticket: 'budget-fixture-ticket' })
+  })
+  return input
 }
 
 test('P12c: a foreground turn blocks the dispatch, consumes nothing, and the release recovers it', async t => {
@@ -674,4 +707,224 @@ test('P12h: a snapshot that cannot answer is confirmed once (bounded, coalesced)
   assert.equal(pass.codes.includes('host_state_unknown'), false, 'unknown was resolved, not treated as permission')
   assert.equal(f.provider.stats().physicalCalls, before + 1, 'exactly one recovered attempt')
   assert.equal(f.host.problem(problem.id).state, 'candidate_created')
+})
+
+test('P16: recovery output requires a complete stop and persists a request-bound failure', async t => {
+  const usage = { inputTokens: 329, outputTokens: 384, cacheReadTokens: 0, cacheWriteTokens: 0 }
+  const cases = [
+    { label: 'complete stop with valid JSON', reply: { text: JSON.stringify({
+      instruction: '失败后先核对输入记录与退出码的对应关系，再决定后续操作' }), finish: 'stop', usage },
+    code: null, finishKind: 'stop' },
+    { label: 'Host max-tokens finish maps to length', reply: { text: JSON.stringify({ instruction: INSTRUCTION }),
+      finish: 'max-tokens', usage }, code: 'reflection_incomplete', finishKind: 'length' },
+    { label: 'length with parseable JSON', reply: { text: JSON.stringify({ instruction: INSTRUCTION }),
+      finish: 'length', usage }, code: 'reflection_incomplete', finishKind: 'length' },
+    { label: 'missing finish marker', reply: { chunks: [
+      { type: 'text-delta', text: JSON.stringify({ instruction: INSTRUCTION }) }, { type: 'usage', usage }] },
+    code: 'reflection_incomplete', finishKind: 'missing' },
+    { label: 'malformed JSON under stop', reply: { text: '{"instruction":', finish: 'stop', usage },
+      code: 'reflection_invalid_json', finishKind: 'stop' },
+  ]
+  for (const scenario of cases) {
+    const f = fixture(t)
+    const problem = await parkedProblem(f)
+    dueNow(f, problem)
+    f.provider.enqueue(scenario.reply)
+    await f.scheduler.fire({ ms: TICK_MS, times: 1 })
+    await flush()
+    assert.equal(f.provider.last().maxTokens, 2048, `${scenario.label}: wire cap follows the recovery request`)
+    const event = f.host.state().events.find(row => row.problemId === problem.id)
+    assert.ok(event, `${scenario.label}: the consumed request remains auditable`)
+    assert.equal(event.requestPolicy, 'problem-recovery-reflection-v1')
+    assert.equal(event.requestMaxTokens, 2048)
+    assert.match(event.requestHash, /^[a-f0-9]{64}$/u)
+    assert.ok(Number.isFinite(event.requestDispatchAt))
+    if (scenario.code === null) assert.equal(event.failure, undefined, 'a complete valid response is not marked failed')
+    else assert.deepEqual(event.failure, { code: scenario.code, finishKind: scenario.finishKind,
+        outputBytes: Buffer.byteLength(scenario.reply.text
+          ?? scenario.reply.chunks?.find(chunk => chunk.type === 'text-delta')?.text ?? '') })
+    const persisted = f.host.problem(problem.id)
+    assert.equal(persisted.attemptedRevision, persisted.evidenceRevision)
+    assert.equal(persisted.lessonId === null, scenario.code !== null,
+      `${scenario.label}: only complete valid output may create a candidate`)
+    if (scenario.code === null) assert.equal(persisted.state, 'candidate_created')
+  }
+})
+
+test('P16: one authorized legacy retry survives ordinary waits and event pruning, then consumes once', async t => {
+  const f = fixture(t)
+  const problem = await parkedProblem(f)
+  const authorization = seedLegacyRepairReceipt(f, problem, { fillBudget: true })
+  const originalCooldown = f.host.problem(problem.id).nextAttemptAt
+  const registered = f.host.service.authorizeProblemRecoveryRetry(authorization)
+  assert.equal(registered.authorized, true)
+  assert.equal(f.host.problem(problem.id).nextAttemptAt, originalCooldown, 'registration preserves the cooldown')
+  assert.equal(f.host.problem(problem.id).attemptedRevision, problem.evidenceRevision)
+  assert.equal(f.host.service.engine.problemStatus({ limit: 64 }).rows
+    .find(row => row.id === problem.id).recoveryRetry.status, 'authorized', 'read-only status exposes the durable marker')
+
+  const spendsBefore = f.host.state().spends.length
+  const wrongScope = f.host.reader.problemRecoveryPlan({ problemId: problem.id,
+    projectKey: '/synthetic/other-project' })
+  assert.equal(wrongScope.code, 'scope_mismatch')
+  assert.equal(f.host.state().spends.length, spendsBefore, 'a changed source scope cannot spend')
+
+  f.clock.now = originalCooldown + 1
+  let plan = f.host.reader.problemRecoveryPlan({ problemId: problem.id, projectKey: PROJECT,
+    environmentId: f.host.service.environmentId })
+  const budgetWait = f.host.reader.reflectionRequest(plan.reflection)
+  assert.equal(budgetWait.skipped, 'reflection_budget')
+  let row = f.host.problem(problem.id)
+  assert.equal(row.recoveryRepair.state, 'authorized', 'a budget wait keeps the unconsumed authorization')
+  assert.equal(row.state, 'waiting_budget')
+  const budgetRelease = row.nextAttemptAt
+
+  const deferred = f.host.reader.problemDefer({ problemId: problem.id, evidenceRevision: row.evidenceRevision,
+    code: 'source_unavailable', waitMs: 5_000 })
+  assert.equal(deferred.deferred, true)
+  row = f.host.problem(problem.id)
+  assert.equal(row.recoveryRepair.state, 'authorized', 'a source wait keeps the authorization')
+  assert.equal(row.nextAttemptAt, budgetRelease, 'the source wait cannot shorten the budget wait')
+
+  // Once registered, the row marker retains the verified proof when the ordinary event history is pruned.
+  f.host.reader.store.update(state => {
+    state.events = state.events.filter(event => event.ticket !== authorization.priorTicket)
+  })
+  f.clock.now = row.nextAttemptAt + 1
+  plan = f.host.reader.problemRecoveryPlan({ problemId: problem.id, projectKey: PROJECT,
+    environmentId: f.host.service.environmentId })
+  assert.equal(plan.due, true, 'the existing cooldown naturally makes the retry due')
+  const retry = f.host.reader.reflectionRequest(plan.reflection)
+  assert.ok(retry.ticket)
+  assert.equal(retry.request.maxTokens, 2048)
+  assert.equal(retry.dispatchHash, f.host.state().events.find(event => event.ticket === retry.ticket).requestHash)
+  row = f.host.problem(problem.id)
+  assert.equal(row.recoveryRepair.state, 'consumed')
+  assert.equal(row.recoveryRepair.retryTicket, retry.ticket)
+  assert.equal(f.host.state().spends.filter(spend => spend.ticket === retry.ticket).length, 1)
+  assert.throws(() => f.host.reader.reflectionRequest(plan.reflection), /recovery_authorization_stale|problem_not_reflectable/u)
+  assert.equal(f.host.state().spends.filter(spend => spend.ticket === retry.ticket).length, 1,
+    'the same revision cannot obtain a second retry ticket')
+})
+
+test('P16: known 713-token legacy receipt dispatches exactly one 2048-token wire retry', async t => {
+  const f = fixture(t)
+  const problem = await parkedProblem(f)
+  const authorization = seedLegacyRepairReceipt(f, problem)
+  const oldReceipt = f.host.state().events.find(event => event.ticket === authorization.priorTicket)
+  assert.equal(oldReceipt.usage.totalTokens, 713)
+  assert.equal(oldReceipt.usage.completionTokens, 384)
+  assert.equal(f.host.service.authorizeProblemRecoveryRetry(authorization).authorized, true)
+  assert.equal(f.provider.last().maxTokens, 384, 'ordinary reflection keeps its 384-token wire cap')
+  const beforeCalls = f.provider.stats().physicalCalls
+  dueNow(f, problem)
+  const beforeGlobalRelease = f.host.reader.problemRecoveryPlan({ problemId: problem.id, projectKey: PROJECT,
+    environmentId: f.host.service.environmentId })
+  assert.equal(beforeGlobalRelease.recoverable, true)
+  assert.equal(beforeGlobalRelease.due, true, 'the persisted problem cooldown has elapsed')
+  const reflectionGate = f.host.reader.reflectionPlan(beforeGlobalRelease.reflection)
+  assert.equal(reflectionGate.skipped, 'reflection_budget',
+    'the newer synthetic legacy spend still holds the global cooldown')
+  assert.ok(reflectionGate.releaseAt > f.clock.now, 'the Core reports the durable global release time')
+  f.clock.now = Math.max(f.clock.now, reflectionGate.releaseAt) + 1
+  f.reply()
+  const pass = await f.host.service.runProblemPump()
+  await flush()
+  assert.equal(pass.attempted, 1)
+  assert.equal(f.provider.stats().physicalCalls, beforeCalls + 1)
+  assert.equal(f.provider.last().maxTokens, 2048, 'the provider sees the new bounded cap')
+  const retry = f.host.state().events.find(event => event.problemId === problem.id
+    && event.ticket !== authorization.priorTicket)
+  assert.equal(retry.requestMaxTokens, 2048)
+  assert.equal(retry.requestPolicy, 'problem-recovery-reflection-v1')
+  assert.match(retry.requestHash, /^[a-f0-9]{64}$/u)
+  assert.equal(f.host.problem(problem.id).recoveryRepair.state, 'consumed')
+  await f.host.service.runProblemPump()
+  assert.equal(f.provider.stats().physicalCalls, beforeCalls + 1, 'a second pass does not dispatch another repair')
+})
+
+test('P16: event pruning and cold restart cannot make competing repair ticket requests sign twice', async t => {
+  const f = fixture(t)
+  const problem = await parkedProblem(f)
+  const authorization = seedLegacyRepairReceipt(f, problem)
+  assert.equal(f.host.service.authorizeProblemRecoveryRetry(authorization).authorized, true)
+  f.host.reader.store.update(state => {
+    state.events = state.events.filter(event => event.ticket !== authorization.priorTicket)
+    state.spends = state.spends.filter(spend => spend.ticket !== authorization.priorTicket)
+  })
+  const nextAttemptAt = f.host.problem(problem.id).nextAttemptAt
+  await f.host.close()
+
+  const providerB = countedProvider({ instruction: INSTRUCTION })
+  const hostB = stage3dHost({ provider: providerB, scheduler: manualScheduler(), clock: f.clock,
+    stateRoot: f.host.stateRoot, sessions: f.sessions })
+  hostB.start()
+  t.after(async () => { await hostB.cleanup(); hostB.remove() })
+  await flush()
+  assert.equal(providerB.stats().physicalCalls, 0, 'a not-yet-due repair does not dispatch at restart')
+  assert.equal(hostB.problem(problem.id).recoveryRepair.state, 'authorized',
+    'the durable problem row retains proof after old receipt pruning and restart')
+
+  f.clock.now = nextAttemptAt + 1
+  const plan = hostB.reader.problemRecoveryPlan({ problemId: problem.id, projectKey: PROJECT,
+    environmentId: hostB.service.environmentId })
+  assert.equal(plan.due, true)
+  const contenders = await Promise.allSettled([hostB.reader, hostB.service.engine].map(engine =>
+    Promise.resolve().then(() => engine.reflectionRequest(plan.reflection))))
+  const signed = contenders.filter(result => result.status === 'fulfilled' && typeof result.value.ticket === 'string')
+  assert.equal(signed.length, 1, 'only one contender obtains a ticket across independent engine instances')
+  assert.equal(contenders.filter(result => result.status === 'rejected').length, 1)
+  assert.match(contenders.find(result => result.status === 'rejected').reason.message,
+    /recovery_authorization_stale|recovery_authorization_required/u)
+  assert.equal(hostB.problem(problem.id).recoveryRepair.state, 'consumed')
+  assert.equal(hostB.state().events.some(event => event.ticket === authorization.priorTicket), false)
+  assert.equal(hostB.state().spends.some(spend => spend.ticket === authorization.priorTicket), false)
+  assert.equal(hostB.state().spends.filter(spend => spend.ticket === signed[0].value.ticket).length, 1)
+  assert.equal(providerB.stats().physicalCalls, 0, 'signing a ticket in Core does not dispatch a provider')
+})
+
+test('P16: genuinely new independent evidence supersedes the repair and restores the normal opportunity', async t => {
+  const f = fixture(t)
+  const problem = await parkedProblem(f)
+  const authorization = seedLegacyRepairReceipt(f, problem)
+  assert.equal(f.host.service.authorizeProblemRecoveryRetry(authorization).authorized, true)
+  const revision = problem.evidenceRevision
+  f.clock.now = Math.max(f.clock.now, f.host.problem(problem.id).nextAttemptAt) + 1
+  const observed = f.host.reader.observeProblem({ eventId: 'new-independent-repair-evidence', kind: 'tool_failure',
+    source: 'host_event', sessionId: SESSION, turnId: 'fresh-turn-after-repair', projectKey: PROJECT,
+    environmentId: f.host.service.environmentId, toolName: 'bash', failureCode: 'tool_nonzero_exit',
+    summary: '新一轮工具失败的独立观测', route: ROUTE })
+  assert.equal(observed.id, problem.id)
+  assert.equal(observed.problem.evidenceRevision, revision + 1)
+  const row = f.host.problem(problem.id)
+  assert.equal(row.recoveryRepair.state, 'superseded')
+  assert.equal(row.state, 'eligible')
+  let plan = f.host.reader.problemRecoveryPlan({ problemId: problem.id, projectKey: PROJECT,
+    environmentId: f.host.service.environmentId })
+  assert.equal(plan.recoverable, true)
+  assert.equal(plan.due, true)
+  const reflectionGate = f.host.reader.reflectionPlan(plan.reflection)
+  assert.equal(reflectionGate.skipped, 'reflection_budget',
+    'new evidence is ready at the problem layer but still observes the global cooldown')
+  assert.ok(reflectionGate.releaseAt > f.clock.now)
+  f.clock.now = Math.max(f.clock.now, reflectionGate.releaseAt) + 1
+  plan = f.host.reader.problemRecoveryPlan({ problemId: problem.id, projectKey: PROJECT,
+    environmentId: f.host.service.environmentId })
+  assert.equal(plan.due, true, 'the new revision is still due after the global wait')
+  const ticket = f.host.reader.reflectionRequest(plan.reflection)
+  assert.equal(typeof ticket.ticket, 'string', 'new evidence uses the ordinary revision opportunity')
+  assert.equal(f.host.problem(problem.id).attemptedRevision, revision + 1)
+  assert.equal(f.host.problem(problem.id).recoveryRepair.state, 'superseded')
+})
+
+test('P16: legacy registration refuses dispatched receipts and unknown usage', async t => {
+  for (const invalid of [{ label: 'dispatched', options: { dispatched: true } },
+    { label: 'unknown usage', options: { unknownUsage: true } }]) {
+    const f = fixture(t)
+    const problem = await parkedProblem(f)
+    const input = seedLegacyRepairReceipt(f, problem, invalid.options)
+    const result = f.host.service.authorizeProblemRecoveryRetry(input)
+    assert.deepEqual(result, { ok: false, code: 'repair_evidence_insufficient' }, invalid.label)
+    assert.equal(f.host.problem(problem.id).recoveryRepair, undefined, `${invalid.label}: no marker is written`)
+  }
 })

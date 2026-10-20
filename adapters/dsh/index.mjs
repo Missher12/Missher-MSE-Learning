@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { createHash } from 'node:crypto'
 import { evaluationRequestHash } from './evaluation-request.mjs'
+import { usageTokens } from './usage.mjs'
 import { LearningEngine, reflect, guardedAction, RECALL_REASONS } from '../../src/index.mjs'
 import { createHarnessBridge, mseMessageSource } from '../harness.mjs'
 import { formatRecallLine, handleMseCommand } from '../../src/status.mjs'
@@ -11,6 +12,7 @@ import { apply as applyDetails } from './details.mjs'
 import { apply as applyControl, readModel, REFLECTION_OUTPUT_BYTES } from './control.mjs'
 import { CALL_DEADLINE_MS, JobQueue } from './jobs.mjs'
 import { createAutoValidation } from './auto.mjs'
+import { decisionEndpointError, requestDecision } from '../../src/decision-providers.mjs'
 import { PROBLEM_DEFER_PLAN_CODES } from '../../src/problems.mjs'
 import { latestRoute } from './session-digest.mjs'
 import { getDomainPack, listDomainPacks, packAdmits, packCaseCriteriaHash, packCases, packScenarioHash,
@@ -23,7 +25,12 @@ import { shortHash } from './project.mjs'
 import { validateGuardTemplate, createGuardFunction, checkGuard } from '../../src/guards.mjs'
 import { createTaskEvidenceAuthority } from '../../src/task-evidence.mjs'
 
-/** Observe the real DSH file editor and verify the project's root package.json structure. */
+const DECISION_POLICY_V1 = 'experience-upgrade-v1'
+const DECISION_POLICY_V2 = 'experience-upgrade-v2-host-output-2048'
+const LEGACY_DECISION_OUTPUT_TOKENS = 512
+const HOST_DECISION_OUTPUT_TOKENS = 2048
+
+/** Observe DSH write/edit tools (and the legacy editor) before checking root package.json. */
 export function registerDshProjectManifestIntake(ctx, { engine, bridge, environmentId, enabled = () => true }) {
   if (!ctx.fs || typeof ctx.fs.resolve !== 'function' || typeof ctx.fs.stat !== 'function'
     || typeof ctx.fs.readText !== 'function' || typeof ctx.on !== 'function') {
@@ -40,28 +47,45 @@ export function registerDshProjectManifestIntake(ctx, { engine, bridge, environm
     }
     return null
   }
+  const isMutationCall = exec => {
+    const args = exec?.arguments
+    if (exec?.name === 'write') {
+      return typeof args?.file_path === 'string' && typeof args.content === 'string'
+    }
+    if (exec?.name === 'edit') {
+      return typeof args?.file_path === 'string' && typeof args.old_string === 'string'
+        && args.old_string.length > 0 && typeof args.new_string === 'string' && args.old_string !== args.new_string
+        && (args.replace_all === undefined || typeof args.replace_all === 'boolean')
+    }
+    if (exec?.name === 'str_replace_editor' && ['create', 'str_replace', 'insert'].includes(args?.command)) {
+      return typeof args.path === 'string'
+    }
+    return false
+  }
   const stopObserved = ctx.on('fs/observed', (target, observation, exec) => {
-    if (disposed || !enabled() || exec?.name !== 'str_replace_editor' || typeof exec.token !== 'symbol'
-      || !['create', 'str_replace', 'insert'].includes(exec.arguments?.command)) return
-    const session = exec.agent?.session, callId = exec.rootCallId ?? exec.callId
+    if (disposed || !enabled() || !isMutationCall(exec) || typeof exec.token !== 'symbol'
+      || writes.has(exec.token)) return
+    const session = exec.agent?.session, callId = exec.callId, rootCallId = exec.rootCallId ?? callId
     const cwd = session?.header?.cwd
     if (typeof session?.id !== 'string' || typeof cwd !== 'string' || !isAbsolute(cwd)
-      || typeof callId !== 'string' || typeof observation?.version !== 'string'
+      || typeof callId !== 'string' || typeof rootCallId !== 'string' || typeof observation?.version !== 'string'
       || observation.kind !== 'present' || writes.size + inFlight.size >= MAX_PENDING) return
     const expectedPath = resolve(cwd, 'package.json')
     if (target?.displayPath !== expectedPath) return
-    const turnId = turnFor(session, callId)
+    const turnId = turnFor(session, rootCallId)
     if (turnId === null) return
     writes.set(exec.token, { expectedPath, version: observation.version, sessionId: session.id,
-      turnId, callId, projectKey: cwd })
+      turnId, callId, rootCallId, toolName: exec.name, projectKey: cwd })
   })
   const processResult = async (exec, result) => {
     const write = writes.get(exec?.token)
-    writes.delete(exec?.token)
-    if (disposed || !enabled() || !write || exec?.name !== 'str_replace_editor' || result?.isError !== false) return
+    if (!write || exec?.name !== write.toolName || exec?.callId !== write.callId
+      || (exec?.rootCallId ?? exec?.callId) !== write.rootCallId) return
+    writes.delete(exec.token)
+    if (disposed || !enabled() || result?.isError !== false) return
     try {
       const session = exec.agent?.session
-      if (!session || session.id !== write.sessionId || turnFor(session, write.callId) !== write.turnId) return
+      if (!session || session.id !== write.sessionId || turnFor(session, write.rootCallId) !== write.turnId) return
       const context = bridge.taskContext(session.id, write.turnId)
       if (!context || context.projectKey !== write.projectKey || typeof context.provider !== 'string'
         || typeof context.model !== 'string') return
@@ -79,7 +103,7 @@ export function registerDshProjectManifestIntake(ctx, { engine, bridge, environm
       if (second?.type !== 'file' || second.version !== first.version
         || typeof content !== 'string' || Buffer.byteLength(content, 'utf8') > 32_000) return
       if (disposed || !enabled() || exec.agent?.session?.id !== write.sessionId
-        || turnFor(exec.agent?.session, write.callId) !== write.turnId) return
+        || turnFor(exec.agent?.session, write.rootCallId) !== write.turnId) return
       const fileHash = createHash('sha256').update(content).digest('hex')
       engine.recordPackageJsonArtifact(authority, { adapterId: 'dsh', content, environmentId: environmentId ?? null,
         eventId: write.callId, fileHash, filename: basename(write.expectedPath), model: context.model,
@@ -254,6 +278,22 @@ const REFLECTION_LIMIT = 3
 const REFLECTION_WINDOW_MS = 86_400_000
 const REFLECTION_COOLDOWN_MS = 30 * 60_000
 const REFLECTION_OUTPUT_TOKENS = 384
+const REFLECTION_FAILURES = new Set(['reflection_invalid_json', 'reflection_incomplete', 'reflection_too_large',
+  'reflection_failed', 'reflection_cancelled', 'source_changed', 'permission_revoked', 'reflection_request_mismatch'])
+const reflectionFinishKind = value => value === 'content-filter' ? 'content_filter'
+  : value === 'max-tokens' ? 'length'
+  : ['stop', 'length', 'error', 'aborted'].includes(value) ? value
+    : typeof value === 'string' && value !== '' ? 'other' : 'missing'
+const reflectionUsage = usage => {
+  const totalTokens = usageTokens(usage)
+  if (totalTokens === null) return { known: false }
+  const hasParts = Number.isSafeInteger(usage?.inputTokens) && Number.isSafeInteger(usage?.outputTokens)
+    && Number.isSafeInteger(usage?.cacheReadTokens) && Number.isSafeInteger(usage?.cacheWriteTokens)
+  return hasParts ? { known: true,
+    promptTokens: usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens,
+    completionTokens: usage.outputTokens, totalTokens }
+    : { known: true, totalTokens }
+}
 const PACKAGE_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))))
 /**
  * How many recoverable problems ONE host pass may consider.
@@ -279,11 +319,12 @@ const boundedCode = (value, fallback = 'reflection_failed') =>
  * keeps the slot deliberately — the job queue reports the job as draining, which is the truthful
  * state, and only a provider that really settles frees it.
  */
-async function drainProviderStream(iterator) {
+async function drainProviderStream(iterator, onChunk = null) {
   try {
     while (true) {
       const step = await iterator.next()
       if (step.done === true) return true
+      try { onChunk?.(step.value) } catch { /* usage observation is best-effort, never a slot release */ }
     }
   } catch { return false }
 }
@@ -331,6 +372,10 @@ export function apply(ctx, config = {}) {
       0, EVALUATION_TOKENS_MAX, SETTINGS_DEFAULTS.evaluationTokensPerDay),
     evaluationCallsPerDay: boundedInt(readVolatile(config, 'evaluationCallsPerDay', SETTINGS_DEFAULTS.evaluationCallsPerDay),
       0, EVALUATION_CALLS_MAX, SETTINGS_DEFAULTS.evaluationCallsPerDay),
+    decisionBackend: readVolatile(config, 'decisionBackend', SETTINGS_DEFAULTS.decisionBackend),
+    decisionModel: String(readVolatile(config, 'decisionModel', '') ?? '').slice(0, 128),
+    decisionEndpoint: String(readVolatile(config, 'decisionEndpoint', '') ?? '').slice(0, 2048),
+    decisionSecretRef: String(readVolatile(config, 'decisionSecretRef', '') ?? '').slice(0, 256),
   })
   const initial = readPolicy()
   // Environment identity stays the SDK default (`default`) unless the operator opts
@@ -663,6 +708,9 @@ export function apply(ctx, config = {}) {
     } catch { review.usedLast24h = null; review.allowance = null }
     return {
         namespace: SETTINGS_NAMESPACE, pluginVersion: version, settingsSource: 'plugin_config',
+      // Decision details are scope-bound. Settings has no selected project/environment, so never
+      // surface an arbitrary project's candidate text here.
+      decisions: { latest: [], scopeRequired: true },
       user: { enabled: p.enabled, reflectionEnabled: p.reflectionEnabled,
         autoValidationEnabled: p.autoValidationEnabled, maxContextBytes: p.maxContextBytes,
         evaluationTokensPerDay: p.evaluationTokensPerDay, evaluationCallsPerDay: p.evaluationCallsPerDay },
@@ -960,8 +1008,18 @@ export function apply(ctx, config = {}) {
             reason: boundedCode(prepared?.skipped ?? 'not_reflectable') } }
         }
         const timer = setTimeout(() => controller.abort(), CALL_DEADLINE_MS)
-        let text = '', finished = false, failure = null
+        let text = '', finished = false, finishKind = 'missing', failure = null, reportedUsage = null
         try {
+          if (prepared.dispatchHash) {
+            const dispatched = engine.reflectionDispatch({ ticket, dispatchHash: prepared.dispatchHash })
+            if (dispatched?.ok !== true) {
+              if (dispatched?.code === 'evaluation_budget' || dispatched?.code === 'evaluation_budget_calls') {
+                return { state: 'done', code: null, result: { kind: 'reflection', status: 'skipped',
+                  reason: 'reflection_budget' } }
+              }
+              throw new Error(dispatched?.code ?? 'merge_generation_dispatch_refused')
+            }
+          }
           // The iterator is driven EXPLICITLY rather than through `for await`: a local refusal (an
           // oversized answer, a broken protocol) must NOT abandon a request that may still be running
           // — `break`/`throw` would hand the generator a `return()` whose settlement we do not own.
@@ -974,16 +1032,22 @@ export function apply(ctx, config = {}) {
             const step = await iterator.next()
             if (step.done === true) break
             const chunk = step.value
+            if (chunk.type === 'usage') reportedUsage = chunk.usage ?? null
             // A CANCELLED or timed-out request keeps DRAINING: the loop runs to the provider's real
             // end (that is what keeps the slot honest) while an answer that no longer has a licence is
             // never accumulated, so a late result cannot become a candidate.
             if (signal.aborted) continue
             if (chunk.type === 'text-delta') {
+              if (finished) { failure = 'reflection_incomplete'; break }
               text += chunk.text
               if (Buffer.byteLength(text) > REFLECTION_OUTPUT_BYTES) { failure = 'reflection_too_large'; break }
             }
             if (chunk.type === 'finish') {
-              if (['error', 'aborted'].includes(chunk.reason?.kind)) { failure = 'reflection_failed'; break }
+              finishKind = reflectionFinishKind(chunk.reason?.kind)
+              if (finished || finishKind !== 'stop') {
+                failure = ['error', 'aborted'].includes(finishKind) ? 'reflection_failed' : 'reflection_incomplete'
+                break
+              }
               finished = true
             }
           }
@@ -992,10 +1056,11 @@ export function apply(ctx, config = {}) {
             // running), and only then wait for it: the drain below is the queue's physical guarantee,
             // not a 60-second grace period before the request is even asked to end.
             try { controller.abort() } catch { /* already aborted */ }
-            await drainProviderStream(iterator)
+            await drainProviderStream(iterator, chunk => { if (chunk?.type === 'usage') reportedUsage = chunk.usage ?? null })
             throw new Error(failure)
           }
-          if (!finished) throw new Error('reflection_incomplete')
+          if (signal.aborted) { failure = 'reflection_cancelled'; throw new Error(failure) }
+          if (!finished) { failure = 'reflection_incomplete'; throw new Error(failure) }
           if (sourceCheck !== null) {
             // The last AWAITED re-confirmation: the source session and its route are read again after
             // the provider returned, so a source that was archived or re-pointed while the request was
@@ -1011,17 +1076,41 @@ export function apply(ctx, config = {}) {
           if (signal.aborted) throw new Error('reflection_cancelled')
           if (lastBlocked !== null) throw new Error(lastBlocked)
           if (typeof context.allowed === 'function' && context.allowed() !== true) throw new Error('permission_revoked')
-          const learned = engine.reflectionResult({ ticket, result: JSON.parse(text) })
+          const expected = prepared.source ? { routeId: prepared.source.routeId, revision: prepared.source.revision,
+            bindingHash: prepared.source.bindingHash, epoch: prepared.source.epoch,
+            controlGeneration: prepared.source.controlGeneration, sessionHash: prepared.source.sessionHash } : undefined
+          let result
+          try { result = JSON.parse(text) } catch {
+            failure = 'reflection_invalid_json'
+            throw new Error(failure)
+          }
+          const learned = engine.reflectionResult({ ticket, result, requestHash: prepared.dispatchHash,
+            ...(expected === undefined ? {} : { expected }), usage: reflectionUsage(reportedUsage) })
           const status = typeof learned?.id === 'string' && learned.id !== '' ? 'learned'
-            : learned?.skipped === 'abstained' ? 'abstained' : learned?.skipped ? 'skipped' : 'unknown'
+            : learned?.skipped === 'abstained' ? 'abstained'
+              : learned?.mergeStatus?.state ? learned.mergeStatus.state
+                : learned?.skipped ? 'skipped' : 'unknown'
+          const reflectionReason = learned?.mergeStatus?.reason
+            ?? (status === 'learned' ? null : learned?.skipped ?? 'reflection_result_unrecognised')
           return { state: 'done', code: null, result: { kind: 'reflection', status,
             lessonId: typeof learned?.id === 'string' ? learned.id : null,
-            reason: boundedCode(learned?.skipped ?? 'reflection_result_unrecognised') } }
+            reason: reflectionReason === null ? null : boundedCode(reflectionReason) } }
         } catch (error) {
           // A ticket that was issued is CONSUMED and never refunded: an interrupted, timed-out,
           // cancelled, oversized or unparseable answer leaves the attempted revision in force, so the
           // same evidence is never sent a second time — not after a restart, and not across a day.
-          try { engine.reflectionCancel({ ticket }) } catch { /* already settled */ }
+          const candidate = failure ?? error?.code ?? error?.message
+          const sourceFailures = ['source_unbound', 'source_route_unbound', 'source_unavailable', 'source_archived',
+            'source_route_changed', 'source_stale_revision', 'source_reasoning_unavailable', 'scope_mismatch',
+            'environment_mismatch', 'source_changed']
+          const permissionFailures = ['foreground', 'plugin_disposed', 'user_paused', 'reflection_disabled',
+            'control_changed', 'reflection_cancelled']
+          const failureCode = REFLECTION_FAILURES.has(candidate) ? candidate
+            : sourceFailures.includes(candidate) ? 'source_changed'
+              : permissionFailures.includes(candidate) ? 'reflection_cancelled' : 'reflection_failed'
+          try { engine.reflectionCancel({ ticket, usage: reflectionUsage(reportedUsage),
+            failure: { code: failureCode, finishKind,
+              outputBytes: Buffer.byteLength(text) } }) } catch { /* already settled */ }
           return { state: 'failed', code: boundedCode(error?.code ?? error?.message) }
         } finally { clearTimeout(timer) }
       } })
@@ -1295,6 +1384,274 @@ export function apply(ctx, config = {}) {
     evidenceTrial: evidenceTrialFor,
     objectiveContext: objectiveContextFor,
     source: sourceFor,
+    // The decision backend is an explicitly configured route. The default Host route follows the
+    // candidate's own recorded session; DSH reports total usage, which the decision ledger accepts
+    // without inventing an input/output split. External providers report their own split. Opinions
+    // are advisory and can only affect the candidate's existing validation eligibility/ordering.
+    decisionRunner: async (candidate, runContext) => {
+      const policy = readPolicy()
+      const backend = policy.decisionBackend
+      const hostRoute = sourceFor(candidate)?.route ?? null
+      // A Host model name is only usable when this source's observed route proves it. The optional
+      // model field configures remote backends; it cannot silently overwrite a host-confirmed model.
+      const model = backend === 'host' ? hostRoute?.model || '' : policy.decisionModel
+      if (!['host', 'openai_compatible', 'jev', 'laya'].includes(backend) || model === ''
+        || (backend !== 'host' && policy.decisionEndpoint === '')
+        || (backend === 'host' && (hostRoute === null || typeof hostRoute.provider !== 'string'))) {
+        return { ok: false, code: 'decision_route_unconfigured' }
+      }
+      const isDecisionAllowed = () => !disposed && readPolicy().autoValidationEnabled === true
+        && sync().length === 0 && runContext?.allowed?.() !== false && runContext?.signal?.aborted !== true
+      if (!isDecisionAllowed()) return { ok: false, code: 'cancelled' }
+      let endpoint
+      if (backend !== 'host') {
+        const endpointError = decisionEndpointError(backend, policy.decisionEndpoint)
+        if (endpointError) return { ok: false, code: endpointError }
+        endpoint = new URL(policy.decisionEndpoint)
+      }
+      const secretRef = policy.decisionSecretRef
+      if (backend !== 'host' && secretRef !== '' && (!/^[A-Za-z_][A-Za-z0-9_]{0,254}$/u.test(secretRef)
+        || typeof process.env[secretRef] !== 'string' || process.env[secretRef] === '')) {
+        return { ok: false, code: 'provider_secret_unavailable' }
+      }
+      const scope = typeof candidate.projectKey === 'string' && candidate.projectKey !== ''
+        ? candidate.projectKey : scopeOf(candidate)
+      let facts
+      try { facts = engine.decisionContext({ lessonId: candidate.id, projectKey: scope, environmentId }) }
+      catch (error) { return { ok: false, code: error?.code ?? 'decision_context_unavailable' } }
+      if (facts?.ok !== true) return { ok: false, code: facts?.code ?? 'decision_context_unavailable' }
+      if (facts.contextIncomplete === true) return { ok: false, code: 'decision_context_truncated' }
+      // An expired licence without new evidence has no renewal path. Check this free core fact
+      // before decisionRequest can reserve a paid classification ticket.
+      if (facts.trialState === 'withdrawn' && facts.renewalState === 'waiting_evidence') {
+        return { ok: false, code: 'renewal_waiting_evidence' }
+      }
+      const evidence = { candidateId: facts.candidateId, version: facts.version, kind: facts.kind,
+        status: facts.status, methodRegistered: facts.methodRegistered, candidateSummary: facts.candidateSummary,
+        applicability: facts.applicability, exclusions: facts.exclusions, validators: facts.validators,
+        registeredVerifier: facts.registeredVerifier, mergeCandidates: facts.mergeCandidates,
+        registeredChecker: facts.registeredChecker, evidenceCount: facts.evidenceCount,
+        counterEvidenceCount: facts.counterEvidenceCount, counterEvidenceState: facts.counterEvidenceState,
+        evidenceCapacityWaiting: facts.evidenceCapacityWaiting,
+        evidenceRefs: facts.evidenceRefs, refs: facts.evidenceRefs, reviewState: facts.reviewState,
+        trialState: facts.trialState, renewalState: facts.renewalState, renewalReason: facts.renewalReason,
+        objectiveState: facts.objectiveState, validator: facts.validator }
+      const inputTokens = Math.max(1, Buffer.byteLength(JSON.stringify(evidence), 'utf8'))
+      const primaryOutputTokens = backend === 'host' ? HOST_DECISION_OUTPUT_TOKENS : LEGACY_DECISION_OUTPUT_TOKENS
+      const request = engine.decisionRequest({ candidateId: facts.candidateId, version: facts.version,
+        evidenceRevision: facts.evidenceRevision, projectHash: facts.projectHash, evidence,
+        ruleVersion: DECISION_POLICY_V2, role: 'candidate-routing', backend,
+        provider: backend === 'host' ? hostRoute.provider : backend, model,
+        ...(backend !== 'host' && hostRoute !== null ? { fallbackRoute: { provider: hostRoute.provider,
+          model: hostRoute.model, apiMode: hostRoute.apiMode ?? 'host_llm_stream',
+          reasoningEffort: hostRoute.reasoningEffort ?? 'unspecified' } } : {}),
+        ...(backend === 'host' ? {} : { endpoint: policy.decisionEndpoint }),
+        apiMode: backend === 'host' ? (hostRoute.apiMode ?? 'host_llm_stream') : 'systemone-or-chat-completions',
+        reasoningEffort: hostRoute?.reasoningEffort ?? 'unspecified', inputTokens, outputTokens: primaryOutputTokens,
+        lessonId: facts.candidateId, projectKey: scope, environmentId })
+      const hostFallbackAvailable = backend !== 'host' && hostRoute !== null
+      let primaryUsage = null
+      const resumeFallback = request?.resumeFallback === true
+      if (request?.ok !== true || request.duplicate !== false) {
+        const prior = request?.record
+        if (!resumeFallback) {
+          return prior?.state === 'complete' && prior.result?.action
+            ? { ok: true, action: prior.result.action, decisionId: prior.key }
+            : { ok: false, code: request?.code ?? prior?.error ?? 'decision_waiting' }
+        }
+      }
+      const hostCallFor = (route, hostModel) => async ({ state, signal, outputTokens = HOST_DECISION_OUTPUT_TOKENS }) => {
+        const response = await readModel(ctx, { route: { ...route, model: hostModel }, system:
+          'Return exactly one JSON object with keys action, confidence, confidenceMeaning, reasons, riskCodes, optional evidenceRefs, and optional mergeTarget {id,version}. ' +
+          'action must be one of prioritize_validation, suggest_merge, recheck, review, trial, wait, reject. ' +
+          'For suggest_merge, mergeTarget must copy one exact id and version from supplied mergeCandidates; if no unique safe target exists, choose wait. ' +
+          'confidence is a number from 0 to 1 and confidenceMeaning is a short string. reasons is an array of at most 4 short strings; ' +
+          'riskCodes is an array of at most 8 short strings; evidenceRefs may only copy supplied SHA-256 references. ' +
+          'This is advisory only: never claim verification, promotion, or objective success.',
+          prompt: state, maxTokens: outputTokens, signal, pluginForm: 'case-run', outputLimitBytes: 8192 })
+        return { result: response.output, model: hostModel, complete: response.truncated !== true,
+          usage: response.tokensKnown === true ? { totalTokens: response.tokens } : null }
+      }
+      const hostCall = hostRoute === null ? null : hostCallFor(hostRoute, model || hostRoute.model)
+      if (resumeFallback) return await runHostFallback(request)
+      let primaryDispatched = false
+      try {
+        const answer = await requestDecision({ backend, endpoint: policy.decisionEndpoint,
+          model, evidence, signal: runContext?.signal, outputTokens: primaryOutputTokens,
+          isAllowed: isDecisionAllowed,
+          onDispatch: () => {
+            if (!isDecisionAllowed()) return { ok: false, code: 'cancelled' }
+            const started = engine.decisionStarted({ ticket: request.ticket, requestHash: request.requestHash })
+            if (started?.ok === true) primaryDispatched = true
+            return started
+          },
+          ...(backend === 'host' ? { hostCall } : { ...(secretRef === '' ? {} : { secretRef, resolveSecret: name => process.env[name] }) })
+        })
+        primaryUsage = answer?.usage ?? null
+        if (answer?.ok === false) {
+          const failed = engine.decisionFail({ ticket: request.ticket,
+            code: answer.code ?? 'provider_invalid_response', usage: answer.usage ?? null,
+            allowFallback: hostFallbackAvailable })
+          if (failed?.needsHostFallback === true) return await runHostFallback()
+          return { ok: false, code: failed?.record?.error ?? answer.code ?? 'provider_invalid_response' }
+        }
+        const completed = engine.decisionComplete({ ticket: request.ticket, model: answer.model,
+          result: answer.result, usage: answer.usage, complete: answer.complete, abstention: answer.abstention,
+          evidenceRevision: facts.evidenceRevision, version: facts.version,
+          fallbackPending: hostFallbackAvailable })
+        if (completed?.needsHostFallback === true) return await runHostFallback()
+        return completed?.ok === true ? { ok: true, action: completed.record?.result?.action,
+          decisionId: completed.record?.key }
+          : { ok: false, code: completed?.code ?? 'decision_settlement_failed' }
+      } catch (error) {
+        const code = typeof error?.message === 'string' && /^[a-z0-9_]{1,64}$/u.test(error.message)
+          ? error.message : 'provider_failed'
+        if (!primaryDispatched) {
+          engine.decisionAbortBeforeDispatch({ ticket: request.ticket })
+          return { ok: false, code }
+        }
+        const failed = engine.decisionFail({ ticket: request.ticket, code, usage: null })
+        return { ok: false, code: failed?.record?.error ?? code }
+      }
+      async function runHostFallback(continuation = request) {
+        const fallbackTicket = continuation.ticket ?? continuation.record?.ticket
+        const snapshot = engine.store.read()
+        const fallbackRecord = continuation.record
+          ?? snapshot.decisionRecords?.find(row => row.ticket === fallbackTicket)
+        const fallbackIdentity = continuation.identity ?? { key: fallbackRecord?.key ?? request.identity?.key }
+        if (!fallbackTicket || !fallbackRecord || !hostRoute
+          || runContext?.allowed?.() === false || runContext?.signal?.aborted === true) {
+          return { ok: false, code: 'decision_fallback_unavailable' }
+        }
+        if (continuation.requestedInputDigest !== undefined
+          && continuation.requestedInputDigest !== fallbackRecord.inputDigest) {
+          return { ok: false, code: 'decision_fallback_policy_mismatch' }
+        }
+        const fallbackRoute = fallbackRecord.fallbackRoute
+        const routeMatches = fallbackRoute
+          && fallbackRoute.provider === hostRoute.provider && fallbackRoute.model === hostRoute.model
+          && fallbackRoute.apiMode === (hostRoute.apiMode ?? 'host_llm_stream')
+          && fallbackRoute.reasoningEffort === (hostRoute.reasoningEffort ?? 'unspecified')
+        if (!routeMatches) return { ok: false, code: 'decision_fallback_route_changed' }
+        const expectedOutputTokens = fallbackRecord.ruleVersion === DECISION_POLICY_V1
+          ? LEGACY_DECISION_OUTPUT_TOKENS
+          : fallbackRecord.ruleVersion === DECISION_POLICY_V2 ? HOST_DECISION_OUTPUT_TOKENS : null
+        if (expectedOutputTokens === null) return { ok: false, code: 'decision_policy_transition_fenced' }
+        const job = snapshot.jobs?.find(row => row.ticket === fallbackTicket && row.kind === 'decision')
+        const priorReservation = job?.stepReservations?.find(row => row.stepKey === 'decision:host')
+        if (priorReservation && (priorReservation.dispatched === true || priorReservation.completed === true)) {
+          return { ok: false, code: 'decision_fallback_not_ready' }
+        }
+        const inputTokenBound = Math.max(1, Buffer.byteLength(JSON.stringify(evidence), 'utf8'))
+        if (priorReservation && (priorReservation.outputTokens !== expectedOutputTokens
+          || priorReservation.inputTokens !== inputTokenBound)) {
+          return { ok: false, code: 'decision_fallback_policy_mismatch' }
+        }
+        const fallbackOutputTokens = priorReservation?.outputTokens ?? expectedOutputTokens
+        const fallbackHash = priorReservation?.requestHash ?? createHash('sha256').update(JSON.stringify(
+          fallbackRecord.ruleVersion === DECISION_POLICY_V1
+            ? [fallbackIdentity.key, 'decision:host', fallbackRoute.provider, fallbackRoute.model,
+              fallbackRoute.reasoningEffort ?? null]
+            : [fallbackIdentity.key, 'decision:host', fallbackRoute.provider, fallbackRoute.model,
+              fallbackRoute.reasoningEffort ?? null, fallbackOutputTokens])).digest('hex')
+        const fallbackHostCall = hostCallFor(hostRoute, fallbackRoute.model)
+        const reserved = engine.decisionReserveFallback({ ticket: fallbackTicket,
+          inputTokens: priorReservation?.inputTokens ?? inputTokenBound,
+          outputTokens: fallbackOutputTokens, requestHash: fallbackHash, provider: fallbackRoute.provider,
+          model: fallbackRoute.model, apiMode: fallbackRoute.apiMode,
+          reasoningEffort: fallbackRoute.reasoningEffort })
+        if (reserved?.ok !== true) {
+          // Keep the paid primary checkpoint and logical ticket live. A later scan can resume only
+          // this fallback step when the shared allowance permits it.
+          return { ok: false, code: reserved?.code ?? 'evaluation_budget' }
+        }
+        let fallbackDispatched = false
+        try {
+          const fallback = await requestDecision({ backend: 'host', model: fallbackRoute.model, evidence,
+            signal: runContext?.signal, outputTokens: fallbackOutputTokens, isAllowed: isDecisionAllowed,
+            onDispatch: () => {
+              if (!isDecisionAllowed()) return { ok: false, code: 'cancelled' }
+              const started = engine.decisionStarted({ ticket: fallbackTicket, stepKey: 'decision:host',
+                requestHash: reserved.requestHash })
+              if (started?.ok === true) fallbackDispatched = true
+              return started
+            }, hostCall: fallbackHostCall })
+          if (fallback?.ok === false) {
+            const closed = engine.decisionFail({ ticket: fallbackTicket, stepKey: 'decision:host',
+              code: fallback.code ?? 'provider_invalid_response', usage: fallback.usage ?? null })
+            return { ok: false, code: closed?.record?.error ?? fallback.code ?? 'provider_invalid_response' }
+          }
+          const final = engine.decisionComplete({ ticket: fallbackTicket, stepKey: 'decision:host',
+            model: fallback.model, result: fallback.result, usage: fallback.usage, complete: fallback.complete,
+            abstention: fallback.abstention, evidenceRevision: facts.evidenceRevision, version: facts.version })
+          return final?.ok === true ? { ok: true, action: final.record?.result?.action,
+            decisionId: final.record?.key }
+            : { ok: false, code: final?.code ?? 'decision_settlement_failed' }
+        } catch (error) {
+          const code = typeof error?.message === 'string' && /^[a-z0-9_]{1,64}$/u.test(error.message)
+            ? error.message : 'provider_failed'
+          if (!fallbackDispatched) {
+            engine.decisionAbortBeforeDispatch({ ticket: fallbackTicket, stepKey: 'decision:host' })
+            return { ok: false, code }
+          }
+          const closed = engine.decisionFail({ ticket: fallbackTicket, stepKey: 'decision:host', code, usage: null })
+          return { ok: false, code: closed?.record?.error ?? code }
+        }
+      }
+    },
+    // Run the ordinary advisory decision first, release its physical job, then enter the existing
+    // reflection queue/slot with a Core-frozen two-parent generation plan. This ordering prevents
+    // nested-slot deadlock and keeps the generated candidate on reflection's normal budget/control.
+    mergeRunner: async (candidate, outcome) => {
+      const decisionId = outcome?.decisionId
+      if (typeof decisionId !== 'string') return { ok: false, reason: 'merge_decision_unavailable' }
+      const projectKey = scopeOf(candidate)
+      let plan
+      try { plan = engine.decisionMergePlan({ decisionId, projectKey, environmentId }) }
+      catch (error) { plan = { ok: false, code: error?.code ?? 'merge_parent_stale' } }
+      if (plan?.ok !== true) {
+        const reason = plan?.code ?? 'merge_parent_stale'
+        engine.decisionMergeWait({ decisionId, projectKey, environmentId,
+          reason: ['merge_target_ambiguous', 'merge_parent_stale', 'merge_verifier_mismatch',
+            'merge_conditions_conflict', 'merge_source_unavailable'].includes(reason) ? reason : 'merge_parent_stale' })
+        return { ok: false, reason }
+      }
+      const source = sourceFor(candidate)
+      const route = boundedRoute(source?.route)
+      if (route === null || source?.sessionId !== plan.source.sessionId) {
+        engine.decisionMergeWait({ decisionId, projectKey, environmentId, reason: 'merge_source_unavailable' })
+        return { ok: false, reason: 'merge_source_unavailable' }
+      }
+      const resolved = await resolveRecoverySource({ sessionId: plan.source.sessionId, provider: route.provider,
+        model: route.model, reasoningEffort: route.reasoningEffort ?? null })
+      if (resolved?.ok !== true || resolved.projectKey !== projectKey) {
+        engine.decisionMergeWait({ decisionId, projectKey, environmentId, reason: 'merge_source_unavailable' })
+        return { ok: false, reason: resolved?.code ?? 'merge_source_unavailable' }
+      }
+      const sourceCheck = createSourceCheck({ sessionId: resolved.sessionId, provider: route.provider,
+        model: route.model, reasoningEffort: route.reasoningEffort ?? null, projectKey,
+        epoch: resolved.epoch, controlGeneration: resolved.controlGeneration, problem: null,
+        sourceBinding: resolved.sourceBinding })
+      const result = await runReflectionInSlot({
+        requestId: reflectionRequestId('msemerge', `${decisionId}:${plan.generationKey}`, reflectionSequence += 1),
+        fingerprint: `merge:${plan.generationKey}`, label: 'MSE 受控合并生成', sourceCheck,
+        prepare: () => ({ ok: true, recoverable: true, due: true, route,
+          reflection: { taskSummary: '按冻结的两个父经验生成一个新候选', resultSummary: `decision ${decisionId}`,
+            outcome: 'supported', sessionId: plan.source.sessionId, projectKey, environmentId,
+            generation: { decisionId, generationKey: plan.generationKey } } }),
+      })
+      if (result.consumed !== true && result.result?.reason) {
+        const reason = result.result.reason
+        const waitReason = reason === 'reflection_budget' || reason === 'reflection_cooldown' ? 'reflection_budget'
+          : ['merge_target_ambiguous', 'merge_parent_stale', 'merge_verifier_mismatch',
+            'merge_conditions_conflict', 'merge_source_unavailable'].includes(reason) ? reason : 'merge_generation_failed'
+        engine.decisionMergeWait({ decisionId, projectKey, environmentId, reason: waitReason })
+        return { ok: false, reason }
+      }
+      return { ok: ['learned', 'complete'].includes(result.result?.status),
+        reason: result.result?.reason ?? (result.result?.status === 'learned'
+          ? null : result.code ?? 'merge_generation_unknown') }
+    },
     // The foreground (a user turn or a manual job) always wins: the automatic queue yields while one
     // is running instead of competing for the provider, and it is aborted outright when the operator
     // pauses learning, closes the switch, or the plugin is disposed.
@@ -1989,8 +2346,10 @@ export function apply(ctx, config = {}) {
         yielded: lastProblemPass.yielded, codes: [...lastProblemPass.codes], at: lastProblemPass.at } }
   }
 
-  const service = { version, engine, bridge, environmentId, jobs, capabilities: bridge.capabilities,
+    const service = { version, engine, bridge, environmentId, jobs, capabilities: bridge.capabilities,
     settings: () => settingsSnapshot(), permissions, resolveScope, scopeHashFor: shortHash,
+    /** Narrow one-time receipt registration; verify it read-only with problemStatus/problemDueFeed. */
+    authorizeProblemRecoveryRetry: input => engine.problemRecoveryAuthorize(input),
     observedTurns: () => bridge.trackedSessions(),
     verifyArtifact: input => bridge.verifyArtifact(input),
     guardedAction: (input, action) => guardedAction(engine, input, action),

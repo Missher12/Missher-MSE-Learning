@@ -31,6 +31,12 @@ const PACKAGE_PACK = 'package-json-structure-v1'
 const PROJECT = '/synthetic/chain-project'
 const SESSION = 'chain-session'
 
+function legacyEditorArguments(path, previousContent, content) {
+  return previousContent === null
+    ? { command: 'create', path, file_text: content }
+    : { command: 'str_replace', path, old_str: previousContent, new_str: content }
+}
+
 /**
  * A minimal Cordis-like host context, written to the REAL host contracts the plugin relies on.
  *
@@ -48,6 +54,7 @@ function hostContext(stateRoot, { answer, fs } = {}) {
   const modelCalls = []
   const mounted = []
   const effects = []
+  const disposers = []
   const injections = []
   const promptOf = options => (options?.messages ?? []).map(message => (message?.content ?? [])
     .filter(block => block?.type === 'text').map(block => block.text).join('')).join('\n')
@@ -101,7 +108,8 @@ function hostContext(stateRoot, { answer, fs } = {}) {
   return { ctx, services, warnings, infos, modelCalls, mounted, listeners, effects, injections, promptOf,
     // Run what the host would have run once the plugin finished loading (deferred effects and the
     // injections whose services the fixture can stand in for).
-    start: () => { effects.forEach(fn => fn()); injections.forEach(fn => fn()) },
+    start: () => { effects.forEach(fn => { const dispose = fn(); if (typeof dispose === 'function') disposers.push(dispose) }); injections.forEach(fn => fn()) },
+    shutdown: async () => { await Promise.all(disposers.splice(0).map(dispose => dispose())) },
     emit: (name, ...args) => listeners.filter(row => row.name === name).forEach(row => row.handler(...args)) }
 }
 
@@ -114,6 +122,9 @@ function hostContext(stateRoot, { answer, fs } = {}) {
  * allowed to grant — an explicitly unproven reference — without claiming any model benefit.
  */
 const lifecycleAnswer = ({ prompt, system }) => {
+  if (system.includes('Return exactly one JSON object with keys action')) return JSON.stringify({
+    action: 'prioritize_validation', confidence: 0.8, confidenceMeaning: '仅用于分流，不代表验证通过',
+    reasons: ['同一验证域存在可用的固定验证器'], riskCodes: [], evidenceRefs: [] })
   const fixed = JSON.stringify({ answer: 'DISCARD' })
   if (system.includes('准则')) {
     // The criteria ids come from the registered case, never copied by hand: a judge report that
@@ -125,8 +136,9 @@ const lifecycleAnswer = ({ prompt, system }) => {
 }
 
 function chain({ answer = lifecycleAnswer, tokens = 20_000, calls = 3, archived = false, emit = () => {},
-  omitBudgetFields = false, reflectionEnabled = false, fs = undefined } = {}) {
-  const stateRoot = mkdtempSync(join(tmpdir(), 'mse-chain-'))
+  omitBudgetFields = false, reflectionEnabled = false, fs = undefined, configOverrides = {}, stateRoot: sharedRoot = undefined,
+  now = () => Date.now() } = {}) {
+  const stateRoot = sharedRoot ?? mkdtempSync(join(tmpdir(), 'mse-chain-'))
   const host = hostContext(stateRoot, { answer, fs })
   // The host's own directory services, present BEFORE the plugin loads (the plugin reads them at
   // load time): one live session whose header names the project directory its turns belong to and
@@ -140,17 +152,18 @@ function chain({ answer = lifecycleAnswer, tokens = 20_000, calls = 3, archived 
   // comes from the verification session the operator explicitly named — the production path for
   // reviewing a task that already happened. Nothing here borrows a route the host did not name.
   const config = { enabled: true, reflectionEnabled, autoValidationEnabled: true,
-    verificationSessionId: SESSION, maxContextBytes: 768,
-    ...(omitBudgetFields ? {} : { evaluationTokensPerDay: tokens, evaluationCallsPerDay: calls }) }
+    verificationSessionId: SESSION, maxContextBytes: 768, now,
+    ...(omitBudgetFields ? {} : { evaluationTokensPerDay: tokens, evaluationCallsPerDay: calls }),
+    ...configOverrides }
   apply(host.ctx, config)
   const service = host.services.get('mseLearning')
   assert.ok(service, 'the plugin must provide its service')
   // The plugin built its own engine on the host path; a second engine on the same root is the
   // read-back view (exactly what a restart of the plugin would do).
-  const reader = new LearningEngine({ stateRoot, adapterId: 'dsh', maxContextBytes: 768,
+  const reader = new LearningEngine({ stateRoot, adapterId: 'dsh', maxContextBytes: 768, now,
     ...(omitBudgetFields ? {} : { evaluationTokensPerDay: tokens, evaluationCallsPerDay: calls }) })
-  return { ...host, stateRoot, service, reader, session,
-    cleanup: () => rmSync(stateRoot, { recursive: true, force: true }) }
+  return { ...host, stateRoot, service, reader, session, now,
+    shutdown: host.shutdown, cleanup: () => rmSync(stateRoot, { recursive: true, force: true }) }
 }
 
 test('legacy missing budgets remain fail-closed, and explicit zero/custom values survive settings reads', () => {
@@ -191,12 +204,13 @@ test('real DSH file events create the automatic package.json candidate and enter
   const session = c.session
   let writes = 0
   const hostWrite = async (content, turn) => {
+    const previousContent = writes === 0 ? null : readFileSync(diskFile, 'utf8')
     writeFileSync(diskFile, content, 'utf8')
     const callId = `package-host-write-${++writes}`
     session.events.push({ type: 'tool/call', data: { callId, turn: String(turn) } })
     session.seq = session.events.length
-    const exec = { name: 'str_replace_editor', token: Symbol(callId), rootCallId: callId,
-      arguments: { command: writes === 1 ? 'create' : 'str_replace' }, signal: new AbortController().signal,
+    const exec = { name: 'str_replace_editor', token: Symbol(callId), callId, rootCallId: callId,
+      arguments: legacyEditorArguments(virtualFile, previousContent, content), signal: new AbortController().signal,
       agent: { session } }
     const target = await fs.resolve(virtualFile)
     const observed = await fs.stat(target)
@@ -228,10 +242,27 @@ test('real DSH file events create the automatic package.json candidate and enter
   assert.ok(candidate, 'the candidate came from the reflection pipeline')
   assert.equal(packCases('package-json-structure-v1').filter(row => row.split === 'development').length, 12)
   assert.equal(packCases('package-json-structure-v1').filter(row => row.split === 'holdout').length, 4)
+  const decisionCallsBefore = c.modelCalls.filter(row => row.system.includes('Return exactly one JSON object with keys action')).length
   c.emit('settings/document-updated', 'mse-learning')
-  assert.equal(await waitFor(() => c.service.autoValidation().plans > 0), true,
-    'the automatic scheduler registered the domain plans even though the budget is empty')
+  assert.equal(await waitFor(() => (c.reader.store.read().decisionRecords ?? [])
+    .some(row => row.candidateId === candidate.id && row.state === 'wait'
+      && ['evaluation_budget', 'evaluation_budget_calls'].includes(row.error))), true,
+  `the zero-budget decision must persist as wait before any executable plan; audit=${JSON.stringify({
+    decisions: (c.reader.store.read().decisionRecords ?? []).map(({ candidateId, state, error, result }) =>
+      ({ candidateId, state, error, action: result?.action })),
+    auto: c.service.autoValidation(), sourceRows: c.reader.sourceStatus({ limit: 8 }).rows.map(row =>
+      ({ driver: row.driver, revision: row.revision, epoch: row.epoch, gateReady: row.gateReady })),
+    calls: c.modelCalls.map(row => ({ system: row.system.slice(0, 100), prompt: row.prompt.slice(0, 180) })),
+  })}`)
+  assert.equal(c.service.autoValidation().plans, 0,
+    'no executable review plan bypasses a decision that could not be reserved')
+  assert.ok(c.reader.store.read().decisionRecords.some(row => row.candidateId === candidate.id
+    && row.state === 'wait' && ['evaluation_budget', 'evaluation_budget_calls'].includes(row.error)))
+  assert.equal(c.modelCalls.filter(row => row.system.includes('Return exactly one JSON object with keys action')).length,
+    decisionCallsBefore, 'a budget wait makes no decision-provider API call')
   assert.equal(c.reader.status().evaluationTokensReserved24h, 0, 'zero budget prevents every physical evaluation reservation')
+  assert.equal(c.reader.status().evaluationCallsLast24h, 0, 'zero budget creates no paid evaluation ticket')
+  assert.equal(c.reader.status().evaluationRequestsLast24h, 0, 'zero budget creates no paid physical request')
 })
 
 test('DSH automatic package trajectory: Host failure → candidate → 12+4/replay promotion → natural adoption', async t => {
@@ -247,6 +278,9 @@ test('DSH automatic package trajectory: Host failure → candidate → 12+4/repl
     readText: async target => readFileSync(target.diskPath, 'utf8'),
   }
   const answer = ({ prompt, system }) => {
+    if (system.includes('Return exactly one JSON object with keys action')) return JSON.stringify({
+      action: 'prioritize_validation', confidence: 0.8, confidenceMeaning: 'synthetic routing only',
+      reasons: ['registered package verifier is available'], riskCodes: [], evidenceRefs: [] })
     if (system.includes('独立的答案评审')) return JSON.stringify({ winner: 'tie', reason: '两条答案都符合冻结准则。',
       criteria: packCases(PACKAGE_PACK)[0].criteria.map(row => ({ id: row.id, met: 'both' })) })
     if (system.includes('修复后的完整 JSON 对象')) {
@@ -274,12 +308,13 @@ test('DSH automatic package trajectory: Host failure → candidate → 12+4/repl
   const session = c.session
   let writes = 0
   const hostWrite = async (content, turn) => {
+    const previousContent = writes === 0 ? null : readFileSync(diskFile, 'utf8')
     writeFileSync(diskFile, content, 'utf8')
     const callId = `full-auto-host-write-${++writes}`
     session.events.push({ type: 'tool/call', data: { callId, turn: String(turn) } })
     session.seq = session.events.length
-    const exec = { name: 'str_replace_editor', token: Symbol(callId), rootCallId: callId,
-      arguments: { command: writes === 1 ? 'create' : 'str_replace' }, signal: new AbortController().signal,
+    const exec = { name: 'str_replace_editor', token: Symbol(callId), callId, rootCallId: callId,
+      arguments: legacyEditorArguments(virtualFile, previousContent, content), signal: new AbortController().signal,
       agent: { session } }
     const target = await fs.resolve(virtualFile)
     const observed = await fs.stat(target)
@@ -380,6 +415,273 @@ const method = (engine, instruction) => {
     sessionId: SESSION, sourceTurn: 'a'.repeat(64) })
   return engine.list({ projectKey: PROJECT, limit: 10 }).lessons.find(row => row.id === recorded.id)
 }
+
+test('the production DSH decision runner dispatches through the candidate source route', async () => {
+  let c
+  let observedDecisionReservation = null
+  const answer = ({ system, prompt }) => {
+    if (String(system).includes('Return exactly one JSON object with keys action')) {
+      const candidateId = JSON.parse(prompt).candidateId
+      const state = c.reader.store.read()
+      const row = state.decisionRecords.find(item => item.candidateId === candidateId && item.state === 'dispatched')
+      const job = state.jobs.find(item => item.ticket === row?.ticket)
+      observedDecisionReservation = { row, reservation: job?.stepReservations.find(item => item.stepKey === 'decision') }
+      return JSON.stringify({ action: 'reject', confidence: 0.9, confidenceMeaning: 'advisory',
+        reasons: ['synthetic refusal'], riskCodes: [] })
+    }
+    return lifecycleAnswer({ prompt: '', system })
+  }
+  c = chain({ answer, tokens: 50_000, calls: 5 })
+  try {
+    c.start()
+    // Let the initial feed/backfill initialize before introducing a new source-bound candidate.
+    await new Promise(resolve => setImmediate(resolve))
+    const recorded = c.reader.record({ projectKey: PROJECT, source: 'host_proposal', kind: 'method',
+      eventId: 'decision-host-route-1', instruction: IN_DOMAIN, sessionId: SESSION,
+      sourceTurn: 'b'.repeat(64), applicability: '仅适用于同一会话内的可重试提交',
+      exclusions: '不适用于不可撤销或状态未知的外部写入' })
+    assert.equal(recorded.ok, true)
+    const lesson = c.reader.list({ projectKey: PROJECT, limit: 10 }).lessons.find(row => row.id === recorded.id)
+    assert.ok(lesson?.id)
+    c.emit('settings/document-updated', 'mse-learning')
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if ((c.service.autoValidation().events ?? []).some(row => row.code === 'decision_rejected')) break
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.ok(c.modelCalls.length >= 1, 'the default Host decision reached the real adapter call site')
+    const decisionCall = c.modelCalls.find(row => row.system.includes('Return exactly one JSON object with keys action'))
+    assert.ok(decisionCall, 'the decision call used the candidate decision prompt')
+    assert.equal(decisionCall.options.maxTokens, 2048)
+    assert.equal(decisionCall.options.provider, 'fixture-provider')
+    assert.equal(decisionCall.options.model, 'fixture-model')
+    assert.match(decisionCall.prompt, /仅适用于同一会话内的可重试提交/u,
+      'production decision prompt includes the full applicability condition')
+    assert.match(decisionCall.prompt, /不适用于不可撤销或状态未知的外部写入/u,
+      'production decision prompt includes the full negative condition')
+    assert.match(decisionCall.prompt, /"validators"/u,
+      'production decision prompt carries the registered validator facts')
+    assert.match(decisionCall.prompt, /"admitted":true/u,
+      'the candidate-specific validator admission is explicit in the real prompt')
+    const record = c.reader.store.read().decisionRecords.find(row => row.candidateId === lesson.id)
+    assert.equal(record?.state, 'complete')
+    assert.equal(record?.result?.action, 'reject')
+    assert.equal(record?.ruleVersion, 'experience-upgrade-v2-host-output-2048')
+    assert.equal(observedDecisionReservation?.reservation?.outputTokens, 2048)
+    assert.equal(observedDecisionReservation?.reservation?.requestHash, createHash('sha256')
+      .update(JSON.stringify([observedDecisionReservation.row.key,
+        observedDecisionReservation.reservation.inputTokens, 2048])).digest('hex'))
+    assert.equal(c.reader.status().evaluationCallsLast24h, 1)
+    assert.ok(c.reader.status().evaluationTokensReserved24h <= 50_000)
+    assert.ok(c.reader.status().evaluationCallsLast24h <= 5)
+  } finally { c.cleanup() }
+})
+
+test('production DSH Host fallback uses its 2048 cap in the reservation, request hash, and wire options', async () => {
+  const previousFetch = globalThis.fetch
+  let c
+  let primaryReservation = null
+  let fallbackReservation = null
+  let remoteWireOutputCap = null
+  const answer = ({ system, prompt, options }) => {
+    if (String(system).includes('Return exactly one JSON object with keys action')) {
+      const candidateId = JSON.parse(prompt).candidateId
+      const state = c.reader.store.read()
+      const row = state.decisionRecords.find(item => item.candidateId === candidateId && item.state === 'dispatched')
+      const job = state.jobs.find(item => item.ticket === row?.ticket)
+      const reservation = job?.stepReservations.find(item => item.stepKey === 'decision:host')
+      fallbackReservation = { row, reservation }
+      return JSON.stringify({ action: 'review', confidence: 0.8, confidenceMeaning: 'advisory', reasons: [], riskCodes: [] })
+    }
+    return lifecycleAnswer({ prompt: '', system })
+  }
+  c = chain({ answer, tokens: 50_000, calls: 5, configOverrides: { decisionBackend: 'openai_compatible',
+    decisionModel: 'remote-decision-model', decisionEndpoint: 'https://example.test/v1/chat/completions' } })
+  try {
+    globalThis.fetch = async (_url, options) => {
+      remoteWireOutputCap = JSON.parse(options.body).max_tokens
+      const state = c.reader.store.read()
+      const row = state.decisionRecords.find(item => item.backend === 'openai_compatible' && item.state === 'dispatched')
+      const job = state.jobs.find(item => item.ticket === row?.ticket)
+      primaryReservation = { row, reservation: job?.stepReservations.find(item => item.stepKey === 'decision') }
+      return new Response(JSON.stringify({ model: 'remote-decision-model', choices: [{ finish_reason: 'stop',
+        message: { content: JSON.stringify({ action: 'wait', confidence: 0.4, confidenceMeaning: 'advisory',
+          reasons: ['uncertain'], riskCodes: [] }) } }], usage: { prompt_tokens: 80, completion_tokens: 20 } }),
+      { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    c.start()
+    await new Promise(resolve => setImmediate(resolve))
+    const recorded = c.reader.record({ projectKey: PROJECT, source: 'host_proposal', kind: 'method',
+      eventId: 'decision-host-fallback-cap', instruction: IN_DOMAIN, sessionId: SESSION,
+      sourceTurn: 'd'.repeat(64), applicability: '仅适用于同一会话内的可重试提交',
+      exclusions: '不适用于不可撤销或状态未知的外部写入' })
+    assert.equal(recorded.ok, true)
+    const lesson = c.reader.list({ projectKey: PROJECT, limit: 10 }).lessons.find(row => row.id === recorded.id)
+    c.emit('settings/document-updated', 'mse-learning')
+    assert.equal(await waitFor(() => (c.reader.store.read().decisionRecords ?? []).some(row => row.candidateId === lesson.id
+      && row.state === 'complete')), true)
+    const hostCall = c.modelCalls.find(row => row.system.includes('Return exactly one JSON object with keys action'))
+    assert.equal(hostCall?.options.maxTokens, 2048)
+    assert.equal(remoteWireOutputCap, 512, 'the remote primary wire cap is unchanged')
+    assert.equal(primaryReservation?.reservation?.outputTokens, 512, 'the remote primary keeps its prior cap')
+    assert.equal(primaryReservation?.reservation?.requestHash, createHash('sha256')
+      .update(JSON.stringify([primaryReservation.row.key, primaryReservation.reservation.inputTokens, 512])).digest('hex'))
+    assert.equal(fallbackReservation?.reservation?.outputTokens, 2048)
+    assert.equal(fallbackReservation?.reservation?.requestHash, createHash('sha256')
+      .update(JSON.stringify([fallbackReservation.row.key, 'decision:host', 'fixture-provider', 'fixture-model', 'max',
+        2048])).digest('hex'))
+    const record = c.reader.store.read().decisionRecords.find(row => row.candidateId === lesson.id)
+    assert.equal(record?.usage?.totalTokens, 420)
+    assert.equal(c.reader.status().evaluationCallsLast24h, 1)
+    assert.equal(c.reader.status().evaluationRequestsLast24h, 2)
+  } finally {
+    await c.shutdown()
+    c.cleanup()
+    globalThis.fetch = previousFetch
+  }
+})
+
+test('production DSH decision runner dispatches Laya over configured RFC1918 HTTP', async () => {
+  const previousFetch = globalThis.fetch
+  const secretRef = 'SYNTHETIC_LAYA_TEST_TOKEN'
+  const syntheticSecret = 'synthetic-test-secret-never-a-real-credential'
+  const previousSecret = process.env[secretRef]
+  const requests = []
+  const c = chain({ tokens: 50_000, calls: 5, configOverrides: {
+    decisionBackend: 'laya', decisionModel: 'laya-test-model',
+    decisionEndpoint: 'http://192.168.0.2:8080/root',
+    decisionSecretRef: secretRef,
+  } })
+  try {
+    process.env[secretRef] = syntheticSecret
+    globalThis.fetch = async (url, options) => {
+      requests.push({ url: String(url), options, body: JSON.parse(options.body) })
+      return new Response(JSON.stringify({ model: 'laya-test-model', answers: { action: {
+        choice: 'reject', confidence: 0.9, probabilities: { reject: 0.9, wait: 0.1 } } },
+        usage: { input_tokens: 12, output_tokens: 4 } }),
+      { status: 200, headers: { 'content-type': 'application/json' } })
+    }
+    c.start()
+    await new Promise(resolve => setImmediate(resolve))
+    const recorded = c.reader.record({ projectKey: PROJECT, source: 'host_proposal', kind: 'method',
+      eventId: 'decision-laya-lan-route-1', instruction: IN_DOMAIN, sessionId: SESSION,
+      sourceTurn: 'c'.repeat(64), applicability: '仅适用于同一会话内的可重试提交',
+      exclusions: '不适用于不可撤销或状态未知的外部写入' })
+    assert.equal(recorded.ok, true)
+    const lesson = c.reader.list({ projectKey: PROJECT, limit: 10 }).lessons.find(row => row.id === recorded.id)
+    assert.ok(lesson?.id)
+    c.emit('settings/document-updated', 'mse-learning')
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (c.reader.store.read().decisionRecords?.some(row => row.candidateId === lesson.id && row.state === 'complete')) break
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.equal(requests.length, 1, 'the real DSH decisionRunner reached the configured provider transport')
+    assert.equal(requests[0].url, 'http://192.168.0.2:8080/root/v1/systemone')
+    assert.equal(requests[0].options.method, 'POST')
+    assert.equal(requests[0].options.redirect, 'error')
+    assert.equal(requests[0].options.headers.authorization, `Bearer ${syntheticSecret}`)
+    assert.equal(requests[0].body.model, 'laya-test-model')
+    assert.equal(requests[0].body.state.candidateId, lesson.id)
+    const record = c.reader.store.read().decisionRecords.find(row => row.candidateId === lesson.id)
+    assert.equal(record?.state, 'complete')
+    assert.equal(record?.result?.action, 'reject')
+    assert.equal(record?.endpointFingerprint, createHash('sha256')
+      .update('http://192.168.0.2:8080/root').digest('hex'), 'the persisted route is fingerprinted, not stored raw')
+    const persisted = JSON.stringify(c.reader.store.read())
+    assert.equal(persisted.includes(syntheticSecret), false)
+    assert.equal(JSON.stringify({ url: requests[0].url, body: requests[0].body }).includes(syntheticSecret), false)
+    assert.equal(c.reader.status().evaluationCallsLast24h, 1)
+  } finally {
+    await c.shutdown()
+    c.cleanup()
+    globalThis.fetch = previousFetch
+    if (previousSecret === undefined) delete process.env[secretRef]
+    else process.env[secretRef] = previousSecret
+  }
+})
+
+test('the production DSH scheduler generates one merged candidate and does not repeat it after restart', async () => {
+  let primaryId = null, partnerId = null, mergeDone = false
+  const decisionCandidateIds = []
+  let now = Date.now()
+  const answer = ({ system, prompt, options }) => {
+    if (String(system).includes('Return exactly one JSON object with keys action')) {
+      const userContent = options?.messages?.[0]?.content
+      const userText = Array.isArray(userContent)
+        ? userContent.filter(block => block?.type === 'text').map(block => block.text).join('\n')
+        : typeof userContent === 'string' ? userContent : ''
+      let id = null
+      try { id = JSON.parse(userText)?.candidateId ?? null } catch {}
+      if (typeof id === 'string') decisionCandidateIds.push(id)
+      return JSON.stringify(!mergeDone && id === primaryId && partnerId !== null
+        ? { action: 'suggest_merge', mergeTarget: { id: partnerId, version: 1 }, confidence: 0.8,
+          confidenceMeaning: 'advisory', reasons: ['同一登记 verifier'], riskCodes: [], evidenceRefs: [] }
+        : { action: 'wait', confidence: 0.8, confidenceMeaning: 'advisory', reasons: ['等待'], riskCodes: [], evidenceRefs: [] })
+    }
+    if (String(system).includes('你要把两个同一适用条件')) {
+      mergeDone = true
+      return JSON.stringify({ instruction: '修改 package.json 时先解析 JSON，再核对 scripts 字段类型并保留无关字段。' })
+    }
+    return lifecycleAnswer({ prompt, system })
+  }
+  const c = chain({ answer, tokens: 50_000, calls: 5, reflectionEnabled: true, now: () => now })
+  let restarted
+  try {
+    c.start()
+    await new Promise(resolve => setImmediate(resolve))
+    await driveTurn(c, c.session, 1, { prompt: '检查本会话内的 package.json 结构。' })
+    const reflectedParent = (turnId, instruction) => {
+      const prepared = c.reader.reflectionRequest({ projectKey: PROJECT, sessionId: SESSION, turnId,
+        outcome: 'supported', taskSummary: '检查 package.json JSON 结构与 scripts 字段类型，保留扩展字段。',
+        resultSummary: '已确认 JSON 结构有效且无关配置仍保留。' })
+      assert.ok(prepared.ticket, 'parent candidate is created through the public Core reflection API')
+      const learned = c.reader.reflectionResult({ ticket: prepared.ticket, result: { instruction },
+        usage: { known: true, totalTokens: 12 } })
+      assert.ok(learned.id)
+      return learned.id
+    }
+    primaryId = reflectedParent('merge-parent-one',
+      '修改 package.json 前先解析 JSON 结构，再核对 scripts 字段类型并保留无关字段。')
+    assert.match(primaryId, /^lesson_[a-f0-9]{24}$/u, 'candidate identity follows the actual Core lesson id format')
+    now += 31 * 60_000
+    partnerId = reflectedParent('merge-parent-two',
+      '编辑 package.json 时先校验 JSON 字段类型，最后确认自定义字段仍然保留。')
+    assert.match(partnerId, /^lesson_[a-f0-9]{24}$/u, 'candidate identity follows the actual Core lesson id format')
+    now += 31 * 60_000
+    c.emit('settings/document-updated', 'mse-learning')
+    const generated = await waitFor(() => c.reader.store.read().lessons.some(row => row.derivation?.mode === 'merge'))
+    assert.equal(generated, true, `the real DSH source/decision/reflection chain must commit the candidate; audit=${JSON.stringify({
+      decisions: (c.reader.store.read().decisionRecords ?? []).map(({ candidateId, state, error, result, mergeStatus }) =>
+        ({ candidateId, state, error, action: result?.action, target: result?.mergeTarget, mergeStatus })),
+      auto: c.service.autoValidation(),
+      sources: c.reader.sourceStatus({ limit: 8 }).rows.map(({ sessionHash, driver, revision, epoch, routeId, gateReady }) =>
+        ({ sessionHash, driver, revision, epoch, routeId, gateReady })),
+      calls: c.modelCalls.map(({ system, prompt, text }) => ({ system: system.slice(0, 120), prompt: prompt.slice(0, 220),
+        response: text.slice(0, 180) })),
+    })}`)
+    const merged = c.reader.store.read().lessons.find(row => row.derivation?.mode === 'merge')
+    assert.equal(merged.status, 'candidate')
+    assert.equal(merged.methodId, null)
+    assert.equal(merged.verified, 0)
+    assert.equal(merged.derivation.parents.length, 2)
+    assert.equal(c.modelCalls.filter(row => row.system.includes('你要把两个同一适用条件')).length, 1)
+    assert.ok(decisionCandidateIds.includes(primaryId), 'the production decision was routed for the intended primary candidate')
+    assert.ok(c.service.autoValidation().events.some(row => row.code === 'merge_generated'
+      && row.detail === primaryId), 'the committed merge preserves Core’s precise success reason')
+    assert.equal(c.service.autoValidation().events.some(row => row.code === 'reflection_result_unrecognised'), false)
+
+    await c.shutdown()
+    restarted = chain({ answer, tokens: 50_000, calls: 5, reflectionEnabled: true, stateRoot: c.stateRoot, now: () => now })
+    restarted.start()
+    await new Promise(resolve => setTimeout(resolve, 250))
+    assert.equal(restarted.reader.store.read().lessons.filter(row => row.derivation?.mode === 'merge').length, 1)
+    assert.equal(restarted.modelCalls.filter(row => row.system.includes('你要把两个同一适用条件')).length, 0,
+      'a cold production scheduler cannot replay the settled generation')
+  } finally {
+    await c.shutdown()
+    if (restarted) await restarted.shutdown()
+    c.cleanup()
+  }
+})
 
 /**
  * Drive the plugin the way the HOST does: a real settings/turn event schedules a scan, the scan
@@ -562,8 +864,12 @@ test('the plugin wakes up, retires an expired licence and buys no renewal withou
     // edition — and still buys no review. What happens to that edition is one of exactly two things,
     // both governed by the host: it WAITS with its own reason visible on the operator surface, or the
     // independent OBJECTIVE track judges it against the host pack (which outranks the trial question
-    // entirely). A model renewal review is neither.
+    // entirely). A model renewal review or unclassified paid plan is neither.
     const callsAfterRetirement = c.modelCalls.length
+    const editionBeforeRenewal = c.reader.list({ projectKey: PROJECT, limit: 10 }).lessons
+      .find(row => row.id === lesson.id)
+    const decisionCountBeforeRenewal = (c.reader.store.read().decisionRecords ?? [])
+      .filter(row => row.candidateId === lesson.id && row.version === editionBeforeRenewal?.version).length
     c.emit('settings/document-updated', 'mse-learning')
     let events = []
     let current = null
@@ -580,6 +886,10 @@ test('the plugin wakes up, retires an expired licence and buys no renewal withou
         renewal: current?.renewal, auto: current?.auto, queue: c.service.autoValidation() })}`)
     assert.equal(c.modelCalls.slice(callsAfterRetirement).filter(isReview).length, 0,
       'and the deferred scan still buys no review run')
+    const renewalDecisions = (c.reader.store.read().decisionRecords ?? [])
+      .filter(row => row.candidateId === lesson.id && row.version === current?.version)
+    assert.equal(renewalDecisions.length, decisionCountBeforeRenewal,
+      'waiting for independent renewal evidence must happen before a paid decision request')
   } finally { c.cleanup() }
 })
 

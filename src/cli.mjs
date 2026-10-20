@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { LearningEngine } from './index.mjs'
 import { createTaskEvidenceAuthority } from './task-evidence.mjs'
+import { requestDecision } from './decision-providers.mjs'
+import { createHash } from 'node:crypto'
 
 // Local trusted-host transport. stdout is protocol-only; no shell commands or model calls.
 const operations = new Set(['prepare', 'record', 'accept', 'cancel', 'complete', 'status', 'reflectionRequest', 'reflectionResult',
@@ -52,6 +54,10 @@ const operations = new Set(['prepare', 'record', 'accept', 'cancel', 'complete',
   // next provider call, so a crash between steps cannot lose tokens the provider already reported.
   // It grants no credit, signs nothing and closes nothing.
   'ticketUsage', 'ticketReserve', 'ticketStepStart', 'ticketStepComplete', 'planProgress', 'ticketContinuation',
+  // Advisory candidate decisions use the same durable ledger and paid ticket protocol as the
+  // automatic validation queue. They are deliberately separate operations: no result can promote.
+  'decisionGet', 'decisionContext', 'decisionRequest', 'decisionStarted', 'decisionReserveFallback', 'decisionFail', 'decisionComplete',
+  'decisionAbortBeforeDispatch', 'decisionDispatch', 'decisionMergePlan', 'decisionMergeWait', 'reflectionDispatch',
   'autoCandidates', 'autoCandidateFacts',
   // ── Stage 4c: the scheduler/maintenance half the automatic pass actually consumes ────────────────
   // Opened only now, because only now is there a caller: the Hermes pass advances the SAME persistent
@@ -152,6 +158,24 @@ const projections = new Map([
   ['ticketStepComplete', ['ticket', 'stepKey', 'requestHash', 'text', 'truncated', 'tokens']],
   ['planProgress', ['ticket', 'stepKey']],
   ['ticketContinuation', ['ticket', 'kind']],
+  ['decisionGet', ['candidateId', 'version', 'evidenceRevision', 'projectHash', 'evidence', 'ruleVersion',
+    'role', 'backend', 'provider', 'model', 'endpoint', 'apiMode', 'reasoningEffort', 'fallbackRoute']],
+  ['decisionHistory', ['lessonId', 'projectKey', 'environmentId', 'limit']],
+  ['decisionMergePlan', ['decisionId', 'projectKey', 'environmentId']],
+  ['decisionMergeWait', ['decisionId', 'projectKey', 'environmentId', 'reason']],
+  ['reflectionDispatch', ['ticket', 'dispatchHash']],
+  ['decisionContext', ['lessonId', 'projectKey', 'environmentId']],
+  ['decisionRequest', ['candidateId', 'version', 'evidenceRevision', 'projectHash', 'evidence', 'ruleVersion',
+    'role', 'backend', 'provider', 'model', 'endpoint', 'apiMode', 'reasoningEffort', 'fallbackRoute', 'inputTokens', 'outputTokens',
+    'lessonId', 'projectKey', 'environmentId']],
+  ['decisionStarted', ['ticket', 'stepKey', 'requestHash']],
+  ['decisionReserveFallback', ['ticket', 'inputTokens', 'outputTokens', 'requestHash', 'provider', 'model', 'apiMode', 'reasoningEffort']],
+  ['decisionFail', ['ticket', 'stepKey', 'code', 'usage', 'allowFallback']],
+  ['decisionComplete', ['ticket', 'stepKey', 'model', 'result', 'usage', 'complete', 'abstention', 'evidenceRevision', 'version', 'fallbackPending']],
+  ['decisionAbortBeforeDispatch', ['ticket', 'stepKey']],
+  ['decisionDispatch', ['ticket', 'stepKey', 'requestHash', 'backend', 'endpoint', 'model', 'evidence',
+    'secretRef', 'timeoutMs', 'fallbackPending', 'evidenceRevision', 'version', 'candidateId', 'projectHash',
+    'ruleVersion', 'role', 'provider', 'apiMode', 'reasoningEffort', 'fallbackRoute', 'inputTokens', 'outputTokens']],
   ['autoPlans', []],
   ['autoCandidates', ['limit']],
   ['autoCandidateFacts', ['lessonId', 'version', 'environment', 'track', 'source', 'suite', 'criteria']],
@@ -184,6 +208,46 @@ const isPlainObject = value => value !== null && typeof value === 'object'
  * ticket and the binding marker below.
  */
 const aliases = new Map([['objectiveResult', 'evaluate']])
+const DECISION_RECORD_OPS = new Set(['decisionGet', 'decisionRequest', 'decisionStarted', 'decisionReserveFallback',
+  'decisionFail', 'decisionComplete', 'decisionAbortBeforeDispatch', 'decisionDispatch', 'decisionHistory'])
+const compactDecisionOpinion = opinion => opinion && typeof opinion.action === 'string'
+  ? { action: opinion.action, confidence: opinion.confidence, confidenceMeaning: opinion.confidenceMeaning,
+    reasons: Array.isArray(opinion.reasons) ? opinion.reasons.slice(0, 4) : [],
+    riskCodes: Array.isArray(opinion.riskCodes) ? opinion.riskCodes.slice(0, 8) : [],
+    evidenceRefs: Array.isArray(opinion.evidenceRefs)
+      ? opinion.evidenceRefs.filter(ref => typeof ref === 'string' && /^[a-f0-9]{64}$/u.test(ref)).slice(0, 8) : [],
+    ...(opinion.mergeTarget ? { mergeTarget: opinion.mergeTarget } : {}) } : undefined
+function compactDecisionRecord(record) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return record
+  const summary = {}
+  for (const key of ['key', 'decisionId', 'candidateId', 'version', 'evidenceRevision', 'state', 'updatedAt',
+    'error', 'ticket', 'backend', 'model', 'primaryModel', 'fallbackModel']) {
+    if (record[key] !== undefined) summary[key] = record[key]
+  }
+  if (record.mergeStatus && ['waiting', 'running', 'complete', 'abstained', 'unknown', 'stale', 'blocked']
+    .includes(record.mergeStatus.state)) summary.mergeStatus = record.mergeStatus
+  const result = compactDecisionOpinion(record.finalResult ?? record.result)
+  const primaryResult = compactDecisionOpinion(record.primaryResult)
+  if (result) summary.result = result
+  if (primaryResult) summary.primaryResult = primaryResult
+  for (const key of ['usage', 'primaryUsage', 'fallbackUsage']) {
+    const usage = record[key]
+    if (usage && typeof usage === 'object') {
+      summary[key] = { inputTokens: Number.isSafeInteger(usage.inputTokens) ? usage.inputTokens : null,
+        outputTokens: Number.isSafeInteger(usage.outputTokens) ? usage.outputTokens : null,
+        totalTokens: Number.isSafeInteger(usage.totalTokens) ? usage.totalTokens : null }
+    }
+  }
+  return summary
+}
+function projectDecisionOutput(op, value) {
+  if (!DECISION_RECORD_OPS.has(op) || !value || typeof value !== 'object') return value
+  if (op === 'decisionHistory' && Array.isArray(value.rows)) {
+    return { ...value, rows: value.rows.map(compactDecisionRecord) }
+  }
+  if (!value.record) return value
+  return { ...value, record: compactDecisionRecord(value.record) }
+}
 /** An error the transport reports with its own protocol code instead of the generic fallback. */
 const refuse = code => {
   const error = new Error(code)
@@ -320,16 +384,67 @@ try {
   if (request.op === 'ticketUsage' && !guardedUsage(value)) throw refuse('invalid_usage')
   const engine = new LearningEngine(request.config)
   const method = aliases.get(request.op) ?? request.op
-  const result = request.op === 'recordPackageJsonArtifact'
-    ? engine.recordPackageJsonArtifact(createTaskEvidenceAuthority(engine), value)
-    : engine[method](value)
+  let result
+  if (request.op === 'recordPackageJsonArtifact') {
+    result = engine.recordPackageJsonArtifact(createTaskEvidenceAuthority(engine), value)
+  } else if (request.op === 'decisionDispatch') {
+    let dispatched = false
+    try {
+      const frozen = engine.decisionGet({ candidateId: value.candidateId, version: value.version,
+        evidenceRevision: value.evidenceRevision, projectHash: value.projectHash, evidence: value.evidence,
+        ruleVersion: value.ruleVersion, role: value.role, backend: value.backend, provider: value.provider,
+        model: value.model, endpoint: value.endpoint, apiMode: value.apiMode,
+        reasoningEffort: value.reasoningEffort, fallbackRoute: value.fallbackRoute })
+      const expectedHash = frozen?.identity?.key && Number.isSafeInteger(value.inputTokens)
+        && Number.isSafeInteger(value.outputTokens)
+        ? createHash('sha256').update(JSON.stringify([frozen.identity.key, value.inputTokens, value.outputTokens])).digest('hex')
+        : null
+      if (!frozen?.record || frozen.record.ticket !== value.ticket || frozen.record.state !== 'queued'
+        || !expectedHash || expectedHash !== value.requestHash) {
+        engine.decisionAbortBeforeDispatch({ ticket: value.ticket, stepKey: value.stepKey })
+        result = { ok: false, code: 'decision_dispatch_identity_mismatch', dispatched: false }
+      } else {
+        const answer = await requestDecision({ backend: value.backend, endpoint: value.endpoint,
+          model: value.model, evidence: value.evidence, timeoutMs: value.timeoutMs,
+          ...(typeof value.secretRef === 'string' && value.secretRef !== ''
+            ? { secretRef: value.secretRef, resolveSecret: name => process.env[name] } : {}),
+          onDispatch: () => {
+            const started = engine.decisionStarted({ ticket: value.ticket, stepKey: value.stepKey,
+              requestHash: value.requestHash })
+            if (started?.ok === true) dispatched = true
+            return started
+          } })
+        if (answer?.ok === false) {
+          result = engine.decisionFail({ ticket: value.ticket, stepKey: value.stepKey,
+            code: answer.code ?? 'provider_invalid_response', usage: answer.usage ?? null,
+            allowFallback: value.stepKey !== 'decision:host' && value.fallbackPending === true })
+        } else {
+          result = engine.decisionComplete({ ticket: value.ticket, stepKey: value.stepKey,
+            model: answer.model, result: answer.result, usage: answer.usage,
+            complete: answer.complete, abstention: answer.abstention,
+            evidenceRevision: value.evidenceRevision, version: value.version,
+            fallbackPending: value.fallbackPending === true })
+        }
+      }
+    } catch (error) {
+      if (!dispatched) {
+        engine.decisionAbortBeforeDispatch({ ticket: value.ticket, stepKey: value.stepKey })
+        result = { ok: false, code: error?.message ?? 'provider_unavailable', dispatched: false }
+      } else {
+        result = engine.decisionFail({ ticket: value.ticket, stepKey: value.stepKey,
+          code: 'provider_unavailable', usage: null })
+      }
+    }
+  } else {
+    result = engine[method](value)
+  }
   // Hermes uses this read only to recover the frozen source identity for an existing ticket. The
   // core result also contains a full lesson and replay fixtures; returning those here is redundant
   // and can exceed the bridge's unchanged 8 KiB protocol cap. Keep the driver's complete contract
   // while bounding this transport projection to the one identity it consumes.
   const output = request.op === 'ticketContinuation' && result?.ok === true
     ? { ok: true, job: { source: result.job?.source ?? null } }
-    : result
+    : projectDecisionOutput(request.op, result)
   process.stdout.write(JSON.stringify(output) + '\n')
 } catch (error) {
   process.stdout.write(JSON.stringify({ ok: false, code: error.code ?? 'invalid_request' }) + '\n')

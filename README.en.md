@@ -4,7 +4,7 @@ English | [中文](README.md) · [Desktop and downloads](https://github.com/Miss
 
 Persists scoped user corrections and method candidates for DSH, recalls relevant lessons within a byte budget, and records adoption and verification established by the trusted host. It does not train model weights or guarantee that a model will never repeat a mistake.
 
-Package: `@missher/dsh-mse-learning`, version 0.10.0. It provides host-bound task evidence, bounded package.json artifact checks, failure/control replay, and DSH/Hermes adapters. Evidence is listed by acceptance layer in [Validation](VALIDATION.md); capabilities and limits are in [the implementation notes](docs/AUTONOMY_0.10.0.md). See the [0.10.0 delivery record](PUBLICATION.md) for native desktop and official Web acceptance, checksums, and downloads. The full suite, installation on each user computer, and real paid-model effectiveness remain outside the verified scope.
+Package: `@missher/dsh-mse-learning`, version **0.11.0**. It adds controlled merged-candidate generation, resumable decisions, and a once-only recovery path for a known, settled reflection failure. Opinions never grant verification or promotion credit. The frozen source, all three packages and the native recovery path passed their scoped acceptance checks. See [delivery status and checksums](PUBLICATION.md) and [validation evidence](VALIDATION.md).
 
 The host-title session pickers from alpha.17 remain. Titles are display-only and do not alter scope, recall identity or budgets. This upgrade changes the shared core; DSH scheduling does not establish equivalent lifecycle integration for every Agent. The historical `dsh-missher-evolution` package is a separate product; this plugin does not read or migrate its data.
 
@@ -12,6 +12,7 @@ The host-title session pickers from alpha.17 remain. Titles are display-only and
 
 - Capture explicit corrections from host-authenticated user input; recall them by scope, supported applicability conditions and remaining budget.
 - Keep inferred methods as candidates; safety review can admit a limited trial, while objective evidence is required for validation within a declared domain.
+- The 0.11.0 source candidate can generate a new candidate from two lessons in the same registered verifier domain and conditions; Core rechecks parents, source, budget and controls. Generation does not validate a lesson.
 - Use **Settings → 自我进化 (Self-evolution)** for lessons, recall explanations, pause/resume, manual review, budgets and actual control acknowledgement.
 - Recover acknowledged completion settlements after restart without rerunning models or tools or crediting a result twice.
 - `/mse` shows status, `/mse why` explains recent recall, and `/mse now <task>` provides a read-only preview. They use the host command service instead of ordinary model messages.
@@ -32,7 +33,7 @@ At most **one trial per turn** can use the existing **total 2-lesson/default 768
 
 ## Installation status
 
-The isolated checks below have passed for 0.10.0. Download the matching package from the [release page](https://github.com/Missher12/Missher-MSE-Learning/releases/tag/v0.10.0) and verify its checksum. Updating Git and release assets does not install them on your computer. See the [delivery record](PUBLICATION.md) for the exact scope.
+Install the exact version listed in [delivery status](PUBLICATION.md). Source checks, release publication and installation are separate milestones; an existing older installation is not upgraded merely because this repository changes.
 
 ## Start automatic validation
 
@@ -45,17 +46,9 @@ Defaults remain **automatic validation off, token allowance 0 and task allowance
 
 ## Settings screenshot
 
-Both images use the same 0.10.0 package, isolated profiles, synthetic data, and disabled automatic validation.
+MSE 0.11.0 settings on an isolated Ubuntu community rc.2 desktop, with synthetic data and both background switches off. This is an actual native screenshot; it does not establish a pure-official desktop or other-platform acceptance.
 
-Actual Chinese Web settings on official npm DSH 0.2.1-alpha.5, with save, persisted readback, and discard verified.
-
-![Official alpha.5 Chinese settings with synthetic data](docs/images/official-alpha5-zh-r11.png)
-
-Real minimum window (520×600) on community Desktop 0.2.1-alpha.2.20261014.1 for Linux. The Host menu keeps all five English navigation labels readable and opens their corresponding panels.
-
-![Native minimum-window English navigation with synthetic data](docs/images/native-en-minimum-r11.png)
-
-[The earlier English screenshot](docs/images/en-normal.png) is retained only as historical layout evidence.
+![MSE 0.11.0 settings](docs/images/native-rc2-0.11.0-settings.png)
 
 ## Evidence and platform boundaries
 
@@ -63,7 +56,8 @@ Real minimum window (520×600) on community Desktop 0.2.1-alpha.2.20261014.1 for
 | --- | --- |
 | 0.10.0 core and host evidence | Automatic scheduler 11/11; complete single-instance Hermes chain in 61.156 seconds; official npm DSH alpha.5 Loader passed normal, missing-fs, and missing-tools cases. See [Validation](VALIDATION.md) for scope and limits. |
 | Historical alpha.18 Intel Mac candidate | The earlier 303/303 Node, 125/125 offline adapter, 189/189 controlled UI and four real review calls belong only to that historical candidate. They are not current-candidate or daily-install evidence. |
-| Unmodified official DSH, later DSH versions, Windows and Ubuntu | Full compatibility is not claimed. Permissive `*` peers do not prove the required interfaces exist. |
+| Current Ubuntu community rc.2 | Native settings, candidate details, real Host decision/review and objective rejection observed; one recovery reflection created a candidate while preserving prior records. |
+| Unmodified official DSH, other releases and platforms | Capability-based support without an exact-version lock; untested combinations are not claimed as fully verified. |
 | Hermes 0.21.1 | Current adapter/core offline Stage 4c integration passed 21/21, including 20K window recovery, rebuilt driver/pass and trusted source-session route event. This is historical adapter-layer evidence; the current isolated native PluginManager single-instance run is recorded separately above and is not an added count. |
 | Other Agents | A host-independent Node SDK and JSON CLI are available, but a trusted lifecycle adapter is required. This is not automatic support for every Agent or a browser SDK. |
 
@@ -98,7 +92,7 @@ Use a fresh source copy or output directory for each build; packers reject exist
 
 [Autonomy implementation notes](docs/AUTONOMY_0.10.0.md) · [Adapter protocol](docs/ADAPTER_PROTOCOL.md) · [Durable settlement](docs/DURABLE_SETTLEMENT_OUTBOX.md) · [Detailed behavior, Chinese](docs/BEHAVIOR.zh.md)
 
-Arbitrary free-form Chinese conditions are not reliably understood; unclear conditions conservatively block recall. Unacknowledged work and manual model jobs do not have a cross-crash durability guarantee. Tests, readable settings and growing counters do not establish long-term model improvement. This round of real-provider acceptance covers bounded review only, not paid objective two-arm validation. Controlled browser UI evidence is separate from daily native-window acceptance.
+Arbitrary free-form Chinese conditions are not reliably understood; unclear conditions conservatively block recall. Unacknowledged work and manual model jobs do not have a cross-crash durability guarantee. Tests, readable settings and growing counters do not establish long-term model improvement. R6's bounded real-provider record is listed in [Validation](VALIDATION.md): only 2/5 Laya semantic cases matched expectations, and the decision labels were sensitive to wording. This does not establish long-term improvement or paid objective two-arm validation. The alpha.2 screenshot shows synthetic English settings only; it is separate from native UI and daily-install evidence.
 
 ## License and attribution
 

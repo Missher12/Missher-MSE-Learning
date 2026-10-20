@@ -18,6 +18,7 @@ The four contracts these cases lock down:
     timer or wake a model.
 """
 import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import json
 import os
@@ -30,6 +31,7 @@ import threading
 import time
 import types
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -175,8 +177,11 @@ class Core:
         # transport records what really arrived either way.
         ok = answer.get("ok") if isinstance(answer, dict) else None
         code = answer.get("code") if isinstance(answer, dict) else None
+        response = ({key: answer[key] for key in ("ticket", "dispatchHash", "skipped", "id", "mergeStatus",
+                    "source") if key in answer} if isinstance(answer, dict) else None)
         self.operations.append({"op": op, "value": value, "ok": ok, "code": code,
-                                "skipped": answer.get("skipped") if isinstance(answer, dict) else None})
+                                "skipped": answer.get("skipped") if isinstance(answer, dict) else None,
+                                "response": response})
         if self.on_answer is not None:
             self.on_answer(op, value, answer)
         return answer
@@ -337,11 +342,15 @@ class PassFixture:
 
     def __init__(self, test, *, tokens_per_day=100_000, calls_per_day=8, usage=True):
         self.test = test
+        cli_env = patch.dict(os.environ, {"MSE_LEARN_CLI": str(ROOT / "src" / "cli.mjs")})
+        cli_env.start()
+        test.addCleanup(cli_env.stop)
         self.state_root = Path(tempfile.mkdtemp(prefix="mse4c-pass-"))
         test.addCleanup(shutil.rmtree, self.state_root, True)
         self.core = Core(self.state_root, tokens_per_day=tokens_per_day, calls_per_day=calls_per_day)
         self.clock = Clock()
         self.scheduler = Scheduler(self.clock)
+        self.decision_actions = {}
         self.transport = fake_transport(self._answer)
         self.usage = usage
         self._install_hooks(tokens_per_day, calls_per_day)
@@ -388,7 +397,24 @@ class PassFixture:
     def _answer(self, body):
         messages = body.get("messages") or [{}]
         system = messages[0].get("content", "") if isinstance(messages[0], dict) else ""
-        if "你是独立的答案评审" in system:
+        if "Return only JSON with action" in system:
+            user = messages[1].get("content", "") if len(messages) > 1 and isinstance(messages[1], dict) else ""
+            try:
+                candidate_id = json.loads(user).get("candidateId")
+            except Exception:  # noqa: BLE001
+                candidate_id = None
+            action = self.decision_actions.get(candidate_id, "review")
+            opinion = {"action": action, "confidence": 0.75,
+                                  "confidenceMeaning": "仅供候选分流参考",
+                                  "reasons": ["候选可进入既有验证流程"], "riskCodes": [],
+                                  "evidenceRefs": []}
+            if action == "suggest_merge" and isinstance(getattr(self, "merge_target", None), dict):
+                opinion["mergeTarget"] = dict(self.merge_target)
+            content = json.dumps(opinion, ensure_ascii=False)
+        elif "你要把两个同一适用条件" in system:
+            content = json.dumps({"instruction": "处理 package.json 时先解析 JSON，再核对 scripts 字段类型并保留无关字段。"},
+                                 ensure_ascii=False)
+        elif "你是独立的答案评审" in system:
             content = json.dumps({"winner": "tie", "reason": "两侧按同一规则作答，未发现差异",
                                   "criteria": []}, ensure_ascii=False)
         else:
@@ -869,8 +895,11 @@ class PlanAdvanceTests(unittest.TestCase):
         fixture.core("autoPlanUpdate", {"queueKey": plan["queueKey"], "planHash": plan["planHash"],
                                          "nextAttemptAt": 0})
         result = fixture.step()
-        self.assertEqual(fixture.transport.physical, 4, "%r" % (result,))
-        self.assertTrue(all(item.get("max_tokens") in (128, 256) for item in fixture.transport.bodies))
+        self.assertEqual(fixture.transport.physical, 5, "%r" % (result,))
+        task_bodies = [item for item in fixture.transport.bodies if item.get("max_tokens") in (128, 256)]
+        decision_bodies = [item for item in fixture.transport.bodies if item.get("max_tokens") == 512]
+        self.assertEqual(len(task_bodies), 4, "the task/API requests remain separate from candidate routing")
+        self.assertEqual(len(decision_bodies), 1, "candidate routing is separately budgeted")
         reservations = fixture.core.ops("ticketReserve")
         self.assertEqual(len(reservations), 4)
         status = fixture.core("status", {})
@@ -898,7 +927,10 @@ class PlanAdvanceTests(unittest.TestCase):
         status = fixture.core("status", {})
         self.assertLessEqual(status.get("evaluationTokensReserved24h", 0), 20_000)
         self.assertLessEqual(status.get("evaluationCallsLast24h", 0), 2)
-        self.assertTrue(all(body.get("max_tokens") == 128 for body in fixture.transport.bodies))
+        task_bodies = [body for body in fixture.transport.bodies if body.get("max_tokens") != 512]
+        decision_bodies = [body for body in fixture.transport.bodies if body.get("max_tokens") == 512]
+        self.assertTrue(all(body.get("max_tokens") == 128 for body in task_bodies))
+        self.assertEqual(len(decision_bodies), 1, "the additional decision call is accounted independently")
         after = fixture.core.plan_for(lesson, "objective")
         self.assertEqual(after.get("stage"), "queued", "%r bodies=%d status=%r reserves=%r" % (
             result, len(fixture.transport.bodies), status, fixture.core.ops("ticketReserve")))
@@ -907,9 +939,14 @@ class PlanAdvanceTests(unittest.TestCase):
         self.assertIsInstance(ticket, str)
         raw = fixture.core.document()
         saved = next(row for row in raw["autoPlans"] if row["queueKey"] == after["queueKey"])
-        self.assertEqual(len(saved.get("progress", {}).get("steps", [])), fixture.transport.physical)
+        saved_steps = len(saved.get("progress", {}).get("steps", []))
+        self.assertEqual(saved_steps, len(task_bodies), "the objective checkpoint contains only its own API steps")
+        self.assertEqual(fixture.transport.physical, saved_steps + len(decision_bodies),
+                         "physical requests include the separately budgeted candidate decision")
         self.assertEqual(fixture.transport.physical, 22)
-        self.assertEqual(status.get("evaluationTasksLast24h"), 1)
+        self.assertEqual(saved_steps, 21)
+        self.assertEqual(status.get("evaluationTasksLast24h"), 2,
+                         "one decision ticket and one objective ticket are two logical paid tasks")
         self.assertEqual(status.get("evaluationRequestsLast24h"), 22)
 
         # The plan checkpoint survives ticket expiry. A fresh process waits for the same source session
@@ -919,7 +956,7 @@ class PlanAdvanceTests(unittest.TestCase):
         initial_progress = next(row for row in fixture.core.document()["autoPlans"]
                                 if row["queueKey"] == parked["queueKey"]).get("progress", {}).get("steps", [])
         initial_keys = {item.get("stepKey") for item in initial_progress}
-        self.assertEqual(len(initial_keys), 22)
+        self.assertEqual(len(initial_keys), 21)
         old_driver = fixture.hooks.reflection_driver
         fixture.restart_hooks(tokens_per_day=20_000, calls_per_day=2)
         self.assertIsNot(fixture.hooks.reflection_driver, old_driver)
@@ -954,15 +991,15 @@ class PlanAdvanceTests(unittest.TestCase):
         self.assertTrue(initial_keys < final_keys, "the original checkpoints survived ticket expiry and restart")
         self.assertTrue(all(final_by_key.get(item.get("stepKey")) == item.get("requestHash")
                             for item in initial_progress), "the original step request identities stayed unchanged")
-        self.assertEqual(len(final_keys - initial_keys), 14, "only 14 incomplete steps remained")
-        self.assertEqual(fixture.transport.physical, 36,
-                         "22 prior requests were reused and only 14 remaining requests dispatched")
+        self.assertEqual(len(final_keys - initial_keys), 15, "only 15 incomplete steps remained")
+        self.assertEqual(fixture.transport.physical, 37,
+                         "one decision request plus 21 prior objective requests and 15 remaining requests")
         tickets_used = {row["value"].get("ticket") for row in fixture.core.ops("ticketReserve")}
         self.assertIn(ticket, tickets_used)
         self.assertEqual(tickets_used, {ticket}, "the live ticket survived the day window and process restart")
         self.assertEqual(fixture.core("status", {}).get("evaluationTasksLast24h"), 1,
                          "the resumed ticket counts once in the new window, not once per step")
-        self.assertEqual(fixture.core("status", {}).get("evaluationRequestsLast24h"), 14)
+        self.assertEqual(fixture.core("status", {}).get("evaluationRequestsLast24h"), 15)
 
     def test_hermes_production_pass_grants_and_recalls_an_ordinary_evidence_trial(self):
         fixture = PassFixture(self)
@@ -982,10 +1019,304 @@ class PlanAdvanceTests(unittest.TestCase):
         row = next(item for item in fixture.core.document()["lessons"] if item.get("id") == lesson)
         self.assertEqual(row.get("trial", {}).get("kind"), "evidence", "%r" % (calls,))
         self.assertEqual(row.get("trial", {}).get("note"), "reference_only_unverified")
+        self.assertEqual(fixture.transport.physical, 0, "granting a free evidence trial never pays for a decision")
+        self.assertEqual(fixture.core.document().get("decisionRecords", []), [])
         prepared = fixture.core("prepare", {"sessionId": SESSION, "turnId": "ordinary-recall",
                                              "origin": "user", "prompt": "部署前如何确认工作区状态？"})
         self.assertEqual(prepared.get("reason"), "recalled", "%r" % (prepared,))
         self.assertIn(lesson, prepared.get("lessons", []), "%r" % (prepared,))
+
+    def test_paid_decision_reject_rotates_to_next_candidate_after_restart(self):
+        fixture = PassFixture(self)
+        self.addCleanup(fixture.close)
+        actions = {}
+        requests = []
+
+        class DecisionHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                size = int(self.headers.get("Content-Length", "0"))
+                request = json.loads(self.rfile.read(size).decode("utf-8"))
+                evidence = json.loads(request["messages"][1]["content"])
+                candidate_id = evidence["candidateId"]
+                requests.append(candidate_id)
+                answer = {"action": actions.get(candidate_id, "wait"), "confidence": 0.8,
+                          "confidenceMeaning": "test advisory", "reasons": ["bounded synthetic response"],
+                          "riskCodes": [], "evidenceRefs": []}
+                payload = json.dumps({"model": "decision-model", "choices": [{"finish_reason": "stop",
+                    "message": {"content": json.dumps(answer)}}],
+                    "usage": {"prompt_tokens": 80, "completion_tokens": 20}}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *_args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), DecisionHandler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server_thread.join, 2)
+        self.addCleanup(server.shutdown)
+        endpoint = "http://127.0.0.1:%d/v1/chat/completions" % server.server_address[1]
+
+        def configure_remote():
+            fixture.hooks.config.update({"decisionBackend": "openai_compatible",
+                "decisionModel": "decision-model", "decisionEndpoint": endpoint})
+
+        configure_remote()
+        fixture.observe_route()
+        first = fixture.with_session(fixture.core.lesson("decision-first",
+            instruction="并发写入提交前校验请求代次和票据状态，写入后确认结算记录，防止重复提交。"))
+        second = fixture.with_session(fixture.core.lesson("decision-second",
+            instruction="重试并发请求前校验请求代次和票据状态，提交后确认结算记录，防止迟到结果重复写入。"))
+        self.assertNotEqual(first, second, "the two source candidates must survive core content deduplication")
+        actions.update({first: "reject", second: "review"})
+
+        fixture.hooks.start_auto_pass("startup")
+        first_pass = fixture.step()
+        self.assertEqual(first_pass.get("registered"), 0, "%r" % (first_pass,))
+        decisions = fixture.core.document().get("decisionRecords", [])
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0].get("result", {}).get("action"), "reject")
+        self.assertIsNone(fixture.core.plan_for(first, "review"))
+
+        # The core consideration cursor is durable; rebuilding Hooks must continue at candidate 2.
+        fixture.restart_hooks()
+        configure_remote()
+        fixture.observe_route()
+        fixture.hooks.start_auto_pass("startup")
+        second_pass = fixture.step()
+        self.assertGreaterEqual(second_pass.get("registered", 0), 1, "%r" % (second_pass,))
+        decisions = fixture.core.document().get("decisionRecords", [])
+        self.assertEqual(len(decisions), 2, "the persisted cursor advances to the second candidate")
+        second_decision = next(row for row in decisions if row.get("candidateId") == second)
+        self.assertEqual(second_decision.get("result", {}).get("action"), "review")
+        self.assertIsNotNone(fixture.core.plan_for(second, "review"))
+        self.assertEqual(requests, [first, second], "the real CLI dispatches exactly one paid request per pass")
+
+    def test_production_hermes_pass_generates_one_merged_candidate_and_does_not_repeat_after_restart(self):
+        node_clock = node_clock_mod.NodeClock(self)
+        fixture = PassFixture(self, tokens_per_day=50_000, calls_per_day=5)
+        self.addCleanup(fixture.close)
+        fixture.hooks.wall_ms = node_clock.now_ms
+        fixture.observe_route()
+
+        def reflected_parent(turn, instruction):
+            prepared = fixture.core("reflectionRequest", {"sessionId": SESSION, "turnId": turn,
+                "outcome": "supported", "taskSummary": "检查 package.json JSON 结构与 scripts 字段类型，保留扩展字段。",
+                "resultSummary": "已确认 JSON 结构有效且无关配置仍保留。"})
+            self.assertTrue(prepared.get("ticket"), "parent candidate is created through the real Core reflection request")
+            learned = fixture.core("reflectionResult", {"ticket": prepared["ticket"],
+                "result": {"instruction": instruction},
+                "usage": {"known": True, "totalTokens": 12}})
+            self.assertTrue(learned.get("id"), "the source-bound reflection creates a candidate")
+            return learned["id"]
+
+        primary = reflected_parent("merge-parent-one",
+            "修改 package.json 前先解析 JSON 结构，再核对 scripts 字段类型并保留无关字段。")
+        node_clock.advance_ms(31 * 60 * 1000)
+        partner = reflected_parent("merge-parent-two",
+            "编辑 package.json 时先校验 JSON 字段类型，最后确认自定义字段仍然保留。")
+        node_clock.advance_ms(31 * 60 * 1000)
+        fixture.decision_actions[primary] = "suggest_merge"
+        fixture.merge_target = {"id": partner, "version": 1}
+        fixture.hooks.start_auto_pass("startup")
+        first = fixture.step()
+        self.assertGreaterEqual(len([body for body in fixture.transport.bodies if body.get("max_tokens") == 512]),
+                                1, "%r" % (first,))
+        merged = next((row for row in fixture.core.document().get("lessons", [])
+                       if row.get("derivation", {}).get("mode") == "merge"), None)
+        raw = fixture.core.document()
+        generation_prepared = [row for row in fixture.core.ops("reflectionRequest")
+                               if isinstance(row.get("value", {}).get("generation"), dict)]
+        generation_tickets = {row.get("response", {}).get("ticket") for row in generation_prepared
+                              if isinstance(row.get("response", {}).get("ticket"), str)}
+        diagnostic = {
+            "pass": first,
+            "generationPrepared": generation_prepared,
+            "generationResults": [row for row in fixture.core.ops("reflectionResult")
+                                   if row.get("value", {}).get("ticket") in generation_tickets],
+            "decisionMergeStatus": [{"key": row.get("key"), "state": row.get("state"),
+                                     "action": (row.get("finalResult") or row.get("result") or {}).get("action"),
+                                     "mergeStatus": row.get("mergeStatus")}
+                                    for row in raw.get("decisionRecords", [])],
+            "mergeLessons": [{"id": row.get("id"), "status": row.get("status"),
+                              "derivation": row.get("derivation")}
+                             for row in raw.get("lessons", [])
+                             if row.get("derivation", {}).get("mode") == "merge"],
+        }
+        self.assertIsNotNone(merged, "the production pass must call the real merge and reflection drivers; "
+                             + json.dumps(diagnostic, ensure_ascii=False)[:6000])
+        self.assertEqual(merged.get("status"), "candidate")
+        self.assertIsNone(merged.get("methodId"))
+        self.assertEqual(merged.get("verified"), 0)
+        generation_calls = [body for body in fixture.transport.bodies if body.get("max_tokens") == 384]
+        self.assertEqual(len(generation_calls), 1)
+        status = fixture.core("status", {})
+        self.assertGreater(status.get("evaluationCallsLast24h", 0), 0)
+        self.assertLessEqual(status.get("evaluationCallsLast24h", 0), 5)
+        self.assertGreater(status.get("evaluationTokensKnown24h", 0), 0)
+        self.assertLessEqual(status.get("evaluationTokensReserved24h", 0), 50_000)
+        first_records = raw.get("decisionRecords", [])
+        original_decision = next(row for row in first_records if row.get("candidateId") == primary)
+        self.assertEqual((original_decision.get("finalResult") or original_decision.get("result") or {}).get("action"),
+                         "suggest_merge")
+        original_decision_spend = next(row for row in raw.get("spends", [])
+                                       if row.get("kind") == "decision"
+                                       and row.get("ticket") == original_decision.get("ticket"))
+        merge_status = original_decision.get("mergeStatus", {})
+        self.assertEqual(merge_status.get("state"), "complete")
+        original_generation_event = next(row for row in raw.get("events", [])
+                                         if row.get("decisionId") == original_decision.get("key")
+                                         and row.get("generationKey") == merge_status.get("generationKey"))
+        original_generation_spend = next(row for row in raw.get("spends", [])
+                                         if row.get("kind") == "generation"
+                                         and row.get("id") == original_generation_event.get("generationSpendId"))
+        original_reflection_spend = next(row for row in raw.get("spends", [])
+                                         if row.get("kind") == "reflection"
+                                         and row.get("ticket") == original_generation_event.get("ticket"))
+        # Snapshot each original paid identity separately: a later fair-cursor decision may add a
+        # legitimate task, but it cannot rewrite or duplicate the decision/generation pair.
+        def snapshot(row):
+            return json.loads(json.dumps(row, sort_keys=True))
+        original_decision_snapshot = snapshot(original_decision)
+        original_decision_spend_snapshot = snapshot(original_decision_spend)
+        original_generation_event_snapshot = snapshot(original_generation_event)
+        original_generation_spend_snapshot = snapshot(original_generation_spend)
+        original_reflection_spend_snapshot = snapshot(original_reflection_spend)
+        decision_body_count_before = len([body for body in fixture.transport.bodies if body.get("max_tokens") == 512])
+        physical_before_restart = fixture.transport.physical
+
+        fixture.restart_hooks(tokens_per_day=50_000, calls_per_day=5)
+        fixture.hooks.wall_ms = node_clock.now_ms
+        fixture.observe_route()
+        fixture.hooks.start_auto_pass("startup")
+        fixture.step()
+        generation_calls = [body for body in fixture.transport.bodies if body.get("max_tokens") == 384]
+        self.assertEqual(len(generation_calls), 1, "a cold production Hooks/pass cannot replay the settled generation")
+        self.assertEqual(len([row for row in fixture.core.document().get("lessons", [])
+                             if row.get("derivation", {}).get("mode") == "merge"]), 1)
+        after_raw = fixture.core.document()
+        after_records = after_raw.get("decisionRecords", [])
+        after_primary = next(row for row in after_records if row.get("key") == original_decision.get("key"))
+        after_event = next(row for row in after_raw.get("events", [])
+                           if row.get("decisionId") == original_decision.get("key")
+                           and row.get("generationKey") == merge_status.get("generationKey"))
+        after_decision_spend = next(row for row in after_raw.get("spends", [])
+                                    if row.get("kind") == "decision"
+                                    and row.get("ticket") == original_decision.get("ticket"))
+        after_generation_spend = next(row for row in after_raw.get("spends", [])
+                                      if row.get("kind") == "generation"
+                                      and row.get("id") == original_generation_event.get("generationSpendId"))
+        after_reflection_spend = next(row for row in after_raw.get("spends", [])
+                                      if row.get("kind") == "reflection"
+                                      and row.get("ticket") == original_generation_event.get("ticket"))
+        self.assertEqual(snapshot(after_primary), original_decision_snapshot)
+        self.assertEqual(snapshot(after_event), original_generation_event_snapshot)
+        self.assertEqual(snapshot(after_decision_spend), original_decision_spend_snapshot)
+        self.assertEqual(snapshot(after_generation_spend), original_generation_spend_snapshot)
+        self.assertEqual(snapshot(after_reflection_spend), original_reflection_spend_snapshot)
+
+        new_decisions = [row for row in after_records if row.get("key") not in {item.get("key") for item in first_records}]
+        self.assertEqual(len(new_decisions), 1, "fair rotation may classify one other candidate exactly once")
+        additional = new_decisions[0]
+        self.assertNotEqual(additional.get("candidateId"), primary,
+                            "the additional paid decision belongs to another candidate identity")
+        self.assertTrue(any(row.get("id") == additional.get("candidateId")
+                            and row.get("version") == additional.get("version")
+                            for row in after_raw.get("lessons", [])),
+                        "the additional decision identity resolves to a real candidate edition")
+        decision_bodies_after = [body for body in fixture.transport.bodies if body.get("max_tokens") == 512]
+        self.assertEqual(len(decision_bodies_after), decision_body_count_before + 1)
+        extra_body = decision_bodies_after[decision_body_count_before]
+        extra_evidence = json.loads(extra_body["messages"][1]["content"])
+        self.assertEqual(extra_evidence.get("candidateId"), additional.get("candidateId"),
+                         "the extra physical request is the newly recorded candidate decision")
+        additional_spend = next(row for row in after_raw.get("spends", [])
+                                if row.get("kind") == "decision" and row.get("ticket") == additional.get("ticket"))
+        additional_measured = sum(entry.get("measuredTokens", 0)
+                                  for entry in additional_spend.get("budgetEntries", []))
+        self.assertGreater(additional_measured, 0, "the additional decision has its own measured paid ledger entry")
+        self.assertEqual(fixture.transport.physical, physical_before_restart + 1,
+                         "only the additional candidate decision dispatched after restart")
+        after_restart = fixture.core("status", {})
+        self.assertEqual(after_restart.get("evaluationCallsLast24h"), status.get("evaluationCallsLast24h") + 1,
+                         "the second candidate decision adds one task; the original decision and generation remain counted")
+        self.assertEqual(after_restart.get("evaluationRequestsLast24h"), status.get("evaluationRequestsLast24h") + 1)
+        self.assertEqual(after_restart.get("evaluationTokensKnown24h"),
+                         status.get("evaluationTokensKnown24h") + additional_measured,
+                         "known token growth equals only the newly measured candidate decision")
+
+
+@NEEDS_SDK
+class DecisionDispatchIdentityTests(unittest.TestCase):
+    def test_provider_timeout_is_not_clipped_by_the_old_ten_second_request_bound(self):
+        self.assertEqual(driver.decision_dispatch_deadline(250), 10.25)
+        self.assertEqual(bridge.decision_dispatch_process_timeout(250), 16)
+        self.assertEqual(driver.decision_dispatch_deadline(30_000), 40.0)
+        self.assertEqual(bridge.decision_dispatch_process_timeout(30_000), 45)
+        with self.assertRaises(ValueError):
+            driver.decision_dispatch_deadline(10)
+
+    def test_cli_refuses_a_changed_endpoint_before_any_http_request(self):
+        fixture = PassFixture(self)
+        self.addCleanup(fixture.close)
+        hits = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                hits.append(self.path)
+                self.send_response(500)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *_args):
+                return
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(server.shutdown)
+        endpoint = "http://127.0.0.1:%d/v1/chat/completions" % server.server_address[1]
+
+        lesson = fixture.core.lesson("decision-route-binding")
+        context = fixture.core("decisionContext", {"lessonId": lesson})
+        evidence = {key: context[key] for key in ("candidateId", "version", "kind", "status", "methodRegistered",
+            "candidateSummary", "applicability", "exclusions", "validators", "registeredChecker",
+            "evidenceCount", "counterEvidenceCount", "counterEvidenceState", "evidenceCapacityWaiting",
+            "evidenceRefs", "reviewState", "trialState", "objectiveState", "validator") if key in context}
+        evidence["refs"] = list(context.get("evidenceRefs") or [])
+        fallback = {"provider": PROVIDER, "model": MODEL, "apiMode": "chat_completions",
+                    "reasoningEffort": EFFORT}
+        identity = {"candidateId": context["candidateId"], "version": context["version"],
+            "evidenceRevision": context["evidenceRevision"], "projectHash": context["projectHash"],
+            "evidence": evidence, "ruleVersion": "experience-upgrade-v1", "role": "candidate-routing",
+            "backend": "openai_compatible", "provider": "openai_compatible", "model": "decision-model",
+            "endpoint": endpoint, "apiMode": "systemone-or-chat-completions", "reasoningEffort": EFFORT,
+            "fallbackRoute": fallback,
+            "inputTokens": max(1, len(json.dumps(evidence, ensure_ascii=False,
+                separators=(",", ":")).encode("utf-8"))), "outputTokens": 512}
+        reserved = fixture.core("decisionRequest", {**identity, "lessonId": lesson})
+        self.assertTrue(reserved.get("ok"), "%r" % (reserved,))
+        dispatch = {**identity, "ticket": reserved["ticket"], "requestHash": reserved["requestHash"],
+            "stepKey": "decision", "endpoint": endpoint + "/changed", "secretRef": "", "timeoutMs": 1_000,
+            "fallbackPending": True}
+        result = subprocess.run([fixture.core.node, str(fixture.core.cli)],
+            input=json.dumps({"config": fixture.core.config, "op": "decisionDispatch", "input": dispatch}),
+            text=True, capture_output=True, timeout=10, check=False)
+        response = json.loads(result.stdout)
+        self.assertEqual(response.get("code"), "decision_dispatch_identity_mismatch")
+        self.assertFalse(response.get("dispatched"))
+        self.assertEqual(hits, [], "the provider is never contacted under the changed endpoint")
+        status = fixture.core("status", {})
+        self.assertEqual(status.get("evaluationCallsLast24h"), 0)
+        self.assertEqual(status.get("evaluationTokensReserved24h"), 0)
 
 
 class ReadOnlyStatusTests(unittest.TestCase):

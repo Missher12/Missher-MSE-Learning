@@ -293,8 +293,16 @@ REVIEW_TOKENS_BOUND = 4000
 OBJECTIVE_TOKENS_BOUND = 12000
 # The paid REQUEST transactions get a bounded window of their own (see `Hooks._call`): they are the
 # two operations that freeze an attempt identity, and a timeout would be reported as a refusal.
-PAID_REQUEST_OPS = frozenset({"reviewRequest", "evaluationRequest"})
+PAID_REQUEST_OPS = frozenset({"reviewRequest", "evaluationRequest", "decisionRequest", "decisionReserveFallback",
+                              "decisionDispatch"})
 PAID_REQUEST_TIMEOUT_SECONDS = 10
+
+
+def decision_dispatch_process_timeout(timeout_ms):
+    """A finite CLI deadline: provider timeout plus 15 seconds for process settlement overhead."""
+    if not isinstance(timeout_ms, int) or isinstance(timeout_ms, bool) or not 100 <= timeout_ms <= 120_000:
+        return 2
+    return min(135, (timeout_ms + 999) // 1000 + 15)
 # A foreground recall is worth a bounded second chance when the store is transiently busy
 # (an out-of-process writer, or a lock held outside this instance). Bounded on purpose:
 # no unbounded wait, and a permanent failure still returns no context.
@@ -771,6 +779,10 @@ class Hooks:
         self.cancel = getattr(self, "cancel", None) or cancel or self._cancel_timer
         self.config.setdefault("evaluationTokensPerDay", _bounded_env("MSE_EVALUATION_TOKENS_PER_DAY", 0, 1000000))
         self.config.setdefault("evaluationCallsPerDay", _bounded_env("MSE_EVALUATION_CALLS_PER_DAY", 2, 8))
+        self.config.setdefault("decisionBackend", os.environ.get("HERMES_MSE_DECISION_BACKEND", "host"))
+        self.config.setdefault("decisionModel", os.environ.get("HERMES_MSE_DECISION_MODEL", ""))
+        self.config.setdefault("decisionEndpoint", os.environ.get("HERMES_MSE_DECISION_ENDPOINT", ""))
+        self.config.setdefault("decisionSecretRef", os.environ.get("HERMES_MSE_DECISION_SECRET_REF", ""))
         self.call = call or self._call
         self.turns = {}
         # Candidate registration happens after post_llm_call retires its turn row. Retain only
@@ -1147,6 +1159,202 @@ class Hooks:
                               "progress": plan.get("progress")},
                 "taskReplayCases": replay_cases if isinstance(replay_cases, list) else []}
 
+    def decision_attempt(self, lesson, source):
+        """Classify a new candidate on the shared provider slot and durable decision ticket."""
+        if not self.auto_pass_allowed() or self.reflection_driver is None:
+            return {"ok": False, "code": "driver_disabled" if not self.auto_pass_allowed()
+                    else "provider_driver_unsupported"}
+        if not isinstance(lesson, dict) or not isinstance(source, dict):
+            return {"ok": False, "code": "source_unknown"}
+        session = source.get("sessionId")
+        if not isinstance(session, str) or not session:
+            return {"ok": False, "code": "source_unknown"}
+        with self.lock:
+            choices = [(key, value) for key, value in self.pre_api.items()
+                       if key[0] == session and isinstance(value, dict)]
+        source_turn = lesson.get("sourceTurn")
+        exact = [(key, value) for key, value in choices
+                 if source_turn in (key[1], self._problem_turn_hash(session, key[1]))]
+        selected_turn = exact[0][0] if len(exact) == 1 else choices[-1][0] if len(choices) == 1 else None
+        facts = exact[0][1] if len(exact) == 1 else choices[-1][1] if len(choices) == 1 else None
+        route = source.get("route") if isinstance(source.get("route"), dict) else {}
+        if not isinstance(facts, dict):
+            return {"ok": False, "code": "source_unknown"}
+        provider, model = facts.get("provider"), facts.get("model")
+        base_url, api_mode = facts.get("base_url"), facts.get("api_mode")
+        if (not isinstance(provider, str) or not isinstance(model, str) or not isinstance(base_url, str)
+                or not isinstance(api_mode, str) or route.get("provider") != provider or route.get("model") != model):
+            return {"ok": False, "code": "source_route_changed"}
+        backend = self.config.get("decisionBackend", "host")
+        if backend not in ("host", "openai_compatible", "jev", "laya"):
+            return {"ok": False, "code": "unsupported_decision_backend"}
+        context = self.call("decisionContext", {"lessonId": lesson.get("id"),
+            **({"projectKey": source["projectKey"]} if isinstance(source.get("projectKey"), str) else {})})
+        if not isinstance(context, dict) or context.get("ok") is not True:
+            return {"ok": False, "code": (context or {}).get("code", "decision_context_unavailable")}
+        if context.get("contextIncomplete") is True:
+            return {"ok": False, "code": "decision_context_truncated"}
+        evidence = {key: context[key] for key in ("candidateId", "version", "kind", "status", "methodRegistered",
+            "candidateSummary", "applicability", "exclusions", "validators", "registeredChecker",
+            "registeredVerifier", "mergeCandidates",
+            "evidenceCount", "counterEvidenceCount", "counterEvidenceState", "evidenceCapacityWaiting",
+            "evidenceRefs", "reviewState", "trialState", "objectiveState", "validator")
+            if key in context}
+        # decisionIdentity binds the decision to the core's supported evidence refs via `refs`.
+        # Keep the human-readable field as well, but never let the external backend choose refs.
+        evidence["refs"] = list(context.get("evidenceRefs") or [])
+        encoded = json.dumps(evidence, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        decision_model = model if backend == "host" else self.config.get("decisionModel", "")
+        endpoint = "" if backend == "host" else self.config.get("decisionEndpoint", "")
+        if not isinstance(decision_model, str) or not decision_model or (backend != "host" and not endpoint):
+            return {"ok": False, "code": "decision_route_unconfigured"}
+        body = facts.get("request", {}).get("body", {}) if isinstance(facts.get("request"), dict) else {}
+        effort = body.get("reasoning_effort", body.get("reasoningEffort")) if isinstance(body, dict) else None
+        host_route = {"provider": provider, "model": model, "apiMode": api_mode,
+            "reasoningEffort": effort if isinstance(effort, str) and effort else "unspecified"}
+        value = {"candidateId": context.get("candidateId"), "version": context.get("version"),
+            "evidenceRevision": context.get("evidenceRevision"), "projectHash": context.get("projectHash"),
+            "evidence": evidence, "ruleVersion": "experience-upgrade-v1", "role": "candidate-routing",
+            "backend": backend, "provider": provider if backend == "host" else backend,
+            "model": decision_model, "apiMode": api_mode if backend == "host" else "systemone-or-chat-completions",
+            "reasoningEffort": host_route["reasoningEffort"], "inputTokens": max(1, len(encoded)),
+            "outputTokens": 512, "lessonId": lesson.get("id"),
+            **({"projectKey": source["projectKey"]} if isinstance(source.get("projectKey"), str) else {})}
+        if backend != "host":
+            value.update({"endpoint": endpoint, "fallbackRoute": host_route})
+        request = self.call("decisionRequest", value)
+        if not isinstance(request, dict):
+            return {"ok": False, "code": "decision_unavailable"}
+        if request.get("duplicate") is True:
+            record = request.get("record", {})
+            if record.get("state") == "dispatched" and record.get("primaryResult"):
+                resume_fallback = True
+                request["ticket"] = record.get("ticket")
+                request["identity"] = {"key": record.get("key", "")}
+            else:
+                final = record.get("finalResult") or record.get("result") or {}
+                if isinstance(final, dict) and isinstance(final.get("action"), str):
+                    response = {"ok": True, "action": final["action"], "record": record, "cached": True}
+                    if final["action"] == "suggest_merge":
+                        response["merge"] = self._merge_generation_attempt(lesson, source, facts, selected_turn,
+                            record.get("key"))
+                    return response
+                return {"ok": False, "code": record.get("error", "decision_waiting")}
+        else:
+            resume_fallback = False
+        if request.get("ok") is not True or not isinstance(request.get("ticket"), str):
+            return {"ok": False, "code": request.get("code", "decision_waiting")}
+        node = os.environ.get("MSE_NODE_EXECUTABLE") or shutil.which("node")
+        cli = os.environ.get("MSE_LEARN_CLI") or str(Path(__file__).parent / "runtime" / "src" / "cli.mjs")
+        dispatch_input = {"ticket": request["ticket"], "stepKey": "decision",
+            "requestHash": request.get("requestHash"), "backend": backend, "endpoint": endpoint,
+            "model": decision_model, "evidence": evidence, "secretRef": self.config.get("decisionSecretRef", ""),
+            "timeoutMs": 30_000, "fallbackPending": backend != "host",
+            "evidenceRevision": context.get("evidenceRevision"), "version": context.get("version"),
+            "candidateId": context.get("candidateId"), "projectHash": context.get("projectHash"),
+            "ruleVersion": "experience-upgrade-v1", "role": "candidate-routing",
+            "provider": provider if backend == "host" else backend,
+            "apiMode": api_mode if backend == "host" else "systemone-or-chat-completions",
+            "reasoningEffort": host_route["reasoningEffort"],
+            "fallbackRoute": host_route if backend != "host" else None,
+            "inputTokens": max(1, len(encoded)), "outputTokens": 512}
+        job = {"kind": "decision", "ticket": request["ticket"], "backend": backend,
+            "decisionKey": (request.get("identity") or {}).get("key", ""), "requestHash": request.get("requestHash"),
+            "dispatchInput": dispatch_input, "nodePath": node, "cliPath": cli, "coreConfig": self.config,
+            "route_provider": provider, "route_model": model,
+            "pre_api": {"provider": provider, "model": model, "base_url": base_url, "api_mode": api_mode,
+                "request": facts.get("request")}, "hostFallbackRoute": host_route,
+            "inputTokens": max(1, len(encoded)), "outputTokens": 512, "fallbackPending": backend != "host",
+            "resumeFallback": resume_fallback, "evidenceRevision": context.get("evidenceRevision"),
+            "version": context.get("version"),
+            "system": "Return only JSON with action, confidence, confidenceMeaning, reasons, riskCodes, evidenceRefs, and optional mergeTarget {id,version}. For suggest_merge, copy exactly one id/version from evidence.mergeCandidates; otherwise wait. Advisory only; never claim validation or promotion.",
+            "prompt": json.dumps(evidence, ensure_ascii=False, separators=(",", ":"))}
+        if not node or not Path(cli).is_absolute() or not Path(cli).is_file():
+            self.call("decisionAbortBeforeDispatch", {"ticket": request["ticket"]})
+            return {"ok": False, "code": "runtime_unavailable"}
+        if resume_fallback:
+            job["backend"] = "host"
+        cancel, done = threading.Event(), threading.Event()
+        def monitor():
+            while not done.wait(0.05):
+                if not self.auto_pass_allowed():
+                    cancel.set()
+                    return
+        watcher = threading.Thread(target=monitor, name="mse-decision-permission", daemon=True)
+        watcher.start()
+        try:
+            outcome = self.reflection_driver.run(job, "failed", ("", ""), cancel, self.call)
+        finally:
+            done.set()
+        if not isinstance(outcome, dict) or outcome.get("completed") is not True:
+            return {"ok": False, "code": (outcome or {}).get("wait", "decision_waiting")}
+        result = outcome.get("result")
+        response = {"ok": True, "action": result.get("action"), "record": outcome.get("record")}
+        if result.get("action") == "suggest_merge":
+            decision_id = (outcome.get("record") or {}).get("key")
+            response["merge"] = self._merge_generation_attempt(lesson, source, facts, selected_turn, decision_id)
+        return response
+
+    def _merge_generation_attempt(self, lesson, source, facts, selected_turn, decision_id):
+        """Run a Core-frozen merge through the ordinary reflection driver and its paid budget."""
+        project = source.get("projectKey") if isinstance(source.get("projectKey"), str) else None
+        env = source.get("environmentId") if isinstance(source.get("environmentId"), str) else None
+        base = {"sessionId": source.get("sessionId"), "turnId": selected_turn[1] if selected_turn else None}
+        if project:
+            base["projectKey"] = project
+        if env:
+            base["environmentId"] = env
+        if not isinstance(decision_id, str) or not isinstance(base.get("sessionId"), str) \
+                or not isinstance(base.get("turnId"), str):
+            return {"ok": False, "code": "merge_source_unavailable"}
+        args = {"decisionId": decision_id}
+        if project:
+            args["projectKey"] = project
+        if env:
+            args["environmentId"] = env
+        plan = self.call("decisionMergePlan", args)
+        if not isinstance(plan, dict) or plan.get("ok") is not True:
+            reason = (plan or {}).get("code", "merge_parent_stale")
+            allowed = {"merge_target_ambiguous", "merge_parent_stale", "merge_scope_mismatch",
+                "merge_verifier_mismatch", "merge_conditions_conflict", "merge_source_unavailable",
+                "reflection_budget", "merge_generation_failed", "merge_pending", "merge_result_expired",
+                "merge_generation_interrupted", "merge_method_forbidden", "merge_no_change"}
+            self.call("decisionMergeWait", {**args,
+                "reason": reason if reason in allowed else "merge_parent_stale"})
+            return {"ok": False, "code": reason}
+        if plan.get("source", {}).get("sessionId") != base["sessionId"]:
+            self.call("decisionMergeWait", {**args, "reason": "merge_source_unavailable"})
+            return {"ok": False, "code": "merge_source_unavailable"}
+        job = {"kind": "reflection", "base": base, "source_session": base["sessionId"],
+            "route_provider": facts.get("provider"), "route_model": facts.get("model"),
+            "pre_api": {"provider": facts.get("provider"), "model": facts.get("model"),
+                "base_url": facts.get("base_url"), "api_mode": facts.get("api_mode"),
+                "request": facts.get("request")},
+            "generation": {"decisionId": decision_id, "generationKey": plan.get("generationKey")},
+            "outcome": "supported"}
+        prepared = self.reflection_driver.prepare_source(self.call, job)
+        if not isinstance(prepared, dict) or prepared.get("ok") is not True:
+            reason = (prepared or {}).get("wait", "merge_source_unavailable")
+            self.call("decisionMergeWait", {**args, "reason": "merge_source_unavailable"})
+            return {"ok": False, "code": reason}
+        cancel, done = threading.Event(), threading.Event()
+        def monitor():
+            while not done.wait(0.05):
+                if not self.auto_pass_allowed():
+                    cancel.set()
+                    return
+        watcher = threading.Thread(target=monitor, name="mse-merge-permission", daemon=True)
+        watcher.start()
+        try:
+            outcome = self.reflection_driver.run(job, "supported", ("按冻结的两个父经验生成新候选", decision_id), cancel, self.call)
+        finally:
+            done.set()
+        generated = (outcome or {}).get("result")
+        merge_status = generated.get("mergeStatus") if isinstance(generated, dict) else None
+        return {"ok": isinstance(merge_status, dict) and merge_status.get("state") in ("complete", "abstained"),
+            "code": (outcome or {}).get("wait") or (merge_status or {}).get("reason", "merge_generation_unknown"),
+            "status": merge_status}
+
     def row_for_plan(self, plan):
         """The turn row a plan's attempt belongs to, or `None` when this process has no such row.
 
@@ -1515,7 +1723,11 @@ class Hooks:
             # can push a correct write past the shorter bound. A timeout here would look like a refusal
             # to the driver while the core may have signed nothing at all — so the paid REQUEST
             # operations get a bounded, still-finite window of their own.
-            bound = PAID_REQUEST_TIMEOUT_SECONDS if op in PAID_REQUEST_OPS else 2
+            if op == "decisionDispatch":
+                timeout_ms = value.get("timeoutMs", 30_000) if isinstance(value, dict) else 0
+                bound = decision_dispatch_process_timeout(timeout_ms)
+            else:
+                bound = PAID_REQUEST_TIMEOUT_SECONDS if op in PAID_REQUEST_OPS else 2
             result = subprocess.run([node, cli], input=json.dumps({"config": self.config, "op": op, "input": value}),
                                     text=True, capture_output=True, timeout=bound, check=False)
             if len(result.stdout) > 8192:

@@ -85,7 +85,8 @@ const stopError = code => Object.assign(new Error(code), { code })
  */
 export function createAutoValidation({ engine, context, objectiveContext = () => null, route, callModel,
   source = () => ({}), permit = () => ({ ok: true }), enabled = () => true, now = Date.now, log = () => {},
-  busy = () => false, onAbort = null, slot = null, reviewAdmission = null, dueWork = null,
+  busy = () => false, onAbort = null, slot = null, reviewAdmission = null, dueWork = null, decisionRunner = null,
+  mergeRunner = null,
   // The ALREADY-REGISTERED checker path. It is the host's own `evaluateRegistered`: a registered
   // method is scored against its frozen fixtures, with NO model call, NO provider and NO budget. This
   // is the first thing tried for a candidate whose domain has no official scenario, because it is
@@ -100,6 +101,10 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
   schedule = (fn, ms) => setInterval(fn, ms), cancelTimer = handle => clearInterval(handle) }) {
   let disposed = false
   let scanning = false
+  // The advisory decision window is deliberately independent from registration/due-plan cursors.
+  // It consumes one candidate per pass, so advancing by the whole candidate list here would pin it
+  // back to the same first item forever.
+  let decisionCursor = 0
   /** Bounded per-scan counters: candidates settled by their own registered checker, and candidates
    *  waiting for an applicable validator. Both are READABLE in the scan audit and the status. */
   let finishedByChecker = 0
@@ -122,6 +127,7 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
    * a late answer from a cancelled run gets credited to the next one.
    */
   let cancelEpoch = 0
+  let decisionJobGeneration = 0
   /** The reason of the newest abort, for the log and the status surface only. Never a permission. */
   let lastAbortReason = null
   /** The controller of the run currently in flight, so an abort can reach the provider itself. */
@@ -374,7 +380,7 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
    * A lesson that already has a plan for its current version is left alone; a lesson whose
    * version moved gets a new plan because its old evidence is about a different row.
    */
-  const enqueue = (lessons, baseSource) => {
+  const enqueue = async (lessons, baseSource, { suppressNewPlans = false } = {}) => {
     let registered = 0
     // The CORE is the only dedupe authority, and it keys on the FULL execution binding, not on a
     // coarse (lesson, version, track) triple: a stored plan whose route, source, suite or criteria
@@ -386,7 +392,10 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
     const plans = (() => { try { return engine.autoPlans() } catch { return [] } })()
     const existing = new Map()
     for (const plan of plans) existing.set(`${plan.lessonId}:${plan.version}:${plan.track}`, plan)
-    for (const lesson of lessons) {
+    const orderedLessons = lessons.length === 0 ? lessons : [
+      ...lessons.slice(decisionCursor % lessons.length), ...lessons.slice(0, decisionCursor % lessons.length)]
+    let decisionUsed = false
+    for (const lesson of orderedLessons) {
       if (!enabled()) break
       if (registered >= MAX_PLANS_PER_SCAN) break
       // The two tracks have INDEPENDENT contexts and completions: a lesson whose REVIEW scenario
@@ -455,7 +464,54 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
         continue
       }
       const scenario = admitted !== null && admitted.ok !== true ? null : context(lesson)
+      const objective = objectiveContext(lesson)
       if (scenario === null) record('review_missing_criteria', lesson.id)
+      if (scenario === null && objective === null) continue
+      // Free gates above always run, even with an empty model budget. Existing plans are advanced
+      // before enqueue; when their durable ticket remains open, new paid plans wait behind it.
+      if (suppressNewPlans) continue
+      if (typeof decisionRunner === 'function') {
+        if (decisionUsed) continue
+        decisionUsed = true
+        decisionCursor = (lessons.findIndex(row => row.id === lesson.id) + 1) % lessons.length
+        try {
+          const planHash = String(lesson.id).replace(/[^a-zA-Z0-9]/gu, '').slice(0, 24) || 'candidate'
+          const outcome = await withinSlot({ track: 'decision', planHash, generation: ++decisionJobGeneration },
+            runContext => decisionRunner(lesson, runContext))
+          if (outcome?.ok !== true && ['evaluation_budget', 'evaluation_budget_calls', 'review_budget',
+            'review_budget_calls', 'review_budget_tokens', 'review_budget_disabled'].includes(outcome?.code)) {
+            // A plan without an admitted decision is executable work: never register it just because
+            // the later review has a separate reservation. The failed decision stays in the durable
+            // decision ledger as a budget wait and this candidate is reconsidered on a later pass.
+            record(outcome.code, lesson.id)
+            continue
+          } else if (outcome?.ok !== true && outcome?.code === 'renewal_waiting_evidence') {
+            record('renewal_waiting_evidence', lesson.id)
+            continue
+          } else if (outcome?.ok !== true) {
+            record(outcome?.code ?? 'decision_failed', lesson.id)
+            continue
+          } else if (!['prioritize_validation', 'review', 'trial', 'recheck'].includes(outcome.action)) {
+            if (outcome.action === 'wait') record('decision_waiting_new_evidence', lesson.id)
+            else if (outcome.action === 'reject') record('decision_rejected', lesson.id)
+            else if (outcome.action === 'suggest_merge') {
+              if (typeof mergeRunner !== 'function') record('decision_merge_runner_unavailable', lesson.id)
+              else {
+                try {
+                  const merged = await mergeRunner(lesson, outcome)
+                  record(merged?.reason ?? (merged?.ok === true ? 'decision_merge_generated' : 'decision_merge_waiting'), lesson.id)
+                } catch (error) { record(error?.code ?? 'decision_merge_failed', lesson.id) }
+              }
+              continue
+            }
+            else record('decision_failed', lesson.id)
+            continue
+          }
+        } catch (error) {
+          record(error?.code ?? 'decision_failed', lesson.id)
+          continue
+        }
+      }
       // The plan records WHERE the item came from and WHICH route its run must use. A candidate with
       // a source turn is bound to that turn; a historical one is bound to the verification session
       // the operator named, marked as backfilled, and never borrows another session's route.
@@ -495,7 +551,6 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
       if (scenario !== null && !coveredByIdentity('review', scenario.suite, scenario.criteria)) {
         registerTrack('review', scenario.suite, scenario.criteria)
       }
-      const objective = objectiveContext(lesson)
       // The objective plan is authorised by the objective pack itself. Reusing review criteria
       // here can leave the pack unresolved (notably when review has no matching scenario), which
       // makes the queued plan lose the pack identity that its later evaluation ticket requires.
@@ -988,9 +1043,9 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
     const executionId = Number.isSafeInteger(plan.generation) ? plan.generation : 0
     const submitted = slot.submit({
       requestId: `mseauto-${plan.track}-${plan.planHash.replace(/[^a-zA-Z0-9]/gu, '').slice(0, 20)}-${executionId}`,
-      kind: plan.track === 'objective' ? 'evaluation' : 'review',
+      kind: plan.track === 'objective' ? 'evaluation' : plan.track === 'decision' ? 'decision' : 'review',
       fingerprint: plan.planHash,
-      label: plan.track === 'objective' ? 'MSE 自动验证' : 'MSE 自动评审',
+      label: plan.track === 'objective' ? 'MSE 自动验证' : plan.track === 'decision' ? 'MSE 决策建议' : 'MSE 自动评审',
       run: async context => {
         slotSignal = context.signal ?? null
         try {
@@ -1025,7 +1080,7 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
     if (view !== null && view.state === 'blocked') {
       throw stopError(view.code ?? 'review_yielded')
     }
-    return view
+    return view?.state === 'done' ? view.result : view
   }
 
   const scan = async (lessons = []) => {
@@ -1080,7 +1135,6 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
           return fetched?.ok === true ? (fetched.row ?? null) : null
         } catch { return null }
       }
-      const registered = enqueue(current, { kind: 'turn' })
       let advanced = 0
       const plans = engine.autoPlans().filter(plan => AUTO_TRACKS.includes(plan.track)
         && (plan.stage === 'queued' || plan.stage === 'interrupted')
@@ -1105,6 +1159,8 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
         }
         advanced += 1
       }
+      const openTickets = engine.status?.()?.evaluationJobsOpen > 0
+      const registered = await enqueue(current, { kind: 'turn' }, { suppressNewPlans: openTickets })
       // THE bounded persistent rotation record. This scan just considered `lessons.length` rows
       // of the core's current feed, so the consideration cursor moves on — even when the wall
       // clock did not move, and even when nothing was registered or advanced. The cursor lives in

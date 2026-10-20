@@ -351,7 +351,11 @@ class AutoPass:
                 if isinstance(row, dict) and isinstance(row.get("lessonId"), str):
                     retired.add(row["lessonId"])
 
-        # (4) NEW WORK from the bounded, rotating candidate window. A row whose edition this pass just
+        # (4) THE OLD WORK FIRST. Existing tickets, including unknown-cost checkpoints, are advanced
+        # before this pass can classify or register a new candidate.
+        self._advance(audit, note)
+
+        # (5) NEW WORK from the bounded, rotating candidate window. A row whose edition this pass just
         # retired is DROPPED rather than registered: its plan would describe a version nobody answers
         # for, and the fresh row arrives on the next wake-up.
         feed = self._safe("autoCandidates", {"limit": CONSIDER_WINDOW}, None)
@@ -359,21 +363,19 @@ class AutoPass:
             if isinstance(feed, dict) else []
         audit["candidates"] = len(rows)
         current = [row for row in rows if row.get("id") not in retired]
+        consumed = 0
         if current:
-            self._register(current, audit, note)
-
-        # (5) THE DUE PLANS, through the persistent fair offset.
-        self._advance(audit, note)
+            consumed = self._register(current, audit, note)
 
         # THE FAIR CURSOR IS ADVANCED WHENEVER THIS PASS REALLY CONSIDERED WORK, not only when it
         # managed to run some: a window of rows that were all skipped still moved the offset it
         # occupied, and a prefix of blocked rows must not pin the window for ever.
-        considered = len(current)
+        considered = consumed
         if considered > 0:
-            self.offset = (self.offset + considered) % max(considered, 1)
             answer = self._safe("autoConsiderAdvance", {"step": considered}, None)
             if isinstance(answer, dict) and isinstance(answer.get("cursor"), int):
                 audit["considerCursor"] = answer["cursor"]
+                self.offset = answer["cursor"]
             audit["offset"] = self.offset
         self.last = audit
         # The audit is ALSO published into the bridge's bounded pass document, which is what the
@@ -435,11 +437,16 @@ class AutoPass:
         never chooses a case, never copies criteria and never names a pack.
         """
         budget = self.state["steps"]
+        decision_used = False
+        consumed = 0
         for row in rows:
+            if decision_used:
+                break
             if audit["registered"] >= PER_PASS_REGISTRATIONS or budget["used"] >= PER_PASS_STEPS:
                 break
             if not self._active():
                 break
+            consumed += 1
             lesson_id = row.get("id")
             version = row.get("version")
             environment = row.get("environment")
@@ -466,9 +473,8 @@ class AutoPass:
                 audit["evidenceTrialsGranted"] = audit.get("evidenceTrialsGranted", 0) + 1
             elif isinstance(trial, dict) and isinstance(trial.get("code"), str):
                 note("evidence_trial_" + trial["code"][:48])
+            proposals = []
             for track in ("review", "objective"):
-                if audit["registered"] >= PER_PASS_REGISTRATIONS:
-                    break
                 # The SCOPE travels with the proposal: the core resolves the lesson by the scope its
                 # own `projectKey` rule derives, so a proposal that omitted it would look for the
                 # edition in the instance scope and report a perfectly registrable candidate as
@@ -487,6 +493,34 @@ class AutoPass:
                 if not isinstance(proposal, dict) or proposal.get("ok") is not True:
                     note((proposal or {}).get("code") if isinstance(proposal, dict) else "proposal_failed")
                     continue
+                proposals.append((track, proposal_value, proposal))
+            if not proposals:
+                continue
+            if decision_used:
+                continue
+            decision = {"ok": True, "action": "review"}
+            runner = getattr(self.hooks, "decision_attempt", None)
+            if callable(runner):
+                try:
+                    decision = runner(row, source)
+                except Exception:  # noqa: BLE001 — a failed advisory is a wait, never implicit approval
+                    decision = {"ok": False, "code": "decision_failed"}
+                if not (isinstance(decision, dict) and decision.get("cached") is True):
+                    decision_used = True
+                    budget["used"] += 1
+            if not isinstance(decision, dict) or decision.get("ok") is not True:
+                note(decision.get("code", "decision_waiting") if isinstance(decision, dict) else "decision_waiting")
+                continue
+            action = decision.get("action")
+            if action in ("wait", "reject", "suggest_merge"):
+                note("decision_" + action)
+                continue
+            if action not in ("prioritize_validation", "review", "trial", "recheck"):
+                note("decision_invalid_action")
+                continue
+            for track, proposal_value, proposal in proposals:
+                if audit["registered"] >= PER_PASS_REGISTRATIONS:
+                    break
                 register_value = {"lessonId": lesson_id, "version": version, "environment": environment,
                                   "track": track, "source": source, "suite": proposal.get("suite"),
                                   "criteria": proposal.get("criteria"), "caseId": proposal.get("caseId")}
@@ -498,6 +532,7 @@ class AutoPass:
                     continue
                 if answer.get("duplicate") is not True:
                     audit["registered"] += 1
+        return consumed
 
     def _has_plan(self, lesson_id, version, row):
         """Whether this edition already has a plan for EITHER track (a duplicate is not new work)."""

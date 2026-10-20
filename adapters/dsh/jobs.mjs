@@ -42,7 +42,7 @@ export const COMPLETED_TTL_MS = 60 * 60_000
 const REQUEST_ID = /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{7,63}$/u
 
 export const JOB_STATES = Object.freeze(['queued', 'running', 'done', 'failed', 'cancelled', 'blocked'])
-export const JOB_KINDS = Object.freeze(['review', 'registered', 'evaluation'])
+export const JOB_KINDS = Object.freeze(['review', 'registered', 'evaluation', 'decision'])
 const TERMINAL = Object.freeze(['done', 'failed', 'cancelled', 'blocked'])
 
 const text = (value, max) => typeof value === 'string' ? value.slice(0, max) : ''

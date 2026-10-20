@@ -1,20 +1,58 @@
 # MSE Learning 验收记录
 
-版本：0.10.0。本文区分已验证切片与尚未验证的发布层。单项离线或 Loader 通过不代表完整套件、真实模型效果、原生 UI、正式 Release 或日常安装通过。
+## 最新交付核验（2026-10-21）
 
-## 当前证据
+- 0.11.0 冻结源码 142 个文件，最新两个合同用例通过；连同保留的 51 个通过项，共 53 个适用定向用例通过。并未为凑数字重新跑整套测试。
+- DSH、源码与 Hermes 三包分别含 58、142、41 个文件，逐成员字节与冻结源码一致。校验和见 [交付记录](PUBLICATION.md)。
+- 实际 Host 决策、评审、客观拒绝与试用撤回已观察；没有真实正向晋升或长期收益证明。
+- 原生设置页与候选详情已观察，设置及选择器的既有验收保留。恢复复盘已通过原生正式接口：一次请求、2048 token 输出上限、1,118 tokens 已结算，生成新候选；无重试、未知费用或额外来源请求。后台开关关闭、测试凭据清除后正常退出，旧记录保留。正式下载与安装以独立交付记录为准。
+- 以下按当时冻结点保留的记录用于追溯；其中“尚未验证”描述对应当时状态，当前交付状态以上述记录和 PUBLICATION.md 为准。
+
+## R6 已成立事实与当前补丁边界
+
+- R6 冻结候选的 Host 决策返回 `prioritize_validation`；评审返回 `neutral_safe` / `unproven`；objective 因 `no_improvement`、`cost_exceeds_gain` 与 `insufficient_improvements` 被拒绝。
+- 后续版本 2 的候选在回归证据下进入 suspended/regression 状态，相关 trial 已撤回。这证明了拒绝、回归与撤回路径；没有证明真实正向晋升或持续收益。
+- 早期 integration-r11 的真实 Laya 记录为 1 次协议请求和 5 次决策请求。协议及账本结算通过，语义仅 2/5 符合预期且标签敏感，故 Laya 决策质量不通过，不作为独立裁决器；R6 沿用该记录，未重新发起这 6 次请求。下列 integration-r11 历史结果均早于 Window33 补丁。
+- Window33 增加的是旧问题反思失败的一次性收据恢复。该补丁和新增回归用例目前尚未运行；不得把 R6 结果外推为 Window33 已验收。正向候选晋升仍未证明；当前未新增测试、构建、打包、Release 或安装通过结论。
+
+源码包版本：0.11.0 候选。2026-10-20 父级 integration 定向结果：r7 为 Node 113 项（101 通过 / 12 失败）、Hermes 25 项（22 通过 / 3 失败）；r9 为 Node 12 项（8 通过 / 4 失败）、Hermes 3 项（1 通过 / 2 失败），其中迁移 3 项全过且 DSH 生产 merge 通过；r10 为 Node 4 项（1 通过 / 3 失败）、Hermes 2 项（1 通过 / 1 失败），另有 Hermes source-binding 2/2 通过。这些是分阶段定向结果，不代表全量通过。
+
+早期 integration-r11 历史定向结果：Node 8/8、provider 6/6、Hermes 1/1，均 0 skip；父级 `WINDOW-RELEASE-14.json` 已释放。该轮真实 Laya HTTP 200，model=`laya-rl-agent`；1 次协议请求、5 次决策请求，3,624 已知 tokens / 23,650 保守预算；Core 结算与重启防重通过，未晋升。协议和记账通过，但决策语义质量未通过：五例只有两例符合预期，中文无证据与英文可信反证均建议 merge；同一状态的标签又从 `suggest_merge` 翻转到 `reject`，表现出标签敏感。golden 未改、未追加请求；不建议将该 Laya 实例用于独立裁决，Host 保持默认。R6 沿用这份早期记录，未重新运行 r11 定向验收或 Laya 请求。详细回执：父级 `integration-r11-run/LIVE-LAYA.json`。
+
+远程 OpenAI-compatible/JEV 真实连接尚未测试；R6 的默认 Host 决策后端已有有限实测记录（见上方 Host / review / objective 结果），不外推为整体可靠性或长期收益。0.11.0 三包、Git、正式 Release 与日常安装仍待各自回执。中英文窄布局、设置保存及重启回读已有独立 R2 原生 UI 证据；这不代表当前三包或安装验收完成。早期 r11 定向通过与 Laya 协议/账本通过不代表语义质量或整体交付全通过。
+
+新增生产链夹具覆盖 DSH scheduler/decisionRunner/reflection slot 与 Hermes Hooks/AutoPass/ReflectionDriver，包含 50,000 token / 5 calls 标准额度与账本计数。r11 定向结果已如上记录；完整套件、原生 UI 与交付状态仍按各自验收层区分。
+
+## 早期 integration-r11 历史结果（Window33 之前）
 
 | 验收层 | 结果 | 证据与边界 |
 | --- | --- | --- |
-| 自动调度 | 11/11 | `auto-scheduler` 定向离线回归；不代表全量测试通过。 |
-| 私有陈旧快照恢复 | 4 次扫描、2 次冷启动 | 隔离私有快照副本，仅公开无正文汇总；启用且配置 mock 预算时仍为 0 dispatch，11 步 checkpoint、计划与终态保留。仅证明离线经济幂等性。 |
-| Hermes 原生 Host 完整链路 | 通过，单实例 61.156 秒 | 精确 r8 归档在隔离 profile 的已安装 Hermes PluginManager / lifecycle / model_tools 上真实派发；真实 CLI/core，fake HTTP transport。完成反思→12+4 与 replay→晋升→召回/采用→反证撤回→冷读 1/1；355 次 CLI 操作，无 `TimeoutExpired` / `lock_busy`，未访问外网。此为离线替身 provider 验收，不计作真实 provider 调用。首次锁持有者历史原因未知；不据此调整锁实现。 |
-| 官方 DSH npm alpha.5 Loader | 3/3 场景通过 | 正常加载、缺少 fs、缺少 tools；正常场景使用真实 `fs-local`。证明 Loader 与缺失能力降级，不证明 alpha.5 原生 UI 或完整 DSH 插件验收。 |
-| 实际界面与截图 | 两宿主通过；2 张当前截图 | 社区 alpha.2 Linux 原生桌面及官方 npm alpha.5 Web；中英文宽窄导航、保存/回读/放弃、同页语言切换保留草稿/会话/当前页、正式停用清理。截图与精确包见 [交付记录](PUBLICATION.md)。旧图仍作为历史保留。 |
-| 设置客户端契约修正 | 源码语法检查通过；`details-client` 30/30 通过 | 父级受限检查回执：组件回归 30/30、0 失败、0 跳过。随后真实窄窗、语言热切换与 alpha.5 保存均通过，详见交付记录。 |
-| 完整测试套件 | 未验证 | 本轮未运行完整套件。 |
-| 真实 provider / 真实付费效果 | 未验证 | 本表所述隔离验收未调用真实 provider；不覆盖历史日常运行或其费用。 |
-| 正式 Release / 日常安装 | 分别核对 | 安装包下载与校验值见 [交付记录](PUBLICATION.md)；各电脑日常安装不由源码、包或隔离 UI 验收替代。 |
+| r11 Node 定向套件 | 通过：8/8，0 skip | 父级 r11 最终定向回归。 |
+| r11 provider 定向套件 | 通过：6/6，0 skip | 不代表真实供应商语义质量通过。 |
+| r11 Hermes 定向套件 | 通过：1/1，0 skip | 父级 r11 最终定向回归。 |
+| Laya 协议与账本 | 通过 | HTTP 200；1 protocol + 5 decisions；3,624 已知 tokens、23,650 保守预算；Core 结算及重启防重通过，未晋升。回执见 `integration-r11-run/LIVE-LAYA.json`。 |
+| Laya 决策语义质量 | 未通过 | 五例仅 2/5 符合预期；中文无证据与英文可信反证均建议 merge；相同状态 `suggest_merge`→`reject`，对标签敏感。golden 未改、没有追加请求；不建议用该实例独立裁决。 |
+| R6 Host / review / objective | 已记录拒绝与保守结论 | Host `prioritize_validation`；review `neutral_safe` / `unproven`；objective 以 `no_improvement`、`cost_exceeds_gain`、`insufficient_improvements` 拒绝。 |
+| R6 regression / trial | 回归撤回已记录 | version 2 回归状态 suspended/regression，相关 trial withdrawn；没有真实正向晋升证明。 |
+| JEV 真实连接 | 未测试 | Host 仍是默认后端。 |
+| r11 窗口 | 已释放 | 父级 `WINDOW-RELEASE-14.json`。 |
+| R2 中英文设置 UI | 已有独立原生证据 | 窄宽布局、保存与重启回读由 R2 验收；Window33 不改页面控件或布局，仅增加 RPC 描述符，不外推为当前三包/安装验收。 |
+| Window33 问题反思恢复补丁 | 已写源码与合成回归，未验证 | 新增回归尚未运行；早期 integration-r11 历史结果不覆盖此补丁。 |
+
+## 0.10.0 历史离线证据（不代表 0.11.0）
+
+| 验收层 | 结果 | 证据与边界 |
+| --- | --- | --- |
+| completion-r9 自动调度 | 0.10.0 历史：11/11 | `scheduler-11` 定向离线回归；不代表全量测试通过。 |
+| completion-r9 经济快照 | 0.10.0 历史：4 次扫描、2 次冷启动 | 隔离私有快照副本仅公开无正文汇总；mock 预算下 0 dispatch，checkpoint、计划与终态保留。仅证明离线经济幂等性。 |
+| completion-r9 Hermes 原生 Host 完整链路 | 0.10.0 历史：1/1，单实例 61.156 秒 | 精确 r8 归档在隔离 profile 的已安装 Hermes PluginManager / lifecycle / model_tools 上真实派发；真实 CLI/core、fake HTTP transport；355 次 CLI 操作，未访问外网。属于离线替身 provider 验收，不计作真实 provider 调用。 |
+| completion-r9 官方 DSH npm alpha.5 Loader | 0.10.0 历史：3/3 场景通过 | 正常加载、缺少 fs、缺少 tools；正常场景使用真实 `fs-local`。不证明原生 UI 或完整 DSH 插件验收。 |
+| UI-r10 受影响客户端检查 | 0.10.0 历史：4/4；包验证通过 | `ui-narrow-window-20261017/WINDOW-RELEASE.json` 与 `verify-package-r10.log`；不代表当前 0.11.0 UI 或三包验收。 |
+| UI-r11 设置客户端契约修正 | 0.10.0 历史：`details-client` 30/30 | `ui-contract-window-20261017` 父级回执。此 UI-r11 是 0.10.0 候选，不能与当前 0.11.0 integration-r11 源码冻结混称。真实原生 UI 与官方 Web 仍待验。 |
+| 设置页截图 | 历史：1 张 | [历史英文设置页](docs/images/en-normal.png)：社区 alpha.2 inline 验证会话行、合成数据、自动验证关闭；不代表当前选择器或窄屏中文验收。 |
+| 完整测试套件 | 当前 Window33 源码未验证 | 早期 integration-r11 冻结快照和定向测试均不替代当前修改后的完整套件。 |
+| 0.10.0 历史真实 provider / 付费效果 | 历史证据未覆盖 | 0.10.0 离线替身不计作真实 provider 调用；早期 integration-r11 的 0.11.0 Laya 记录见上表，R6 沿用且未重测，JEV 仍未连接。 |
+| 正式 Release / 日常安装 | 当前 0.11.0 未验证 | Git、正式 Release 与日常安装须以各自后续回执为准。 |
 
 ## 能力与兼容边界
 
@@ -26,4 +64,4 @@
 
 ## 数据与公开包范围
 
-公开包使用 `scripts/public-set.mjs` 的单一 allowlist。维护交接、协调资料、私有探针、个人学习数据、隐藏目录和本地构建产物不属于公开内容。截图为合成数据，不含用户真实记录。
+公开源码清单与源码归档 manifest 共用 `scripts/public-set.mjs` 的 allowlist；DSH 与 Hermes runtime 包分别按各自的 package 文件集合封装。维护交接、协调资料、私有探针、个人学习数据、隐藏目录和本地构建产物不属于公开内容。截图为合成数据，不含用户真实记录。

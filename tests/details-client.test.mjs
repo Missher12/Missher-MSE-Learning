@@ -157,6 +157,8 @@ test('the client descriptors mirror the Host manifest endpoint for endpoint', as
   const { module: mod } = loadClient()
   const descriptors = [...mod.__test.REMOTE.descriptors, ...mod.__test.CONTROL.descriptors]
   const declared = TYPERT.invocations.map(row => row.id).sort()
+  assert.ok(declared.includes('@missher/dsh-mse-learning#mseControl/authorizeProblemRecoveryRetry'),
+    'the narrow recovery operation must have a formal Host Typert invocation')
   assert.deepEqual(descriptors.map(row => row.id).sort(), declared)
   for (const descriptor of descriptors) {
     const manifest = TYPERT.invocations.find(row => row.id === descriptor.id)
@@ -278,10 +280,19 @@ test('control payloads surface their business code instead of being unwrapped aw
     /gateway\/internal/)
 })
 
-test('verification coverage uses a stacked row with wrapping items for narrow settings panels', () => {
-  assert.match(SOURCE, /row\('verificationCoverage',[\s\S]{0,180}coverage, \{ stacked: true \}\)/u)
-  assert.match(SOURCE, /\.mse-details \.mse-row-stacked\{display:block\}/u)
-  assert.match(SOURCE, /\.mse-details \.mse-row-stacked \.mse-row-side\{[^}]*flex-wrap:wrap/u)
+test('experience verification keeps its summary brief and nests capability details in a disclosure', () => {
+  const { module: mod } = loadClient()
+  const { zh, en } = mod.__test
+  assert.equal(zh.verificationCoverage, '经验验证')
+  assert.equal(zh.verificationCoverageHint, 'MSE 验证候选经验，确认有效后再正式启用。')
+  assert.equal(zh.verificationDetails, '验证详情')
+  assert.ok(zh.verificationCoverageDetails.includes('DSH 项目根目录 package.json'))
+  assert.equal(en.verificationCoverage, 'Experience verification')
+  assert.equal(en.verificationDetails, 'Verification details')
+  assert.ok(en.verificationCoverageDetails.includes('project-root package.json'))
+  assert.ok(SOURCE.includes("row('verificationCoverage', dict.verificationCoverage, dict.verificationCoverageHint, null)"))
+  assert.ok(SOURCE.includes("disclosure('verification-capabilities', dict.verificationDetails, ["))
+  assert.ok(SOURCE.includes("{ id: 'verification-details' })"))
   assert.match(SOURCE, /\.mse-details \.mse-coverage-list\{display:flex;flex-wrap:wrap/u)
   assert.match(SOURCE, /\.mse-details \.mse-coverage-item\{min-width:0;overflow-wrap:anywhere\}/u)
 })
@@ -394,6 +405,17 @@ test('a ready writable form renders the settings rows and a disabled save', asyn
     assert.ok(flat.includes(label), `the ${label} row is rendered`)
   }
   const nodes = elementsOf(tree)
+  const verificationRow = nodes.find(node => node.props?.key === 'verificationCoverage')
+  assert.ok(verificationRow, 'the short experience-verification summary stays on the settings surface')
+  assert.ok(JSON.stringify(verificationRow).includes('MSE 验证候选经验，确认有效后再正式启用。'))
+  assert.equal(JSON.stringify(verificationRow).includes('package.json'), false,
+    'the technical limitations no longer crowd the settings surface')
+  const verificationDetails = nodes.find(node => node.type === 'details'
+    && node.props?.['data-mse-disclosure'] === 'verification-details')
+  assert.ok(verificationDetails, 'the technical capability report remains available in its disclosure')
+  assert.equal(verificationDetails.props.open, false, 'verification details are collapsed by default')
+  assert.ok(JSON.stringify(verificationDetails).includes('package.json'))
+  assert.ok(JSON.stringify(verificationDetails).includes('Hermes 前置检查'))
   const controls = name => nodes.filter(node => node.type?.uiName === name)
   const toggles = controls('Switch')
   assert.deepEqual(toggles.map(node => node.props.label),

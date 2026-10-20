@@ -54,6 +54,13 @@ MULTI_STEP_MAX = 24
 LOOP_JOIN_SECONDS = 5.0
 
 
+def decision_dispatch_deadline(timeout_ms):
+    """Scale the coroutine's process deadline to the provider deadline plus finite drain overhead."""
+    if not isinstance(timeout_ms, int) or isinstance(timeout_ms, bool) or not 100 <= timeout_ms <= 120_000:
+        raise ValueError("invalid_timeout")
+    return timeout_ms / 1000.0 + 10.0
+
+
 def utf16_units(value):
     """The core measures every bounded string in UTF-16 code units; so does this side."""
     try:
@@ -761,7 +768,7 @@ class ReflectionDriver:
         except Exception:  # noqa: BLE001
             context = None
         box = {}
-        paid = job.get("kind") in ("review", "objective")
+        paid = job.get("kind") in ("review", "objective", "decision")
 
         def start():
             if paid:
@@ -1146,6 +1153,13 @@ async def _job(driver, job, outcome, summaries, cancel_event, call, key):
         # in `draining` until that cleanup is really finished.
         state["resource"] = client
         try:
+            generation = job.get("generation")
+            if isinstance(generation, dict):
+                permit = call("reflectionDispatch", {"ticket": state["ticket"],
+                    "dispatchHash": prepared.get("dispatchHash")})
+                if not isinstance(permit, dict) or permit.get("ok") is not True:
+                    return bail({"ran": True, "wait": (permit or {}).get("code", "reflection_budget"),
+                                 "completed": False}, "reflection_dispatch_refused")
             state["dispatch_started"] = True
             usage, content, failure, _finish = await _dispatch(driver, client, identity, prompt, state)
         except asyncio.CancelledError:
@@ -1503,6 +1517,158 @@ def _ticket_usage(call, ticket, known, unknown):
 
 
 
+async def _decision_job(driver, job, cancel_event, call):
+    """One source-bound opinion on the same physical slot and decision ledger as validation."""
+    ticket = job.get("ticket")
+    state = job.setdefault("_state", {})
+    state.update({"ticket": ticket, "wire_usage": None, "resource": None})
+    if not isinstance(ticket, str) or not ticket:
+        return {"ran": False, "wait": "decision_no_ticket", "kind": "decision"}
+    if job.get("backend", "host") != "host" and job.get("resumeFallback") is not True:
+        process = None
+        communication = None
+        try:
+            process = await asyncio.create_subprocess_exec(job["nodePath"], job["cliPath"],
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL)
+            body = {"config": job["coreConfig"], "op": "decisionDispatch", "input": job["dispatchInput"]}
+            timeout_ms = job.get("dispatchInput", {}).get("timeoutMs", 30_000)
+            process_timeout = decision_dispatch_deadline(timeout_ms)
+            communication = asyncio.create_task(process.communicate(
+                json.dumps(body, ensure_ascii=False).encode("utf-8")))
+            deadline = asyncio.get_running_loop().time() + process_timeout
+            while True:
+                if _multi_cancelled(cancel_event, job):
+                    raise asyncio.CancelledError()
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError()
+                try:
+                    output, _ = await asyncio.wait_for(asyncio.shield(communication),
+                                                       timeout=min(0.1, remaining))
+                    break
+                except asyncio.TimeoutError:
+                    if communication.done():
+                        output, _ = communication.result()
+                        break
+            if len(output) > 8192:
+                raise RuntimeError("invalid_runtime_response")
+            remote = json.loads(output.decode("utf-8"))
+        except asyncio.CancelledError:
+            if process is not None and process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=1.0)
+                except Exception:  # noqa: BLE001
+                    process.kill()
+                    await process.wait()
+            if communication is not None:
+                await asyncio.gather(communication, return_exceptions=True)
+            released = call("decisionAbortBeforeDispatch", {"ticket": ticket})
+            if not isinstance(released, dict) or released.get("ok") is not True:
+                call("decisionFail", {"ticket": ticket, "code": "cancelled", "usage": None})
+            job["ticket"] = None
+            return {"ran": True, "wait": "cancelled", "kind": "decision", "completed": False}
+        except Exception:  # noqa: BLE001 — the durable ticket is the source of truth
+            if process is not None and process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=1.0)
+                except Exception:  # noqa: BLE001
+                    process.kill()
+                    await process.wait()
+            if communication is not None:
+                await asyncio.gather(communication, return_exceptions=True)
+            released = call("decisionAbortBeforeDispatch", {"ticket": ticket})
+            if not isinstance(released, dict) or released.get("ok") is not True:
+                call("decisionFail", {"ticket": ticket, "code": "provider_unavailable", "usage": None})
+            job["ticket"] = None
+            remote = {"ok": False, "code": "provider_unavailable"}
+        if isinstance(remote, dict) and remote.get("needsHostFallback") is True:
+            return await _decision_host_step(driver, job, cancel_event, call, fallback=True)
+        if isinstance(remote, dict) and isinstance(remote.get("record"), dict):
+            job["ticket"] = None
+            record = remote["record"]
+            result = record.get("finalResult") or record.get("result") or {}
+            action = result.get("action") if isinstance(result, dict) else None
+            return {"ran": True, "wait": remote.get("code"), "kind": "decision",
+                    "completed": record.get("state") in ("complete", "wait", "unknown"),
+                    "result": {"action": action} if isinstance(action, str) else None, "record": record}
+        return {"ran": False, "wait": remote.get("code", "provider_unavailable")
+                if isinstance(remote, dict) else "provider_unavailable", "kind": "decision"}
+    return await _decision_host_step(driver, job, cancel_event, call,
+                                    fallback=job.get("resumeFallback") is True)
+
+
+async def _decision_host_step(driver, job, cancel_event, call, fallback=False):
+    """Run one Host route step; fallback reserves exactly one step on the same logical ticket."""
+    ticket, state = job["ticket"], job["_state"]
+    proven, reason = driver.prove(job.get("route_provider"), job.get("route_model"), job.get("pre_api") or {})
+    if proven is None:
+        return {"ran": False, "wait": reason or "source_unknown", "kind": "decision"}
+    identity, runtime = proven["identity"], proven["runtime"]
+    client, reason = driver._bind_client(identity, runtime)
+    if client is None:
+        return {"ran": False, "wait": reason or "provider_driver_unsupported", "kind": "decision"}
+    state["resource"] = client
+    step_key = "decision:host" if fallback else "decision"
+    if fallback:
+        route = job["hostFallbackRoute"]
+        request_hash = hashlib.sha256(json.dumps([job["decisionKey"], step_key, route], sort_keys=True,
+            separators=(",", ":")).encode("utf-8")).hexdigest()
+        reserved = call("decisionReserveFallback", {"ticket": ticket, "inputTokens": job["inputTokens"],
+            "outputTokens": job["outputTokens"], "requestHash": request_hash, **route})
+        if not isinstance(reserved, dict) or reserved.get("ok") is not True:
+            return {"ran": True, "wait": (reserved or {}).get("code", "evaluation_budget"), "kind": "decision"}
+    else:
+        request_hash = job["requestHash"]
+    if _multi_cancelled(cancel_event, job):
+        call("decisionAbortBeforeDispatch", {"ticket": ticket, "stepKey": step_key})
+        return {"ran": False, "wait": "cancelled", "kind": "decision"}
+    started = call("decisionStarted", {"ticket": ticket, "stepKey": step_key, "requestHash": request_hash})
+    if not isinstance(started, dict) or started.get("ok") is not True:
+        return {"ran": False, "wait": (started or {}).get("code", "ticket_consumed"), "kind": "decision"}
+    step = {"resultInFlight": False}
+    prompt = {"system": job["system"], "text": job["prompt"], "maxTokens": job["outputTokens"]}
+    try:
+        usage, content, failure, finish = await _dispatch(driver, client, identity, prompt, state,
+            limits={"textBytes": 8192}, truncation=True, step=step)
+        wire_usage = ({"inputTokens": usage["promptTokens"], "outputTokens": usage["completionTokens"]}
+                      if isinstance(usage, dict) and usage.get("known") is True else None)
+        if failure is not None or content is None:
+            code = "provider_refused" if failure == "reflection_refused" else failure or "provider_invalid_response"
+            failed = call("decisionFail", {"ticket": ticket, "stepKey": step_key, "code": code,
+                "usage": wire_usage, "allowFallback": not fallback and job.get("fallbackPending") is True})
+            if isinstance(failed, dict) and failed.get("needsHostFallback") is True and not fallback:
+                return await _decision_host_step(driver, job, cancel_event, call, fallback=True)
+            job["ticket"] = None
+            return {"ran": True, "wait": (failed or {}).get("record", {}).get("error", code), "kind": "decision"}
+        try:
+            result = json.loads(content["text"])
+        except Exception:  # noqa: BLE001 — shared core parser validates the returned object
+            result = None
+        completed = call("decisionComplete", {"ticket": ticket, "stepKey": step_key, "model": identity.model,
+            "result": result, "usage": wire_usage, "complete": not content.get("truncated", False),
+            "abstention": finish == "content_filter", "evidenceRevision": job["evidenceRevision"],
+            "version": job["version"], "fallbackPending": job.get("fallbackPending", False) and not fallback})
+        if isinstance(completed, dict) and completed.get("needsHostFallback") is True and not fallback:
+            return await _decision_host_step(driver, job, cancel_event, call, fallback=True)
+        job["ticket"] = None
+        record = completed.get("record", {}) if isinstance(completed, dict) else {}
+        final = record.get("finalResult") or record.get("result") or {}
+        action = final.get("action") if isinstance(final, dict) else None
+        return {"ran": True, "wait": completed.get("code") if isinstance(completed, dict) else "decision_failed",
+                "kind": "decision", "completed": completed.get("ok") is True,
+                "result": {"action": action} if isinstance(action, str) else None, "record": record}
+    except asyncio.CancelledError:
+        if step.get("resultInFlight") is True:
+            call("decisionFail", {"ticket": ticket, "stepKey": step_key, "code": "cancelled", "usage": None})
+        else:
+            call("decisionAbortBeforeDispatch", {"ticket": ticket, "stepKey": step_key})
+        job["ticket"] = None
+        raise
+
+
 async def _multi_job(driver, job, cancel_event, call, key):
     """A review or an objective run: several paid steps on ONE signed ticket, on the ONE slot.
 
@@ -1520,6 +1686,8 @@ async def _multi_job(driver, job, cancel_event, call, key):
       • the run reports FACTS. It never says `allowed`, `verified` or `validated`: the final gate is
         the core's own transaction, and the objective track is scored by the registered pack.
     """
+    if job.get("kind") == "decision":
+        return await _decision_job(driver, job, cancel_event, call)
     state = job.setdefault("_state", {})
     state.update({"ticket": None, "usage": None, "terminal": None, "cancelled": False,
                   "dispatch_started": False, "resource": None, "wire_usage": None})
@@ -1924,10 +2092,22 @@ def _reflection_request(job, problem, summaries, bound, control):
     value = dict(job.get("base") or {})
     value.update({"taskSummary": task_summary, "resultSummary": result_summary,
                   "outcome": job.get("outcome") or "failed"})
-    if isinstance(problem.get("id"), str):
+    if isinstance(problem, dict) and isinstance(problem.get("id"), str):
         value["problemId"] = problem["id"]
-    if isinstance(problem.get("evidenceRevision"), int):
+    generation = job.get("generation")
+    has_generation = isinstance(generation, dict)
+    has_problem_revision = isinstance(problem, dict) and isinstance(problem.get("evidenceRevision"), int)
+    if has_problem_revision:
         value["evidenceRevision"] = problem["evidenceRevision"]
-    value.update({"sourceBinding": True, "sourceRevision": bound["revision"],
-                  "sourceBindingHash": bound["bindingHash"], "controlGeneration": control})
+    # A merge generation has no originating problem row, but it is still a privileged paid
+    # reflection. It must carry the same fresh source and control proof that `_job` established
+    # immediately before preparation; otherwise Core must refuse to sign its dispatch ticket.
+    if has_problem_revision or has_generation:
+        value.update({"sourceBinding": True, "sourceRevision": bound["revision"],
+                      "sourceBindingHash": bound["bindingHash"], "controlGeneration": control})
+    if has_generation:
+        # Preserve the generation marker even when malformed: Core then rejects it instead of
+        # silently treating a broken privileged request as an ordinary reflection.
+        value["generation"] = {"decisionId": generation.get("decisionId"),
+                                "generationKey": generation.get("generationKey")}
     return value

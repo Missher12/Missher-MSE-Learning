@@ -38,6 +38,10 @@ export const SETTINGS_DEFAULTS = Object.freeze({
   // standard 50k/5 as an explicit preset the operator can save.
   evaluationTokensPerDay: 0,
   evaluationCallsPerDay: 2,
+  decisionBackend: 'host',
+  decisionModel: '',
+  decisionEndpoint: '',
+  decisionSecretRef: '',
 })
 
 /** Byte bounds the core itself enforces; a value outside them can never be persisted. */
@@ -68,6 +72,13 @@ export const Config = z.object({
     .default(SETTINGS_DEFAULTS.evaluationTokensPerDay).volatile(),
   evaluationCallsPerDay: z.number().min(0).max(EVALUATION_CALLS_MAX).step(1)
     .default(SETTINGS_DEFAULTS.evaluationCallsPerDay).volatile(),
+  /** Decision routing is independent of task execution; credentials are references only. */
+  decisionBackend: z.union([z.const('host'), z.const('openai_compatible'), z.const('jev'), z.const('laya')])
+    .default(SETTINGS_DEFAULTS.decisionBackend).volatile(),
+  decisionModel: z.string().max(128).default('').volatile(),
+  decisionEndpoint: z.string().max(2048).pattern(/^$|^https?:\/\/[^/?#@]+(?::[0-9]+)?(?:\/[^?#]*)?$/u)
+    .default('').volatile(),
+  decisionSecretRef: z.string().max(256).default('').volatile(),
   /** Host-authored deterministic tool contracts; deliberately non-volatile and absent by default. */
   guardTemplates: z.array(z.object({
     guardId: z.string().max(64), version: z.number().min(1).max(100000).step(1),

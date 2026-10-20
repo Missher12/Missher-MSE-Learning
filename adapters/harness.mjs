@@ -629,6 +629,9 @@ export function createHarnessBridge({ engine, createMessage, review, onRoute = (
         recent: row ? [...row.recent] : [], reasons: Object.values(RECALL_REASONS),
         settlement: settlementQueue.status(), settlementCapacity: settlementQueue.maxItems }
       if (scope !== undefined) report.projectKey = scope
+      try { report.decisions = engine.decisionHistory({ ...(scope === undefined ? {} : { projectKey: scope }),
+        ...(environmentId === undefined ? {} : { environmentId }), limit: 4 }).rows }
+      catch { report.decisions = [] }
       try {
         report.library = engine.diagnose({ ...(scope === undefined ? {} : { projectKey: scope }),
           ...(environmentId === undefined ? {} : { environmentId }), ...(sessionId === undefined ? {} : { sessionId }) })
@@ -639,6 +642,14 @@ export function createHarnessBridge({ engine, createMessage, review, onRoute = (
     listLessons(sessionId, projectKey) {
       const scope = this.projectKeyFor(sessionId, projectKey)
       try { return engine.list({ ...(scope === undefined ? {} : { projectKey: scope }), limit: 20 }).lessons }
+      catch { return [] }
+    },
+    /** Per-lesson decision explanations and costs from the durable decision ledger. */
+    decisionHistory(lessonId, sessionId, projectKey) {
+      const scope = this.projectKeyFor(sessionId, projectKey)
+      try { return engine.decisionHistory({ ...(lessonId ? { lessonId } : {}),
+        ...(scope === undefined ? {} : { projectKey: scope }),
+        ...(environmentId === undefined ? {} : { environmentId }), limit: 8 }).rows }
       catch { return [] }
     },
     /** Read-only dry run: why would (or would not) this prompt recall right now? */
