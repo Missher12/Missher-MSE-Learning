@@ -6,7 +6,8 @@ import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { LearningEngine } from '../src/index.mjs'
-import { decisionEndpointError, requestDecision } from '../src/decision-providers.mjs'
+import { decisionCredentialRef, decisionEndpointError, decisionEndpointRoutes, discoverDecisionModels,
+  requestDecision } from '../src/decision-providers.mjs'
 
 const cli = fileURLToPath(new URL('../src/cli.mjs', import.meta.url))
 
@@ -562,6 +563,201 @@ test('OpenAI-compatible decision adapter needs no secret resolver when no secret
   assert.deepEqual(answer.usage, { inputTokens: 17, outputTokens: 8, totalTokens: 25 })
   assert.equal(sent.url, 'https://example.test/v1/chat/completions')
   assert.equal(sent.options.redirect, 'error')
+})
+
+test('OpenAI requests preserve exact legacy and complete endpoint paths including trailing slashes', async () => {
+  const sent = []
+  for (const endpoint of ['https://example.test/custom/decision/',
+    'https://example.test/v1/chat/completions/']) {
+    await requestDecision({ backend: 'openai_compatible', endpoint, model: 'model-a', evidence: { refs: [] },
+      fetchImpl: async (url, options) => {
+        sent.push({ url, options })
+        return new Response(JSON.stringify({ model: 'model-a', choices: [{ finish_reason: 'stop',
+          message: { content: JSON.stringify({ action: 'wait', confidence: 0.5,
+            confidenceMeaning: 'advisory', reasons: [], riskCodes: [] }) } }] }), { status: 200 })
+      } })
+  }
+  assert.deepEqual(sent.map(item => item.url), [
+    'https://example.test/custom/decision/', 'https://example.test/v1/chat/completions/',
+  ])
+})
+
+test('provider routes normalize supported bases and keep legacy custom OpenAI endpoints exact', () => {
+  const openRoot = decisionEndpointRoutes('openai_compatible', 'https://example.test')
+  assert.equal(new URL(openRoot.requestUrl).pathname, '/v1/chat/completions')
+  assert.equal(new URL(openRoot.discoveryUrl).pathname, '/v1/models')
+  for (const base of ['https://example.test/proxy/v1', 'https://example.test/proxy/v1/']) {
+    const route = decisionEndpointRoutes('openai_compatible', base)
+    assert.equal(new URL(route.requestUrl).pathname, '/proxy/v1/chat/completions')
+    assert.equal(new URL(route.discoveryUrl).pathname, '/proxy/v1/models')
+  }
+  const proxySlash = decisionEndpointRoutes('openai_compatible', 'https://example.test/proxy/')
+  assert.equal(proxySlash.requestUrl, 'https://example.test/proxy/')
+  assert.equal(proxySlash.discoveryUrl, null, 'unknown paths with trailing slashes stay legacy endpoints')
+  assert.equal(new URL(decisionEndpointRoutes('openai_compatible',
+    'https://example.test/proxy/v1/chat/completions').requestUrl).pathname,
+  '/proxy/v1/chat/completions')
+  assert.equal(decisionEndpointRoutes('openai_compatible',
+    'https://example.test/proxy/v1/chat/completions/').requestUrl,
+  'https://example.test/proxy/v1/chat/completions/', 'a full standard endpoint keeps its configured trailing slash')
+  const unknownCompletionPath = decisionEndpointRoutes('openai_compatible', 'https://example.test/custom/chat/completions')
+  assert.equal(new URL(unknownCompletionPath.requestUrl).pathname, '/custom/chat/completions')
+  assert.equal(unknownCompletionPath.discoveryUrl, null)
+  const unknownTrailingPath = decisionEndpointRoutes('openai_compatible', 'https://example.test/custom/decision/')
+  assert.equal(unknownTrailingPath.requestUrl, 'https://example.test/custom/decision/')
+  assert.equal(unknownTrailingPath.discoveryUrl, null)
+  const legacy = decisionEndpointRoutes('openai_compatible', 'https://example.test/custom/decision')
+  assert.equal(new URL(legacy.requestUrl).pathname, '/custom/decision')
+  assert.equal(legacy.discoveryUrl, null)
+  const legacyRef = decisionCredentialRef('openai_compatible', 'https://example.test/custom/decision')
+  assert.match(legacyRef, /^MSE_DECISION_KEY_[a-f0-9]{64}$/u)
+  assert.notEqual(legacyRef, decisionCredentialRef('openai_compatible', 'https://example.test/custom/other'),
+    'legacy custom routes still receive distinct route-scoped credential identities')
+
+  for (const endpoint of ['https://example.test/proxy', 'https://example.test/proxy/v1',
+    'https://example.test/proxy/v1/systemone']) {
+    const route = decisionEndpointRoutes('jev', endpoint)
+    assert.equal(new URL(route.requestUrl).pathname, '/proxy/v1/systemone')
+    assert.equal(new URL(route.discoveryUrl).pathname, '/proxy/v1/models')
+  }
+  const jevLegacyBase = decisionEndpointRoutes('jev', 'https://example.test/proxy/custom')
+  assert.equal(new URL(jevLegacyBase.requestUrl).pathname, '/proxy/custom/v1/systemone')
+  assert.equal(new URL(jevLegacyBase.discoveryUrl).pathname, '/proxy/custom/v1/models')
+  for (const endpoint of ['https://example.test/proxy/', 'https://example.test/proxy/v1',
+    'https://example.test/proxy/v1/systemone']) {
+    const route = decisionEndpointRoutes('laya', endpoint)
+    assert.equal(new URL(route.requestUrl).pathname, '/proxy/v1/systemone')
+    assert.equal(new URL(route.discoveryUrl).pathname, '/proxy/health')
+  }
+  const layaLegacyBase = decisionEndpointRoutes('laya', 'https://example.test/proxy/custom')
+  assert.equal(new URL(layaLegacyBase.requestUrl).pathname, '/proxy/custom/v1/systemone')
+  assert.equal(new URL(layaLegacyBase.discoveryUrl).pathname, '/proxy/custom/health')
+})
+
+test('model discovery uses bounded read-only provider directories and never runs inference', async () => {
+  const calls = []
+  const openAi = await discoverDecisionModels({ backend: 'openai_compatible', endpoint: 'https://example.test/proxy/v1',
+    apiKey: 'synthetic-openai-key', fetchImpl: async (url, options) => {
+      calls.push({ url: new URL(url).pathname, options })
+      return new Response(JSON.stringify({ data: [{ id: 'gpt-synthetic' }, { id: 'other' }] }), { status: 200 })
+    } })
+  assert.deepEqual(openAi.models, [{ id: 'gpt-synthetic' }, { id: 'other' }])
+  assert.equal(calls[0].url, '/proxy/v1/models')
+  assert.equal(calls[0].options.method, 'GET')
+  assert.equal(calls[0].options.redirect, 'error')
+  assert.equal(calls[0].options.body, undefined)
+  assert.equal(calls[0].options.headers.authorization, 'Bearer synthetic-openai-key')
+
+  const jev = await discoverDecisionModels({ backend: 'jev', endpoint: 'https://example.test/proxy',
+    fetchImpl: async (url, options) => {
+      calls.push({ url: new URL(url).pathname, options })
+      return new Response(JSON.stringify({ models: [{ name: 'jev-synthetic' }] }), { status: 200 })
+    } })
+  assert.deepEqual(jev.models, [{ id: 'jev-synthetic' }])
+  assert.equal(calls[1].url, '/proxy/v1/models')
+  assert.equal(calls[1].options.method, 'GET')
+
+  const laya = await discoverDecisionModels({ backend: 'laya', endpoint: 'http://192.168.0.2:60008/proxy',
+    fetchImpl: async (url, options) => {
+      calls.push({ url: new URL(url).pathname, options })
+      return new Response(JSON.stringify({ status: 'ok', loaded: ['laya-synthetic'] }), { status: 200 })
+    } })
+  assert.deepEqual(laya.models, [{ id: 'laya-synthetic' }])
+  assert.equal(laya.autoAvailable, true)
+  assert.equal(laya.models.some(model => model.id === 'auto'), false, 'auto is a separate choice, not a discovered model')
+  assert.equal(calls[2].url, '/proxy/health')
+  assert.equal(calls[2].options.method, 'GET')
+
+  const layaNoDetails = await discoverDecisionModels({ backend: 'laya', endpoint: 'http://192.168.0.2:60008',
+    fetchImpl: async () => new Response(JSON.stringify({ status: 'ok' }), { status: 200 }) })
+  assert.equal(layaNoDetails.code, 'model_discovery_details_unavailable')
+  assert.equal(layaNoDetails.autoAvailable, true)
+  let missingSignal
+  await assert.rejects(discoverDecisionModels({ backend: 'laya', endpoint: 'http://192.168.0.2:60008',
+    fetchImpl: async (_url, options) => {
+      missingSignal = options.signal
+      return new Response('missing', { status: 404 })
+    } }), { message: 'model_discovery_not_supported' })
+  assert.equal(missingSignal.aborted, true, 'even unsupported-directory exits close the transport signal')
+
+  await assert.rejects(discoverDecisionModels({ backend: 'openai_compatible',
+    endpoint: 'https://example.test/custom/decision', fetchImpl: async () => { throw new Error('must_not_probe') } }),
+  { message: 'model_discovery_not_supported' })
+  let oversizedSignal
+  await assert.rejects(discoverDecisionModels({ backend: 'openai_compatible', endpoint: 'https://example.test/v1',
+    fetchImpl: async (_url, options) => {
+      oversizedSignal = options.signal
+      return { status: 200, ok: true,
+        headers: { get: name => name === 'content-length' ? String(64 * 1024 + 1) : null }, body: null }
+    } }), { message: 'provider_response_too_large' })
+  assert.equal(oversizedSignal.aborted, true, 'oversized declarations also close the transport signal')
+  await assert.rejects(discoverDecisionModels({ backend: 'openai_compatible', endpoint: 'https://example.test/v1',
+    fetchImpl: async () => ({ status: 200, ok: true, headers: { get: () => null }, body: null,
+      text: async () => 'must-not-read-unbounded-body' }) }), { message: 'provider_response_unbounded' })
+  await assert.rejects(discoverDecisionModels({ backend: 'openai_compatible', endpoint: 'https://example.test/v1',
+    fetchImpl: async () => new Response(JSON.stringify({ data: Array.from({ length: 501 }, (_, index) => ({ id: `m-${index}` })) }),
+      { status: 200 }) }), { message: 'model_discovery_invalid_response' })
+})
+
+test('model discovery enforces its timeout and cancels when the caller changes routes', async () => {
+  await assert.rejects(discoverDecisionModels({ backend: 'openai_compatible', endpoint: 'https://example.test/v1',
+    timeoutMs: 100, fetchImpl: async (_url, options) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+    }) }), { message: 'model_discovery_timeout' })
+
+  const routeController = new AbortController()
+  let markStarted
+  const started = new Promise(resolve => { markStarted = resolve })
+  const pending = discoverDecisionModels({ backend: 'openai_compatible', endpoint: 'https://example.test/v1',
+    signal: routeController.signal, fetchImpl: async (_url, options) => new Promise((_resolve, reject) => {
+      markStarted()
+      options.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+    }) })
+  await started
+  routeController.abort()
+  await assert.rejects(pending, { message: 'cancelled' })
+
+  const lateFetchController = new AbortController()
+  let markLateFetchStarted
+  const lateFetchStarted = new Promise(resolve => { markLateFetchStarted = resolve })
+  let resolveLateFetch
+  let lateFetchSignal
+  const lateFetch = discoverDecisionModels({ backend: 'openai_compatible', endpoint: 'https://example.test/v1',
+    signal: lateFetchController.signal, fetchImpl: (_url, options) => {
+      lateFetchSignal = options.signal
+      markLateFetchStarted()
+      return new Promise(resolve => { resolveLateFetch = resolve })
+    } })
+  await lateFetchStarted
+  lateFetchController.abort()
+  resolveLateFetch(new Response(JSON.stringify({ data: [{ id: 'too-late' }] }), { status: 200 }))
+  await assert.rejects(lateFetch, { message: 'cancelled' })
+  assert.equal(lateFetchSignal.aborted, true)
+
+  const lateBodyController = new AbortController()
+  let markLateBodyStarted
+  const lateBodyStarted = new Promise(resolve => { markLateBodyStarted = resolve })
+  let resolveBodyRead
+  let lateBodySignal
+  const lateBody = discoverDecisionModels({ backend: 'openai_compatible', endpoint: 'https://example.test/v1',
+    signal: lateBodyController.signal, fetchImpl: async (_url, options) => {
+      lateBodySignal = options.signal
+      markLateBodyStarted()
+      return { status: 200, ok: true, headers: { get: () => null }, body: { getReader: () => {
+        let first = true
+        return { read: () => {
+          if (!first) return Promise.resolve({ done: true })
+          first = false
+          return new Promise(resolve => { resolveBodyRead = resolve })
+        }, releaseLock() {} }
+      } } }
+    } })
+  await lateBodyStarted
+  await new Promise(resolve => setImmediate(resolve))
+  lateBodyController.abort()
+  resolveBodyRead({ done: false, value: new TextEncoder().encode(JSON.stringify({ data: [{ id: 'too-late' }] })) })
+  await assert.rejects(lateBody, { message: 'cancelled' })
+  assert.equal(lateBodySignal.aborted, true)
 })
 
 test('Host, JEV, and Laya dispatchers preserve their own transport contract', async () => {

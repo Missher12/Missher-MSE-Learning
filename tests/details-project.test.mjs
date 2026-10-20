@@ -6,6 +6,7 @@ import { registerHooks } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { LearningEngine } from '../src/index.mjs'
+import { decisionCredentialRef } from '../src/decision-providers.mjs'
 import { MAX_PAGE_SIZE, MAX_QUERY_CHARS, MAX_TITLE_CHARS, clipCodePoints, filterLessons, labelOfScope, pageOf,
   projectDetail, projectRow, projectSettlement, projectTurn, sessionTitle, shortHash, titleOfBlock,
   titleOfWire } from '../adapters/dsh/project.mjs'
@@ -79,6 +80,181 @@ test('the authenticated recovery RPC rejects extra fields before forwarding its 
   assert.equal(forwarded, null, 'unrecognized transport data never reaches the engine')
   assert.deepEqual(control.authorizeProblemRecoveryRetry(input), { ok: true })
   assert.deepEqual(forwarded, input, 'the endpoint forwards only the documented direct input object')
+})
+
+test('remote decision credentials are route-scoped and Remote responses expose metadata only', async () => {
+  let revision = 4
+  const saved = new Map()
+  const key = 'synthetic-decision-key-must-not-leave-the-host'
+  const credentials = {
+    describe: async ref => saved.has(ref)
+      ? { configured: true, source: 'file', writable: true }
+      : ref === 'SYNTHETIC_ENV_KEY'
+        ? { configured: true, source: 'env', writable: true }
+        : { configured: false, source: null, writable: true },
+    resolve: async ref => ({ value: saved.get(ref) ?? (ref === 'SYNTHETIC_ENV_KEY' ? 'synthetic-env-value' : null) }),
+    set: async (ref, value) => { saved.set(ref, value) },
+    unset: async ref => { saved.delete(ref) },
+  }
+  const settings = { writable: true, describe: () => [{ ns: 'mse-learning', revision }] }
+  const control = new MseControl({ get: name => name === 'credentials' ? credentials
+    : name === 'settings' ? settings : null })
+  const input = { backend: 'openai_compatible', endpoint: 'https://example.test/proxy/v1',
+    secretRef: 'SYNTHETIC_ENV_KEY', secretBinding: '', settingsRevision: 4 }
+  const routeRef = decisionCredentialRef(input.backend, input.endpoint)
+
+  const before = await control.describeDecisionCredential(input)
+  assert.equal(before.ok, true)
+  assert.equal(before.serviceAvailable, true)
+  assert.equal(before.configured, false)
+  assert.equal(before.legacyConfigured, true)
+  assert.equal(JSON.stringify(before).includes('synthetic-env-value'), false)
+
+  const changedRoute = { ...input, endpoint: 'https://other.example/v1',
+    secretBinding: JSON.stringify([input.backend, input.endpoint]) }
+  const routeStatus = await control.describeDecisionCredential(changedRoute)
+  assert.equal(routeStatus.legacyConfigured, false)
+  assert.equal(routeStatus.legacyRequiresRebind, true)
+  const refusedDiscovery = await control.discoverDecisionModels({ ...changedRoute,
+    clientId: 'synthetic-client-route-01', requestId: 'synthetic-route-req-01' })
+  assert.deepEqual(refusedDiscovery, { ok: false, code: 'provider_secret_route_mismatch' })
+
+  const stored = await control.setDecisionCredential({ ...input, apiKey: key })
+  assert.deepEqual(stored, { ok: true, configured: true, stored: true })
+  assert.equal(saved.get(routeRef), key)
+  assert.equal(JSON.stringify(stored).includes(key), false)
+  const after = await control.describeDecisionCredential(input)
+  assert.equal(after.configured, true)
+  assert.equal(after.stored, true)
+  assert.equal(JSON.stringify(after).includes(key), false)
+
+  const removed = await control.unsetDecisionCredential(input)
+  assert.deepEqual(removed, { ok: true, configured: false, stored: false })
+  assert.equal(saved.has(routeRef), false)
+  control.disposeDecisionDiscoveries()
+})
+
+test('credential writes report a settings revision change after the Host operation', async () => {
+  let revision = 8
+  const saved = new Map()
+  const credentials = {
+    describe: async ref => saved.has(ref) ? { configured: true, source: 'file', writable: true }
+      : { configured: false, writable: true },
+    set: async (ref, value) => { saved.set(ref, value); revision += 1 },
+    unset: async ref => { saved.delete(ref); revision += 1 },
+  }
+  const settings = { writable: true, describe: () => [{ ns: 'mse-learning', revision }] }
+  const control = new MseControl({ get: name => name === 'credentials' ? credentials
+    : name === 'settings' ? settings : null })
+  const input = { backend: 'jev', endpoint: 'https://example.test/proxy', secretRef: '', secretBinding: '',
+    settingsRevision: revision }
+  const savedResult = await control.setDecisionCredential({ ...input, apiKey: 'synthetic-write-race-key' })
+  assert.equal(savedResult.ok, true)
+  assert.equal(savedResult.stored, true)
+  assert.equal(savedResult.settingsChanged, true)
+  assert.equal(savedResult.code, 'settings_changed_after_credential_save')
+  assert.equal(JSON.stringify(savedResult).includes('synthetic-write-race-key'), false)
+
+  const removeInput = { ...input, settingsRevision: revision }
+  const removedResult = await control.unsetDecisionCredential(removeInput)
+  assert.equal(removedResult.ok, true)
+  assert.equal(removedResult.settingsChanged, true)
+  assert.equal(removedResult.code, 'settings_changed_after_credential_remove')
+  control.disposeDecisionDiscoveries()
+})
+
+test('model discovery keeps a draft key one-time and rechecks permission after async credential lookup', async () => {
+  let revision = 12
+  let resolveCalls = 0
+  let setCalls = 0
+  const saved = new Map()
+  const credentials = {
+    describe: async () => ({ configured: false, writable: true }),
+    resolve: async ref => { resolveCalls += 1; return { value: saved.get(ref) ?? 'synthetic-saved-key' } },
+    set: async (ref, value) => { setCalls += 1; saved.set(ref, value) },
+    unset: async ref => { saved.delete(ref) },
+  }
+  const settings = { writable: true, describe: () => [{ ns: 'mse-learning', revision }] }
+  const control = new MseControl({ get: name => name === 'credentials' ? credentials
+    : name === 'settings' ? settings : null })
+  const previousFetch = globalThis.fetch
+  let fetchCount = 0
+  let sent = null
+  globalThis.fetch = async (url, options) => {
+    fetchCount += 1
+    sent = { pathname: new URL(url).pathname, options }
+    return new Response(JSON.stringify({ data: [{ id: 'synthetic-model' }] }), { status: 200 })
+  }
+  try {
+    settings.writable = false
+    const readOnlyResult = await control.discoverDecisionModels({ backend: 'openai_compatible',
+      endpoint: 'https://example.test/v1', secretRef: '', secretBinding: '', settingsRevision: revision,
+      clientId: 'synthetic-client-readonly-01', requestId: 'synthetic-readonly-req-01', apiKey: 'one-time-readonly-key' })
+    assert.deepEqual(readOnlyResult, { ok: false, code: 'settings_unavailable' })
+    assert.equal(fetchCount, 0, 'read-only settings permission refuses discovery before the GET')
+    settings.writable = true
+
+    const draftResult = await control.discoverDecisionModels({ backend: 'openai_compatible',
+      endpoint: 'https://example.test/v1', secretRef: '', secretBinding: '', settingsRevision: revision,
+      clientId: 'synthetic-client-id-001', requestId: 'synthetic-request-001', apiKey: 'one-time-draft-key' })
+    assert.equal(draftResult.ok, true)
+    assert.deepEqual(draftResult.models, [{ id: 'synthetic-model' }])
+    assert.equal(resolveCalls, 0, 'a one-time draft key does not resolve a saved value')
+    assert.equal(setCalls, 0, 'discovery never persists a draft key')
+    assert.equal(sent.pathname, '/v1/models')
+    assert.equal(sent.options.method, 'GET')
+    assert.equal(sent.options.headers.authorization, 'Bearer one-time-draft-key')
+    assert.equal(JSON.stringify(draftResult).includes('one-time-draft-key'), false)
+
+    let releaseResolve
+    let markResolveStarted
+    const resolveStarted = new Promise(resolve => { markResolveStarted = resolve })
+    const resolverGate = new Promise(resolve => { releaseResolve = resolve })
+    credentials.resolve = async () => {
+      resolveCalls += 1
+      markResolveStarted()
+      await resolverGate
+      return { value: 'synthetic-saved-key' }
+    }
+    let staleFetches = 0
+    globalThis.fetch = async () => { staleFetches += 1; throw new Error('stale_revision_must_not_fetch') }
+    const staleRequest = control.discoverDecisionModels({ backend: 'openai_compatible',
+      endpoint: 'https://example.test/v1', secretRef: '', secretBinding: '', settingsRevision: revision,
+      clientId: 'synthetic-client-id-002', requestId: 'synthetic-request-002' })
+    await resolveStarted
+    revision += 1
+    releaseResolve()
+    const staleResult = await staleRequest
+    assert.deepEqual(staleResult, { ok: false, code: 'settings_conflict' })
+    assert.equal(staleFetches, 0, 'a settings revision change while resolving credentials fences the GET')
+
+    let fetchStarted
+    const pendingFetchStarted = new Promise(resolve => { fetchStarted = resolve })
+    globalThis.fetch = async (_url, options) => new Promise((_resolve, reject) => {
+      fetchStarted()
+      options.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+    })
+    const clientId = 'synthetic-client-cancel-01'
+    const requestId = 'synthetic-cancel-req-01'
+    const cancelledRequest = control.discoverDecisionModels({ backend: 'openai_compatible',
+      endpoint: 'https://example.test/v1', secretRef: '', secretBinding: '', settingsRevision: revision,
+      clientId, requestId, apiKey: 'one-time-cancel-key' })
+    await pendingFetchStarted
+    assert.deepEqual(control.cancelDecisionDiscovery({ clientId, requestId }), { ok: true, cancelled: true })
+    assert.deepEqual(await cancelledRequest, { ok: false, code: 'cancelled' })
+
+    const unloadId = 'synthetic-client-unload-01'
+    const unloadRequestId = 'synthetic-unload-req-01'
+    const unloadedRequest = control.discoverDecisionModels({ backend: 'openai_compatible',
+      endpoint: 'https://example.test/v1', secretRef: '', secretBinding: '', settingsRevision: revision,
+      clientId: unloadId, requestId: unloadRequestId, apiKey: 'one-time-unload-key' })
+    await pendingFetchStarted
+    control.disposeDecisionDiscoveries()
+    assert.deepEqual(await unloadedRequest, { ok: false, code: 'cancelled' })
+  } finally {
+    globalThis.fetch = previousFetch
+    control.disposeDecisionDiscoveries()
+  }
 })
 
 test('lesson projections are bounded and never invent values', () => {

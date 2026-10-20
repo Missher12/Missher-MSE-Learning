@@ -42,6 +42,7 @@ export const SETTINGS_DEFAULTS = Object.freeze({
   decisionModel: '',
   decisionEndpoint: '',
   decisionSecretRef: '',
+  decisionSecretBinding: '',
 })
 
 /** Byte bounds the core itself enforces; a value outside them can never be persisted. */
@@ -79,6 +80,8 @@ export const Config = z.object({
   decisionEndpoint: z.string().max(2048).pattern(/^$|^https?:\/\/[^/?#@]+(?::[0-9]+)?(?:\/[^?#]*)?$/u)
     .default('').volatile(),
   decisionSecretRef: z.string().max(256).default('').volatile(),
+  /** Route snapshot authorizing reuse of the legacy environment-reference field. */
+  decisionSecretBinding: z.string().max(4096).default('').volatile(),
   /** Host-authored deterministic tool contracts; deliberately non-volatile and absent by default. */
   guardTemplates: z.array(z.object({
     guardId: z.string().max(64), version: z.number().min(1).max(100000).step(1),

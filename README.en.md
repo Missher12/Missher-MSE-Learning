@@ -4,7 +4,7 @@ English | [中文](README.md) · [Desktop and downloads](https://github.com/Miss
 
 Persists scoped user corrections and method candidates for DSH, recalls relevant lessons within a byte budget, and records adoption and verification established by the trusted host. It does not train model weights or guarantee that a model will never repeat a mistake.
 
-Package: `@missher/dsh-mse-learning`, version **0.11.1**. Decision model settings now show a short explanation when following the source session and reveal model, endpoint and secret-variable fields for remote services. Switching preserves drafts, with consistent field widths and spacing. All 31 client checks and the scoped Chinese/English native UI checks passed; learning core, budgets and model calls are unchanged. See [release notes](docs/AUTONOMY_0.11.1.md), [delivery status and checksums](PUBLICATION.md), and [validation evidence](VALIDATION.md).
+Package: `@missher/dsh-mse-learning`, version **0.12.0**. Remote decision settings bring the model name, API endpoint and actual API key into one page, with optional model-directory discovery. Keys use route-scoped Host credential storage. Budget controls wrap at narrow widths, and upgrades preserve saved settings. See [release notes](docs/AUTONOMY_0.12.0.md), [delivery status and checksums](https://github.com/Missher12/Missher-MSE-Learning/blob/main/PUBLICATION.md) and [validation](VALIDATION.md).
 
 The host-title session pickers from alpha.17 remain. Titles are display-only and do not alter scope, recall identity or budgets. DSH scheduling does not establish equivalent lifecycle integration for every Agent. The historical `dsh-missher-evolution` package is a separate product; this plugin does not read or migrate its data.
 
@@ -33,7 +33,16 @@ At most **one trial per turn** can use the existing **total 2-lesson/default 768
 
 ## Installation status
 
-Install the exact version listed in [delivery status](PUBLICATION.md). Source checks, release publication and installation are separate milestones; an existing older installation is not upgraded merely because this repository changes.
+Install the exact version listed in [delivery status](https://github.com/Missher12/Missher-MSE-Learning/blob/main/PUBLICATION.md). Source checks, release publication and installation are separate milestones; an existing older installation is not upgraded merely because this repository changes.
+
+## Configure a decision model
+
+1. Open **Settings → 自我进化** and choose the model source. Follow-source mode keeps the source session's model and reasoning effort.
+2. For a remote service, enter its endpoint and model name. Fetch the model directory if the service provides one, or enter the model manually.
+3. Enter the actual API key and save settings. Keys are scoped to the backend and service route; changing the endpoint does not silently reuse an old key. Advanced settings retain the environment-variable reference.
+4. If another window changes the settings, reload the Host values before editing and saving again. Configuration save results and credential status are reported separately.
+
+Discovery sends read-only requests and does not run inference. A model list or saved key does not prove inference compatibility. The tested Host stores credentials in a permission-restricted local file, not an OS keychain or encrypted vault; protect its data directory.
 
 ## Start automatic validation
 
@@ -44,13 +53,13 @@ Install the exact version listed in [delivery status](PUBLICATION.md). Source ch
 
 Defaults remain **automatic validation off, token allowance 0 and task allowance 2**; legacy settings missing budget fields also use 0/2. A preset changes these values only after explicit selection and save. Tasks and physical requests are counted separately. Reading the page does not start models.
 
-## Settings screenshot
+## Settings screenshots
 
-Actual 0.11.1 settings on an isolated Ubuntu community 0.2.1-rc.2 desktop, using synthetic data with reflection and automatic validation off. Actual content widths were approximately 311 and 559 pixels. These screenshots do not establish native display behavior on other platforms.
+These are actual 0.12.0 controls in an isolated Ubuntu community 0.2.1-rc.2 desktop, using a synthetic model, loopback endpoint and empty key field, with both background switches off. The background Disconnected label comes from offline acceptance, not a production service failure. Actual content widths of approximately 311 and 559 pixels were checked; other platforms are not inferred from these images.
 
-![Follow-source settings](docs/images/native-rc2-0.11.1-host.png)
+![Model, endpoint and saved API key status](https://raw.githubusercontent.com/Missher12/Missher-MSE-Learning/v0.12.0/docs/images/native-rc2-0.12.0-settings.png)
 
-![Remote model settings after saving](docs/images/native-rc2-0.11.1-remote.png)
+![Wrapped budget presets and aligned inputs](https://raw.githubusercontent.com/Missher12/Missher-MSE-Learning/v0.12.0/docs/images/native-rc2-0.12.0-budget.png)
 
 ## Evidence and platform boundaries
 

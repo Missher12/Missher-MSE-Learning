@@ -39,6 +39,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
   const SETTINGS_ID = 'mse-learning'
   const REFRESH_INTERVAL_MS = 20_000
   const JOB_POLL_MS = 1_500
+  const makeRequestId = () => typeof globalThis.crypto?.randomUUID === 'function'
+    ? globalThis.crypto.randomUUID()
+    : `mse-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`
   const PAGE_SIZES = [10, 20, 50]
   const TABS = ['overview', 'lessons', 'recall', 'manual', 'budget']
   const tabLabel = (id, dict) => id === 'overview' ? dict.tabOverview : id === 'lessons' ? dict.tabLessons
@@ -48,7 +51,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
   const MAX_CASE_JSON_CHARS = 20_000
   const METHODS = ['overview', 'sessions', 'lessons', 'lesson', 'recall', 'diagnose']
   const CONTROL_METHODS = ['status', 'turns', 'planReview', 'startReview', 'planEvaluation', 'startEvaluation', 'job', 'cancel',
-    'authorizeProblemRecoveryRetry']
+    'authorizeProblemRecoveryRetry', 'describeDecisionCredential', 'setDecisionCredential', 'unsetDecisionCredential',
+    'discoverDecisionModels', 'cancelDecisionDiscovery']
   const CONTEXT_MIN = 128
   const CONTEXT_MAX = 1536
   const EVAL_TOKENS_MAX = 1_000_000
@@ -358,11 +362,45 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     turnBudgetHint: '只计经验文本，单位为 UTF-8 字节。',
     sessionBudgetHint: '在同一会话中限制经验占用。',
     evalBudgetTitle: '模型评测额度',
-    evalBudgetHint: '这里仅限制自动经验评审/客观评测，不含正常聊天或自动复盘（每日最多 3 次、每次输出 384 tokens）。档位按滚动 24 小时计算；耗尽后等待到最早一笔额度到期。已用/预留与实测分开显示，未知费用不会按 0 处理。',
+    evalBudgetHint: '仅限制经验评审与客观评测，不含正常聊天或自动复盘（每日最多 3 次、每次 384 tokens）。按滚动 24 小时计算；已用、预留与实测分开显示，未知费用不按 0 计。',
     decisionBackend: '模型来源', decisionModel: '决策模型', decisionModelField: '模型名称',
     decisionBackendHost: '跟随来源会话', decisionBackendOpenAI: 'OpenAI 兼容',
-    decisionBackendJev: 'Jev', decisionBackendLaya: 'Laya HTTP', decisionEndpoint: '服务地址',
+    decisionBackendJev: 'Jev', decisionBackendLaya: 'Laya HTTP', decisionEndpoint: 'API 地址',
     decisionSecretRef: '密钥环境变量名', decisionLatest: '最近候选决策',
+    decisionApiKey: 'API Key', decisionApiKeyHint: '密钥保存在宿主凭据服务；保存后不再显示。',
+    decisionApiKeyPlaceholder: '输入 API Key', decisionSaveKey: '保存密钥', decisionSavingKey: '保存中…',
+    decisionKeySaveFailed: '密钥未保存，输入仍保留；修复问题后可重试。',
+    decisionConfigNotSavedKeySaved: '密钥已保存，但设置未保存；请重新载入设置后再检查。',
+    decisionSettingsChangedDuringSave: '保存期间编辑发生变化；本次设置未提交，当前编辑仍保留。',
+    decisionSavedKey: '已保存到此服务地址', decisionNoSavedKey: '此服务地址尚未保存密钥',
+    decisionKeyFromEnv: '已找到环境变量密钥', decisionCredentialUnavailable: '宿主未提供凭据服务；可在高级选项中使用现有环境变量引用。',
+    decisionCredentialStatusUnavailable: '未能读取密钥状态。', decisionEndpointRequired: '请先填写 API 地址。',
+    decisionEndpointInvalid: 'API 地址格式不正确。',
+    decisionClearKey: '清除此地址的密钥', decisionAdvanced: '高级：环境变量兼容设置',
+    decisionDiscover: '获取模型列表', decisionDiscovering: '读取模型列表…', decisionModels: '服务返回的模型',
+    decisionChooseModel: '选择列表中的模型', decisionAutoModel: '自动选择模型',
+    decisionDiscoveryHint: '模型列表不代表推理已通过验证。',
+    decisionLegacyRebind: '此环境变量引用仍保留，但已绑定到之前的服务地址，不会用于当前地址。重新输入并保存后才会授权给当前服务。',
+    decisionCredentialSavedWithSettingsChange: '密钥已保存到此服务地址，但设置在保存期间更改；请重新读取设置。',
+    decisionCredentialRemovedWithSettingsChange: '此服务地址的密钥已清除，但设置在操作期间更改；请重新读取设置。',
+    decisionDiscoveryCodes: {
+      idle: '填写服务地址后可获取模型列表。', loading: '正在获取模型列表…',
+      success: '已获取 {count} 个模型。',
+      model_discovery_not_supported: '未能获取模型列表；请手动填写模型名。',
+      model_discovery_auth_required: '服务要求有效密钥；检查已保存密钥或高级引用。',
+      model_discovery_details_unavailable: '服务可达，但没有模型明细；可手动填写模型名。',
+      model_discovery_no_loaded_models: '服务可达，但没有已加载模型；可手动填写模型名。',
+      model_discovery_empty: '模型列表为空；可手动填写模型名。',
+      model_discovery_timeout: '读取超时；可手动填写模型名。',
+      model_discovery_invalid_response: '模型列表格式无法识别；可手动填写模型名。',
+      model_discovery_http_error: '服务拒绝模型列表请求；可手动填写模型名。',
+      provider_response_unbounded: '响应无法安全读取；可手动填写模型名。',
+      model_discovery_busy: '已有模型目录请求正在结束，请稍后重试。',
+      provider_secret_route_mismatch: '环境变量引用绑定到之前的服务地址；重新输入并保存后才能用于当前地址。',
+      settings_conflict: '设置已在其他位置更改，请刷新后重试。',
+      credentials: '凭据状态不可用；可使用高级环境变量引用。',
+      failed: '读取模型目录失败；可手动填写模型名。',
+    },
     decisionPrimary: '主意见', decisionFallback: 'Host复核',
     decisionStates: { queued: '排队中', dispatched: '处理中', complete: '已完成', wait: '等待条件',
       failed: '失败', unknown: '费用未知' },
@@ -501,7 +539,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     saving: '保存中…',
     saved: '已保存并生效。',
     saveFailed: '未保存：{reason}',
-    reloadNeeded: '保存被拒绝：配置可能已在别处更改，或数值超出合法范围。已重新载入宿主值，请确认后再试。',
+    reloadNeeded: '保存被拒绝：配置可能已更改或输入无效。请重新载入宿主值并确认后再试。',
+    settingsReloading: '正在重新读取宿主配置…',
+    settingsReloadFailed: '配置重载未完成；草稿已保留，请确认后重试。',
     saveUnavailable: '宿主设置当前不可写或不支持写入，只显示已保存的值。',
     configUnavailable: '宿主设置命名空间暂不可用，开关为只读。',
     userEnabled: '用户是否启用',
@@ -694,11 +734,45 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     turnBudgetHint: 'Counts lesson text only, in UTF-8 bytes.',
     sessionBudgetHint: 'Caps what lessons may occupy in one session.',
     evalBudgetTitle: 'Model evaluation budget',
-    evalBudgetHint: 'This cap covers automatic experience review and objective evaluation only. It excludes normal chat and automatic reflection (up to 3 per day, 384 output tokens each). The window rolls over 24 hours; exhausted work waits for the earliest reservation to expire. Reserved and measured usage are shown separately; unknown cost is never treated as zero.',
+    evalBudgetHint: 'Covers experience review and objective evaluation only, not normal chat or automatic reflection (up to 3 per day, 384 output tokens each). Uses a rolling 24-hour window; used, reserved and measured totals stay distinct, and unknown cost is never counted as zero.',
     decisionBackend: 'Model source', decisionModel: 'Decision model', decisionModelField: 'Model name',
     decisionBackendHost: 'Follow source session', decisionBackendOpenAI: 'OpenAI compatible',
-    decisionBackendJev: 'Jev', decisionBackendLaya: 'Laya HTTP', decisionEndpoint: 'Service endpoint',
+    decisionBackendJev: 'Jev', decisionBackendLaya: 'Laya HTTP', decisionEndpoint: 'API address',
     decisionSecretRef: 'Secret environment variable', decisionLatest: 'Latest candidate decision',
+    decisionApiKey: 'API Key', decisionApiKeyHint: 'Stored by the Host credentials service and hidden after saving.',
+    decisionApiKeyPlaceholder: 'Enter API Key', decisionSaveKey: 'Save key', decisionSavingKey: 'Saving…',
+    decisionKeySaveFailed: 'The key was not saved; the input is kept so you can retry.',
+    decisionConfigNotSavedKeySaved: 'The key was saved, but the settings were not; reload settings and review them.',
+    decisionSettingsChangedDuringSave: 'The draft changed during save; this settings update was not submitted and your edits are kept.',
+    decisionSavedKey: 'Saved for this service address', decisionNoSavedKey: 'No key saved for this service address',
+    decisionKeyFromEnv: 'Environment credential found', decisionCredentialUnavailable: 'The Host does not provide a credentials service; use the existing environment reference under Advanced.',
+    decisionCredentialStatusUnavailable: 'Could not read key status.', decisionEndpointRequired: 'Enter the API address first.',
+    decisionEndpointInvalid: 'The API address format is invalid.',
+    decisionClearKey: 'Clear key for this address', decisionAdvanced: 'Advanced: environment variable compatibility',
+    decisionDiscover: 'Fetch model list', decisionDiscovering: 'Reading model list…', decisionModels: 'Models returned by service',
+    decisionChooseModel: 'Select a listed model', decisionAutoModel: 'Select automatically',
+    decisionDiscoveryHint: 'A model list does not verify inference support.',
+    decisionLegacyRebind: 'The environment reference remains saved but is bound to the previous service address. Re-enter and save it to authorize it for this address.',
+    decisionCredentialSavedWithSettingsChange: 'The key was saved for this service address, but settings changed during the save. Reload settings.',
+    decisionCredentialRemovedWithSettingsChange: 'The key for this service address was removed, but settings changed during the operation. Reload settings.',
+    decisionDiscoveryCodes: {
+      idle: 'Enter a service address to fetch its model list.', loading: 'Fetching model list…',
+      success: 'Fetched {count} models.',
+      model_discovery_not_supported: 'Could not fetch a model list; enter the model name manually.',
+      model_discovery_auth_required: 'The service requires a valid key; check the saved key or Advanced reference.',
+      model_discovery_details_unavailable: 'The service responded without model details; enter a model manually.',
+      model_discovery_no_loaded_models: 'The service has no loaded models; enter a model manually.',
+      model_discovery_empty: 'The model list is empty; enter a model manually.',
+      model_discovery_timeout: 'The request timed out; enter a model manually.',
+      model_discovery_invalid_response: 'The model list format is unrecognized; enter a model manually.',
+      model_discovery_http_error: 'The service refused the model-list request; enter a model manually.',
+      provider_response_unbounded: 'The response cannot be read safely; enter a model manually.',
+      model_discovery_busy: 'A previous model-directory request is still stopping; try again shortly.',
+      provider_secret_route_mismatch: 'The environment reference belongs to the previous service address. Re-enter and save it before using it here.',
+      settings_conflict: 'Settings changed elsewhere; refresh before retrying.',
+      credentials: 'Credential status is unavailable; use the Advanced environment reference.',
+      failed: 'Could not read the model directory; enter a model manually.',
+    },
     decisionPrimary: 'Primary opinion', decisionFallback: 'Host review',
     decisionStates: { queued: 'Queued', dispatched: 'In progress', complete: 'Complete', wait: 'Waiting',
       failed: 'Failed', unknown: 'Cost unknown' },
@@ -834,7 +908,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     verifySessionUnknown: 'The session directory is unavailable right now, so no verification session can be chosen; the saved value \u201c{id}\u201d is kept as it is.',
     save: 'Save', saving: 'Saving…', saved: 'Saved and in effect.',
     saveFailed: 'Not saved: {reason}',
-    reloadNeeded: 'Rejected: the configuration may have changed elsewhere, or a value is out of range. Host values were reloaded.',
+    reloadNeeded: 'Rejected: settings may have changed or a value may be invalid. Reload Host values and review before retrying.',
+    settingsReloading: 'Refreshing Host settings…',
+    settingsReloadFailed: 'Settings reload did not complete; your draft was kept. Review and retry.',
     saveUnavailable: 'Host settings are unavailable, read-only, or do not support writes; showing saved values.',
     configUnavailable: 'The host settings namespace is unavailable; switches are read-only.',
     userEnabled: 'User enabled', effectiveState: 'Effective state', effectiveRunning: 'Running (waiting for task events)',
@@ -919,8 +995,19 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-decision-fields .mse-row{display:block;padding:7px 0;border-bottom:0}
 .mse-details .mse-decision-fields .mse-row-main{width:100%;max-width:100%;overflow-wrap:anywhere}
 .mse-details .mse-decision-fields .mse-row-side{display:block;width:100%;max-width:100%;margin-top:4px}
-.mse-details .mse-decision-input{display:block;width:100%;min-width:0;max-width:100%;box-sizing:border-box}
+.mse-details .mse-save-footer{display:block;width:100%;min-width:0;max-width:100%}
+.mse-details .mse-save-footer .mse-row-main{display:block;width:100%;min-width:0;max-width:100%}
+.mse-details .mse-save-footer .mse-notice{display:block;width:100%;min-width:0;max-width:100%;overflow-wrap:anywhere}
+.mse-details .mse-save-footer .mse-row-side{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:8px;width:100%;min-width:0;max-width:100%;margin-top:8px}
+.mse-details .mse-save-footer .mse-row-side>*{flex:0 0 auto;min-width:0;max-width:100%;white-space:normal;overflow-wrap:anywhere}
+.mse-details .mse-decision-input{display:flex;width:100%;min-width:0;max-width:100%;box-sizing:border-box}
 .mse-details .mse-decision-status{margin:4px 0 10px;padding:2px 0;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px;overflow-wrap:anywhere}
+.mse-details .mse-decision-key{display:flex;flex-direction:column;gap:8px;width:100%;min-width:0}
+.mse-details .mse-decision-key .mse-decision-status{margin:0}
+.mse-details .mse-decision-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0;max-width:100%}
+.mse-details .mse-decision-discovery{width:100%;min-width:0;padding:4px 0 10px}
+.mse-details .mse-decision-discovery .mse-decision-status{margin:6px 0 0}
+.mse-details .mse-decision-discovery .mse-hint{margin-top:2px}
 .mse-details .mse-coverage-list{display:flex;flex-wrap:wrap;align-items:flex-start;gap:6px 18px;min-width:0;max-width:100%}
 .mse-details .mse-coverage-item{min-width:0;overflow-wrap:anywhere}
 .mse-details .mse-row:last-child{border-bottom:none}
@@ -995,6 +1082,12 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-textarea{display:block;width:100%;min-height:80px;resize:vertical;font:inherit;font-size:13px;line-height:22px;color:inherit;background:var(--dsw-alias-bg-layer-1);border:0.5px solid var(--dsw-alias-border-l2);border-radius:8px;padding:6px 10px;overflow-wrap:anywhere}
 .mse-details .mse-cases{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;min-height:120px;white-space:pre-wrap}
 .mse-details .mse-actions{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap;padding-top:12px}
+.mse-details .mse-budget-presets{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,128px),1fr));gap:8px;width:100%;padding:8px 0 0;justify-content:initial}
+.mse-details .mse-budget-presets>*{width:100%;min-width:0}
+.mse-details .mse-budget-preset{width:100%;min-width:0;height:auto;min-height:36px;padding-block:8px;white-space:normal;overflow-wrap:anywhere}
+.mse-details .mse-budget-row .mse-row-side{width:156px;flex:none}
+.mse-details .mse-budget-value{width:100%;max-width:156px}
+.mse-details .mse-budget-row .mse-row-side .mse-budget-value>*{width:100%;max-width:100%}
 .mse-details .mse-error{color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:20px;overflow-wrap:anywhere}
 .mse-details .mse-notice{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px;min-height:20px;overflow-wrap:anywhere}
 .mse-details .mse-ok{color:var(--dsw-alias-state-business-primary);font-size:12px;line-height:20px}
@@ -1018,6 +1111,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-scope select{width:100%;max-width:100%}
 .mse-details .mse-num{width:74px}
 .mse-details .mse-row-side{gap:5px}
+.mse-details .mse-budget-row{align-items:flex-start}
+.mse-details .mse-budget-row .mse-row-side{width:min(156px,46%)}
 }
 `
 
@@ -1413,7 +1508,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
    * and a right-aligned definition list.
    */
   const row = (key, title, hint, side, options = {}) => h('div', { key,
-    className: `mse-row${options.top === true ? ' mse-row-top' : ''}${options.stacked === true ? ' mse-row-stacked' : ''}` }, [
+    className: `mse-row${options.top === true ? ' mse-row-top' : ''}${options.stacked === true ? ' mse-row-stacked' : ''}`
+      + (typeof options.className === 'string' && options.className !== '' ? ` ${options.className}` : '') }, [
     h('div', { key: 'main', className: 'mse-row-main' }, [
       typeof title === 'string' ? h('div', { key: 't', className: 'mse-row-title' }, title) : title,
       hint === null || hint === undefined ? null : h('p', { key: 'h', className: 'mse-hint' }, hint),
@@ -1505,6 +1601,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     decisionModel: typeof value?.decisionModel === 'string' ? value.decisionModel : '',
     decisionEndpoint: typeof value?.decisionEndpoint === 'string' ? value.decisionEndpoint : '',
     decisionSecretRef: typeof value?.decisionSecretRef === 'string' ? value.decisionSecretRef : '',
+    decisionSecretBinding: typeof value?.decisionSecretBinding === 'string' ? value.decisionSecretBinding : '',
   })
 
   /**
@@ -1565,6 +1662,12 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       if (next === null || [...next].length > max || (key === 'decisionSecretRef' && next
         && !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(next))) problems.push(`${key} invalid`)
       else if (next !== saved) ops.push({ op: 'set', path: [key], value: next })
+    }
+    const savedSecretBinding = typeof value?.decisionSecretBinding === 'string' ? value.decisionSecretBinding : ''
+    const draftSecretBinding = typeof draft.decisionSecretBinding === 'string' ? draft.decisionSecretBinding : null
+    if (draftSecretBinding === null || draftSecretBinding.length > 4096) problems.push('decisionSecretBinding invalid')
+    else if (draftSecretBinding !== savedSecretBinding) {
+      ops.push({ op: 'set', path: ['decisionSecretBinding'], value: draftSecretBinding })
     }
     return { ops, problems }
   }
@@ -1651,6 +1754,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const call = props.call
     const control = props.control
     const form = props.form
+    const settingsMirror = props.settingsMirror
     const [tab, setTab] = React.useState(props.initialTab ?? 'overview')
     const [compactTabs, setCompactTabs] = React.useState(false)
     const tabsHost = React.useRef(null)
@@ -1678,9 +1782,24 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const [advanced, setAdvanced] = React.useState(false)
     const [helpOpen, setHelpOpen] = React.useState(false)
     const [saveState, setSaveState] = React.useState(null)
+    const [decisionApiKeyDraft, setDecisionApiKeyDraft] = React.useState('')
+    const [decisionCredentialState, setDecisionCredentialState] = React.useState({ kind: 'idle' })
+    const [decisionCredentialReloadGeneration, setDecisionCredentialReloadGeneration] = React.useState(0)
+    const [decisionKeyBusy, setDecisionKeyBusy] = React.useState(false)
+    const [decisionDiscovery, setDecisionDiscovery] = React.useState({ kind: 'idle', models: [] })
+    const decisionKeyGeneration = React.useRef(0)
+    const decisionCredentialOperation = React.useRef(0)
+    const decisionCredentialBusy = React.useRef(false)
+    const formSaveBusy = React.useRef(false)
+    const settingsReloadBusy = React.useRef(false)
+    const draftEditGeneration = React.useRef(0)
+    const decisionClientId = React.useRef(null)
+    if (decisionClientId.current === null) decisionClientId.current = makeRequestId()
+    const decisionRequest = React.useRef(null)
+    const decisionContextRef = React.useRef('')
     // A save changes the revision too; without this the page would accuse itself of a remote
     // edit and show the stale-draft warning about the write it just made.
-    const ownWrite = React.useRef(false)
+    const ownWrite = React.useRef(null)
     const generation = React.useRef(0)
     // The scope generation covers "another scope"; these cover "another request of the same
     // resource in the same scope", so the newest query or click always wins.
@@ -1694,6 +1813,88 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 
     const accepted = snapshot !== null && snapshot.status === 'ready' ? snapshot.value : undefined
     const writable = canWriteSettings(form, snapshot)
+    const decisionBackend = draft?.values?.decisionBackend ?? 'host'
+    const decisionKeyPending = decisionBackend !== 'host' && decisionApiKeyDraft !== ''
+    const decisionEndpoint = typeof draft?.values?.decisionEndpoint === 'string' ? draft.values.decisionEndpoint : ''
+    const decisionSecretRef = typeof draft?.values?.decisionSecretRef === 'string' ? draft.values.decisionSecretRef : ''
+    const decisionSecretBinding = typeof draft?.values?.decisionSecretBinding === 'string'
+      ? draft.values.decisionSecretBinding : ''
+    const draftIsStale = draft !== null && (draft.stale === true
+      || (snapshot?.status === 'ready' && (!Number.isSafeInteger(snapshot?.revision)
+        || draft.revision !== snapshot.revision)))
+    // Credential and directory operations are part of this form draft. They must use the
+    // revision the person edited, never a newer revision observed after the draft became stale.
+    const decisionRevision = Number.isSafeInteger(draft?.revision) ? draft.revision : -1
+    const decisionContextKey = JSON.stringify([decisionBackend, decisionEndpoint, decisionSecretRef,
+      decisionSecretBinding, decisionRevision, writable, draftIsStale, decisionCredentialReloadGeneration])
+    decisionContextRef.current = decisionContextKey
+    const decisionRouteContext = JSON.stringify([decisionBackend, decisionEndpoint.trim()])
+    const decisionRouteRef = React.useRef('')
+    decisionRouteRef.current = decisionRouteContext
+    const draftGenerationAtRender = draftEditGeneration.current
+
+    React.useEffect(() => {
+      const contextKey = decisionContextKey
+      const previous = decisionRequest.current
+      decisionRequest.current = null
+      if (previous !== null && control !== undefined && control !== null) {
+        void controlCall(control, 'cancelDecisionDiscovery', { clientId: decisionClientId.current,
+          requestId: previous.requestId }).catch(() => {})
+      }
+      setDecisionDiscovery({ kind: 'idle', models: [] })
+      if (decisionBackend === 'host') {
+        setDecisionCredentialState({ kind: 'idle' })
+        return undefined
+      }
+      if (decisionEndpoint.trim() === '') {
+        setDecisionCredentialState({ kind: 'needs_endpoint' })
+        return undefined
+      }
+      if (draftIsStale) {
+        setDecisionCredentialState({ kind: 'error', code: 'settings_conflict' })
+        return undefined
+      }
+      if (control === undefined || control === null || decisionRevision < 0) {
+        setDecisionCredentialState({ kind: 'error', code: 'credentials' })
+        return undefined
+      }
+      setDecisionCredentialState({ kind: 'loading' })
+      let disposed = false
+      const timer = setTimeout(() => {
+        void (async () => {
+          try {
+            if (!decisionSettingsCurrent()) {
+              setDecisionCredentialState({ kind: 'error', code: 'settings_conflict' })
+              return
+            }
+            const payload = await controlCall(control, 'describeDecisionCredential', {
+              backend: decisionBackend, endpoint: decisionEndpoint.trim(), secretRef: decisionSecretRef,
+              secretBinding: decisionSecretBinding, settingsRevision: decisionRevision,
+            })
+            if (disposed || decisionContextRef.current !== contextKey) return
+            if (!decisionSettingsCurrent()) {
+              setDecisionCredentialState({ kind: 'error', code: 'settings_conflict' })
+              return
+            }
+            setDecisionCredentialState(payload.ok === true ? { kind: 'ready', payload }
+              : { kind: 'error', code: payload.code ?? 'credential_status_unavailable' })
+          } catch (error) {
+            if (disposed || decisionContextRef.current !== contextKey) return
+            setDecisionCredentialState({ kind: 'error', code: failureCode(error) })
+          }
+        })()
+      }, 200)
+      return () => {
+        disposed = true
+        clearTimeout(timer)
+        const pending = decisionRequest.current
+        if (pending !== null && pending.contextKey === contextKey && control !== undefined && control !== null) {
+          decisionRequest.current = null
+          void controlCall(control, 'cancelDecisionDiscovery', { clientId: decisionClientId.current,
+            requestId: pending.requestId }).catch(() => {})
+        }
+      }
+    }, [decisionContextKey, control])
 
     React.useLayoutEffect(() => {
       const node = tabsHost.current
@@ -1827,12 +2028,22 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       if (accepted === undefined) return
       setDraft(current => {
         if (current === null) return { values: defaultDraft(accepted), revision: snapshot?.revision, from: accepted }
+        if (ownWrite.current !== null) {
+          const savedGeneration = ownWrite.current
+          ownWrite.current = null
+          if (current.revision !== snapshot?.revision) {
+            if (draftEditGeneration.current === savedGeneration) {
+              return { values: defaultDraft(accepted), revision: snapshot?.revision, from: accepted }
+            }
+            return { ...current, revision: snapshot?.revision, from: accepted, stale: false }
+          }
+        }
         if (current.revision === snapshot?.revision) return current
-        if (ownWrite.current) { ownWrite.current = false; return { values: defaultDraft(accepted), revision: snapshot?.revision, from: accepted } }
         const dirty = JSON.stringify(current.values) !== JSON.stringify(defaultDraft(current.from))
+          || decisionKeyPending
         return dirty ? { ...current, stale: true } : { values: defaultDraft(accepted), revision: snapshot?.revision, from: accepted }
       })
-    }, [accepted, snapshot])
+    }, [accepted, snapshot, decisionKeyPending])
 
     /** Re-read the runtime state; a failure here is reported, never shown as a pause. */
     const reloadControl = async () => {
@@ -1843,27 +2054,377 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           : { status: 'error', error: `${codeLabel(dict, payload.code)}（${payload.code}）` })
       } catch (error) { setControlState({ status: 'error', error: failureText(dict, error) }) }
     }
+    const invalidateDecisionDiscovery = () => {
+      const previous = decisionRequest.current
+      decisionRequest.current = null
+      if (previous !== null && control !== undefined && control !== null) {
+        void controlCall(control, 'cancelDecisionDiscovery', { clientId: decisionClientId.current,
+          requestId: previous.requestId }).catch(() => {})
+      }
+      setDecisionDiscovery({ kind: 'idle', models: [] })
+    }
     /** Local edits never touch the revision the draft was read at. */
-    const edit = patch => setDraft(current => current === null ? current
-      : { ...current, values: { ...current.values, ...patch } })
+    const edit = patch => {
+      draftEditGeneration.current += 1
+      setDraft(current => current === null ? current
+        : { ...current, values: { ...current.values, ...patch } })
+    }
+    const editDecisionRoute = patch => {
+      draftEditGeneration.current += 1
+      const values = draft?.values
+      if (values === undefined) return
+      const oldBackend = values.decisionBackend
+      const oldEndpoint = String(values.decisionEndpoint ?? '').trim()
+      const nextBackend = patch.decisionBackend ?? oldBackend
+      const nextEndpoint = String(patch.decisionEndpoint ?? values.decisionEndpoint ?? '').trim()
+      const routeChanged = nextBackend !== oldBackend || nextEndpoint !== oldEndpoint
+      if (routeChanged) {
+        decisionKeyGeneration.current += 1
+        setDecisionApiKeyDraft('')
+        invalidateDecisionDiscovery()
+      }
+      setDraft(current => {
+        if (current === null) return current
+        let binding = current.values.decisionSecretBinding ?? ''
+        // A legacy env reference with no explicit binding is accepted for its current saved route.
+        // Capture that route before a change so it cannot silently follow the reference elsewhere.
+        if (routeChanged && binding === '' && current.values.decisionSecretRef !== '') {
+          binding = JSON.stringify([oldBackend, oldEndpoint])
+        }
+        return { ...current, values: { ...current.values, ...patch,
+          ...(routeChanged ? { decisionSecretBinding: binding } : {}) } }
+      })
+    }
+    const editDecisionSecretRef = value => {
+      draftEditGeneration.current += 1
+      invalidateDecisionDiscovery()
+      setDraft(current => current === null ? current : { ...current, values: { ...current.values,
+        decisionSecretRef: value,
+        // Re-entering the Advanced reference is the explicit authorization to use it for this route.
+        decisionSecretBinding: JSON.stringify([current.values.decisionBackend,
+          String(current.values.decisionEndpoint ?? '').trim()]) } })
+    }
+    const editDecisionApiKey = value => {
+      decisionKeyGeneration.current += 1
+      setDecisionApiKeyDraft(value)
+      invalidateDecisionDiscovery()
+    }
+    const decisionRouteKey = values => JSON.stringify([
+      values?.decisionBackend ?? 'host', String(values?.decisionEndpoint ?? '').trim(),
+    ])
+    const decisionCredentialInputFor = (values, revision) => ({
+      backend: values?.decisionBackend ?? 'host', endpoint: String(values?.decisionEndpoint ?? '').trim(),
+      secretRef: typeof values?.decisionSecretRef === 'string' ? values.decisionSecretRef : '',
+      secretBinding: typeof values?.decisionSecretBinding === 'string' ? values.decisionSecretBinding : '',
+      settingsRevision: revision,
+    })
+    const currentDecisionCredentialInput = () => decisionCredentialInputFor(draft?.values, decisionRevision)
+    const decisionSettingsCurrent = () => {
+      if (form === undefined || draft === null || draft.stale === true || !Number.isSafeInteger(draft.revision)) return false
+      let current
+      try { current = form.getSnapshot() } catch { current = null }
+      return canWriteSettings(form, current) && current.revision === draft.revision
+    }
+    const decisionContextCurrent = contextKey => decisionContextRef.current === contextKey
+    const saveDecisionApiKey = async () => {
+      const contextKey = decisionContextKey
+      const routeContext = decisionRouteContext
+      const keyGeneration = decisionKeyGeneration.current
+      const apiKey = decisionApiKeyDraft
+      const input = currentDecisionCredentialInput()
+      if (!writable || draftIsStale || decisionRevision < 0 || !apiKey || decisionKeyBusy || settingsReloadBusy.current
+        || decisionCredentialBusy.current
+        || control === undefined || control === null) return
+      if (!decisionContextCurrent(contextKey) || decisionRouteRef.current !== routeContext) return
+      if (decisionEndpoint.trim() === '') {
+        setDecisionCredentialState({ kind: 'needs_endpoint' })
+        return
+      }
+      if (!decisionSettingsCurrent()) {
+        setDecisionCredentialState({ kind: 'error', code: 'settings_conflict' })
+        return
+      }
+      const operation = ++decisionCredentialOperation.current
+      decisionCredentialBusy.current = true
+      invalidateDecisionDiscovery()
+      setDecisionKeyBusy(true)
+      try {
+        const payload = await controlCall(control, 'setDecisionCredential', { ...input, apiKey })
+        if (decisionRouteRef.current !== routeContext) return
+        if (payload.ok !== true) {
+          setDecisionCredentialState({ kind: 'error', operation: 'save',
+            code: payload.code ?? 'credential_save_failed' })
+          return
+        }
+        const settingsChanged = payload.settingsChanged === true || !decisionContextCurrent(contextKey)
+          || !decisionSettingsCurrent()
+        if (decisionKeyGeneration.current === keyGeneration) setDecisionApiKeyDraft('')
+        if (settingsChanged) {
+          setDecisionCredentialState({ kind: 'saved', stored: true, settingsChanged: true })
+          return
+        }
+        setDecisionCredentialState({ kind: 'ready', payload: { serviceAvailable: true,
+          configured: true, stored: true, writable: true, legacyConfigured: false } })
+      } catch (error) {
+        if (decisionRouteRef.current === routeContext) {
+          setDecisionCredentialState({ kind: 'error', operation: 'save', code: failureCode(error) })
+        }
+      } finally {
+        if (decisionCredentialOperation.current === operation) {
+          decisionCredentialBusy.current = false
+          setDecisionKeyBusy(false)
+        }
+      }
+    }
+    const clearDecisionApiKey = async () => {
+      const contextKey = decisionContextKey
+      const routeContext = decisionRouteContext
+      const input = currentDecisionCredentialInput()
+      if (!writable || draftIsStale || decisionRevision < 0 || decisionKeyBusy || settingsReloadBusy.current
+        || decisionCredentialBusy.current
+        || control === undefined || control === null) return
+      if (!decisionContextCurrent(contextKey) || decisionRouteRef.current !== routeContext) return
+      if (!decisionSettingsCurrent()) {
+        setDecisionCredentialState({ kind: 'error', code: 'settings_conflict' })
+        return
+      }
+      const operation = ++decisionCredentialOperation.current
+      decisionCredentialBusy.current = true
+      invalidateDecisionDiscovery()
+      setDecisionKeyBusy(true)
+      try {
+        const payload = await controlCall(control, 'unsetDecisionCredential', input)
+        if (decisionRouteRef.current !== routeContext) return
+        if (payload.ok !== true) {
+          setDecisionCredentialState({ kind: 'error', code: payload.code ?? 'credential_remove_failed' })
+        } else if (payload.settingsChanged === true || !decisionContextCurrent(contextKey)
+          || !decisionSettingsCurrent()) {
+          setDecisionCredentialState({ kind: 'removed', settingsChanged: true })
+        } else {
+          setDecisionCredentialState({ kind: 'ready', payload: { serviceAvailable: true,
+            configured: payload.configured === true, stored: payload.stored === true,
+            writable: true, legacyConfigured: false } })
+        }
+      } catch (error) {
+        if (decisionRouteRef.current === routeContext) {
+          setDecisionCredentialState({ kind: 'error', code: failureCode(error) })
+        }
+      } finally {
+        if (decisionCredentialOperation.current === operation) {
+          decisionCredentialBusy.current = false
+          setDecisionKeyBusy(false)
+        }
+      }
+    }
+    const fetchDecisionModels = async () => {
+      const contextKey = decisionContextKey
+      const routeContext = decisionRouteContext
+      const keyGeneration = decisionKeyGeneration.current
+      const apiKey = decisionApiKeyDraft
+      const input = currentDecisionCredentialInput()
+      if (!writable || draftIsStale || decisionRevision < 0 || decisionBackend === 'host' || !decisionEndpoint.trim()
+        || control === undefined || control === null) return
+      if (!decisionContextCurrent(contextKey) || decisionRouteRef.current !== routeContext) return
+      if (!decisionSettingsCurrent()) {
+        setDecisionDiscovery({ kind: 'error', code: 'settings_conflict', models: [] })
+        return
+      }
+      const previous = decisionRequest.current
+      if (previous !== null) {
+        void controlCall(control, 'cancelDecisionDiscovery', { clientId: decisionClientId.current,
+          requestId: previous.requestId }).catch(() => {})
+      }
+      const requestId = makeRequestId()
+      decisionRequest.current = { requestId, contextKey, keyGeneration }
+      setDecisionDiscovery({ kind: 'loading', models: [] })
+      try {
+        const payload = await controlCall(control, 'discoverDecisionModels', {
+          ...input, clientId: decisionClientId.current, requestId,
+          ...(apiKey === '' ? {} : { apiKey }),
+        })
+        if (!decisionContextCurrent(contextKey) || decisionRequest.current?.requestId !== requestId
+          || decisionKeyGeneration.current !== keyGeneration || decisionRouteRef.current !== routeContext) return
+        decisionRequest.current = null
+        if (!decisionSettingsCurrent()) {
+          setDecisionDiscovery({ kind: 'error', code: 'settings_conflict', models: [] })
+          return
+        }
+        setDecisionDiscovery(payload.ok === true ? { kind: 'ready', ...payload }
+          : { kind: 'error', code: payload.code ?? 'model_discovery_failed', models: [] })
+      } catch (error) {
+        if (!decisionContextCurrent(contextKey) || decisionRequest.current?.requestId !== requestId
+          || decisionKeyGeneration.current !== keyGeneration || decisionRouteRef.current !== routeContext) return
+        decisionRequest.current = null
+        setDecisionDiscovery({ kind: 'error', code: failureCode(error), models: [] })
+      }
+    }
+    const decisionDiscoveryText = () => {
+      if (draftIsStale) return dict.draftStale
+      if (decisionDiscovery.kind === 'loading') return dict.decisionDiscovering
+      if (decisionDiscovery.kind === 'ready' && !decisionDiscovery.code) {
+        return fill(dict.decisionDiscoveryCodes.success, { count: decisionDiscovery.models?.length ?? 0 })
+      }
+      const code = decisionDiscovery.kind === 'idle' ? 'idle' : decisionDiscovery.code ?? 'failed'
+      return dict.decisionDiscoveryCodes[code] ?? dict.decisionDiscoveryCodes.failed
+    }
+    const decisionCredentialText = () => {
+      if (decisionKeyBusy) return dict.decisionSavingKey
+      if (decisionCredentialState.kind === 'saved' && decisionCredentialState.configNotSaved) {
+        return dict.decisionConfigNotSavedKeySaved
+      }
+      if (decisionCredentialState.kind === 'saved' && decisionCredentialState.settingsChanged) {
+        return dict.decisionCredentialSavedWithSettingsChange
+      }
+      if (draftIsStale) return dict.draftStale
+      if (decisionBackend !== 'host' && decisionEndpoint.trim() === '') return dict.decisionEndpointRequired
+      if (decisionCredentialState.kind === 'loading') return dict.loading
+      if (decisionCredentialState.kind === 'error') {
+        if (decisionCredentialState.code === 'settings_conflict') return dict.draftStale
+        if (decisionCredentialState.code === 'provider_secret_route_mismatch') return dict.decisionLegacyRebind
+        if (decisionCredentialState.code === 'invalid_endpoint'
+          || decisionCredentialState.code === 'invalid_decision_credential_request') return dict.decisionEndpointInvalid
+        if (decisionCredentialState.operation === 'save') return dict.decisionKeySaveFailed
+        return dict.decisionCredentialStatusUnavailable
+      }
+      if (decisionCredentialState.kind === 'removed' && decisionCredentialState.settingsChanged) {
+        return dict.decisionCredentialRemovedWithSettingsChange
+      }
+      const info = decisionCredentialState.payload
+      if (info?.serviceAvailable === false) return dict.decisionCredentialUnavailable
+      if (decisionCredentialState.kind === 'needs_endpoint') return dict.decisionEndpointRequired
+      if (info?.stored === true || decisionCredentialState.kind === 'saved') return dict.decisionSavedKey
+      if (info?.legacyRequiresRebind === true) return dict.decisionLegacyRebind
+      if (info?.configured === true || info?.legacyConfigured === true) return dict.decisionKeyFromEnv
+      return dict.decisionNoSavedKey
+    }
     const save = async () => {
-      if (draft === null || form === undefined) return
+      if (draft === null || form === undefined || saveState?.kind === 'saving' || formSaveBusy.current
+        || settingsReloadBusy.current) return
+      const submittedDraft = draft
+      const submittedValues = submittedDraft.values
+      const submittedRevision = submittedDraft.revision
+      const submittedDraftGeneration = draftGenerationAtRender
+      if (draftEditGeneration.current !== submittedDraftGeneration) {
+        setSaveState({ kind: 'changed_during_save' })
+        return
+      }
+      const submittedKeyGeneration = decisionKeyGeneration.current
+      const pendingApiKey = submittedValues.decisionBackend === 'host' ? '' : decisionApiKeyDraft
+      const submittedRoute = decisionRouteKey(submittedValues)
+      const credentialInput = decisionCredentialInputFor(submittedValues, submittedRevision)
       let currentSnapshot
       try { currentSnapshot = form.getSnapshot() } catch { currentSnapshot = null }
       if (!canWriteSettings(form, currentSnapshot)) {
         setSaveState({ kind: 'unavailable' })
         return
       }
-      const { ops, problems } = diffOps(draft.values, accepted)
+      if (submittedDraft.stale === true || !Number.isSafeInteger(submittedRevision)
+        || currentSnapshot.revision !== submittedRevision) {
+        setDraft(current => current === null ? current : { ...current, stale: true })
+        setDecisionCredentialState({ kind: 'error', code: 'settings_conflict' })
+        setSaveState({ kind: 'failed' })
+        return
+      }
+      const { ops, problems } = diffOps(submittedValues, currentSnapshot.value ?? accepted)
       if (problems.length > 0) { setSaveState({ kind: 'invalid', detail: problems.join('、') }); return }
-      if (ops.length === 0) { setSaveState({ kind: 'saved', count: 0 }); return }
+      if (ops.length === 0 && pendingApiKey === '') { setSaveState({ kind: 'saved', count: 0 }); return }
+      formSaveBusy.current = true
       setSaveState({ kind: 'saving' })
+      let keyWasSaved = false
+      let keyOperation = null
+      const configNotSaved = () => {
+        if (keyWasSaved) {
+          setDecisionCredentialState({ kind: 'saved', stored: true, configNotSaved: true })
+          setSaveState({ kind: 'key_saved_config_not_saved' })
+        } else {
+          setSaveState({ kind: 'failed' })
+        }
+      }
       try {
+        if (pendingApiKey !== '') {
+          if (control === undefined || control === null) {
+            setDecisionCredentialState({ kind: 'error', code: 'credential_service_unavailable' })
+            setSaveState({ kind: 'credential_failed' })
+            return
+          }
+          if (decisionCredentialBusy.current) {
+            setDecisionCredentialState({ kind: 'error', operation: 'save', code: 'credential_busy' })
+            setSaveState({ kind: 'credential_failed' })
+            return
+          }
+          if (!decisionSettingsCurrent()) {
+            setDecisionCredentialState({ kind: 'error', code: 'settings_conflict' })
+            setDraft(current => current === null ? current : { ...current, stale: true })
+            setSaveState({ kind: 'failed' })
+            return
+          }
+          keyOperation = ++decisionCredentialOperation.current
+          decisionCredentialBusy.current = true
+          invalidateDecisionDiscovery()
+          setDecisionKeyBusy(true)
+          const credential = await controlCall(control, 'setDecisionCredential', {
+            ...credentialInput, apiKey: pendingApiKey,
+          })
+          if (credential.ok !== true) {
+            if (credential.code === 'settings_conflict') {
+              if (decisionRouteRef.current === submittedRoute) {
+                setDecisionCredentialState({ kind: 'error', code: 'settings_conflict' })
+              }
+              setDraft(current => current === null ? current : { ...current, stale: true })
+              setSaveState({ kind: 'failed' })
+              return
+            }
+            if (decisionRouteRef.current === submittedRoute) {
+              setDecisionCredentialState({ kind: 'error', operation: 'save',
+                code: credential.code ?? 'credential_save_failed' })
+            }
+            setSaveState({ kind: 'credential_failed' })
+            return
+          }
+          keyWasSaved = true
+          const sameRoute = decisionRouteRef.current === submittedRoute
+          if (sameRoute && decisionKeyGeneration.current === submittedKeyGeneration) setDecisionApiKeyDraft('')
+          const settingsChanged = credential.settingsChanged === true || !decisionSettingsCurrent()
+          if (sameRoute) {
+            setDecisionCredentialState(settingsChanged
+              ? { kind: 'saved', stored: true, settingsChanged: true }
+              : { kind: 'ready', payload: { serviceAvailable: true, configured: true,
+                stored: true, writable: true, legacyConfigured: false } })
+          }
+          if (settingsChanged || draftEditGeneration.current !== submittedDraftGeneration
+            || decisionRouteRef.current !== submittedRoute) {
+            configNotSaved()
+            return
+          }
+        }
+
+        if (ops.length === 0) {
+          setSaveState({ kind: 'saved', count: 0 })
+          return
+        }
+        let beforeMutate
+        try { beforeMutate = form.getSnapshot() } catch { beforeMutate = null }
+        if (!canWriteSettings(form, beforeMutate) || beforeMutate.revision !== submittedRevision
+          || draftEditGeneration.current !== submittedDraftGeneration) {
+          if (beforeMutate?.revision !== submittedRevision) {
+            setDraft(current => current === null ? current : { ...current, stale: true })
+          }
+          configNotSaved()
+          return
+        }
         // One atomic mutate under the revision this draft was read at; `false` means the Host
         // refused (conflict or schema rejection) and the controller has already re-read it.
-        const ok = await form.mutate(ops, draft.revision)
-        if (ok !== true) { setSaveState({ kind: 'failed' }); return }
-        ownWrite.current = true
+        const ok = await form.mutate(ops, submittedRevision)
+        if (ok !== true) {
+          let after
+          try { after = form.getSnapshot() } catch { after = null }
+          if (after?.revision !== submittedRevision) {
+            setDraft(current => current === null ? current : { ...current, stale: true })
+          }
+          configNotSaved()
+          return
+        }
+        ownWrite.current = submittedDraftGeneration
         setSaveState({ kind: 'saved', count: ops.length })
         // "Saved" is a statement about the file, not about the running plugin. Re-read both the
         // runtime state and the read-only overview, and say so if that read fails, so a store
@@ -1875,13 +2436,66 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           if (before === 'error') setControlError(null)
         })()
       } catch (error) {
-        setSaveState({ kind: 'error', detail: String(error?.message ?? error).slice(0, 160) })
+        if (keyWasSaved) configNotSaved()
+        else if (pendingApiKey !== '') {
+          setDecisionCredentialState({ kind: 'error', operation: 'save', code: 'credential_save_failed' })
+          setSaveState({ kind: 'credential_failed' })
+        } else setSaveState({ kind: 'error', detail: String(error?.message ?? error).slice(0, 160) })
+      } finally {
+        formSaveBusy.current = false
+        if (keyOperation !== null && decisionCredentialOperation.current === keyOperation) {
+          decisionCredentialBusy.current = false
+          setDecisionKeyBusy(false)
+        }
       }
     }
-    const reseed = () => {
-      if (accepted === undefined) return
-      setDraft({ values: defaultDraft(accepted), revision: snapshot?.revision, from: accepted })
+    const reseed = async () => {
+      if (formSaveBusy.current || decisionCredentialBusy.current || settingsReloadBusy.current) return false
+      const editGeneration = draftEditGeneration.current
+      const keyGeneration = decisionKeyGeneration.current
+      settingsReloadBusy.current = true
+      setSaveState({ kind: 'reloading' })
+      let refreshed = null
+      try {
+        if (typeof settingsMirror?.load === 'function' && typeof settingsMirror?.getSnapshot === 'function') {
+          await settingsMirror.load()
+          const mirror = settingsMirror.getSnapshot()
+          const namespace = mirror?.view?.namespaces?.find(row => row?.ns === SETTINGS_ID)
+          let current
+          try { current = form?.getSnapshot() } catch { current = null }
+          // Host load() resolves even when the read failed. Require a clean mirror result and
+          // matching form revision before this action can discard a user's draft.
+          if (mirror?.status === 'ready' && mirror.error == null && Number.isSafeInteger(namespace?.revision)
+            && canWriteSettings(form, current) && current.revision === namespace.revision
+            && current.value !== null && typeof current.value === 'object') {
+            refreshed = current
+          }
+        }
+      } catch {
+        // An unsupported or failed read is not permission to clear the draft.
+      } finally {
+        settingsReloadBusy.current = false
+      }
+      if (refreshed === null) {
+        setSaveState({ kind: 'error', detail: dict.settingsReloadFailed })
+        return false
+      }
+      // The mirror notifies subscribers while load() is in flight. Preserve any input made
+      // during that wait rather than reseeding over the newer local draft.
+      if (draftEditGeneration.current !== editGeneration || decisionKeyGeneration.current !== keyGeneration) {
+        setSaveState({ kind: 'error', detail: dict.settingsReloadFailed })
+        return false
+      }
+      decisionContextRef.current = ''
+      setDecisionCredentialReloadGeneration(current => current + 1)
+      setDecisionCredentialState({ kind: 'loading' })
+      decisionKeyGeneration.current += 1
+      setDecisionApiKeyDraft('')
+      invalidateDecisionDiscovery()
+      draftEditGeneration.current += 1
+      setDraft({ values: defaultDraft(refreshed.value), revision: refreshed.revision, from: refreshed.value })
       setSaveState(null)
+      return true
     }
 
     const openDetail = async id => {
@@ -1957,10 +2571,24 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     // ---------------------------------------------------------------- shared pieces
     // Whether the draft differs from what the Host holds. A save is offered only then, and the
     // discard control is the mirror image of the same fact.
-    const dirtyNow = draft !== null && accepted !== undefined && diffOps(draft.values, accepted).ops.length > 0
+    const dirtyNow = draft !== null && accepted !== undefined
+      && (diffOps(draft.values, accepted).ops.length > 0 || decisionKeyPending)
+    const discardDraft = () => {
+      if (!writable || !dirtyNow || saveState?.kind === 'saving' || saveState?.kind === 'reloading' || formSaveBusy.current
+        || settingsReloadBusy.current
+        || decisionKeyBusy || decisionCredentialBusy.current || draft === null || accepted === undefined) return
+      draftEditGeneration.current += 1
+      decisionKeyGeneration.current += 1
+      setDecisionApiKeyDraft('')
+      invalidateDecisionDiscovery()
+      setDraft(current => current === null ? current : { values: defaultDraft(accepted),
+        revision: snapshot?.revision, from: accepted, stale: false })
+      setSaveState(null)
+    }
     const saveRow = (() => {
       const feedback = saveState === null ? null
         : saveState.kind === 'saving' ? h('span', { key: 'f', className: 'mse-hint' }, dict.saving)
+          : saveState.kind === 'reloading' ? h('span', { key: 'f', className: 'mse-hint' }, dict.settingsReloading)
           : saveState.kind === 'saved' ? h('span', { key: 'f', className: 'mse-ok' },
             controlState?.status === 'ready' && controlState.payload.runtime?.durable?.pause?.pending
               ? fill(dict.savedButControlPending, {
@@ -1968,32 +2596,41 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
               : dict.saved)
             // A refused write is not a validation problem we can name: the controller has already
             // re-read the document, so the honest next step is to look at the host's values again.
-            : saveState.kind === 'unavailable' ? h('span', { key: 'f', className: 'mse-error' }, dict.saveUnavailable)
+            : saveState.kind === 'key_saved_config_not_saved'
+              ? h('span', { key: 'f', className: 'mse-error' }, dict.decisionConfigNotSavedKeySaved)
+              : saveState.kind === 'credential_failed'
+                ? h('span', { key: 'f', className: 'mse-error' }, dict.decisionKeySaveFailed)
+                : saveState.kind === 'changed_during_save'
+                  ? h('span', { key: 'f', className: 'mse-error' }, dict.decisionSettingsChangedDuringSave)
+                : saveState.kind === 'unavailable' ? h('span', { key: 'f', className: 'mse-error' }, dict.saveUnavailable)
               : saveState.kind === 'failed' ? h('span', { key: 'f', className: 'mse-error' }, dict.reloadNeeded)
               : saveState.kind === 'invalid' ? h('span', { key: 'f', className: 'mse-error' },
                 fill(dict.saveFailed, { reason: saveState.detail }))
                 : h('span', { key: 'f', className: 'mse-error' },
                   fill(dict.saveFailed, { reason: saveState.detail ?? dict.unknownError }))
-      const note = draft !== null && draft.stale === true ? dict.draftStale
+      const note = draftIsStale ? dict.draftStale
         : form === undefined || snapshot === null || snapshot.status !== 'ready' ? dict.configUnavailable
           : !writable ? dict.saveUnavailable : null
-      return h('div', { key: 'save', className: 'mse-row' }, [
+      return h('div', { key: 'save', className: 'mse-row mse-save-footer' }, [
         h('div', { key: 'main', className: 'mse-row-main' }, [
           h('div', { key: 'n', className: 'mse-notice', 'aria-live': 'polite' },
             note === null ? feedback ?? (dirtyNow ? dict.unsaved : '') : note),
           note !== null && feedback !== null ? h('div', { key: 'f', className: 'mse-notice' }, feedback) : null,
         ]),
         h('div', { key: 'side', className: 'mse-row-side' }, [
-          draft !== null && draft.stale === true
-            ? h(Button, { key: 'reload', variant: 'ghost', size: 'sm', onClick: reseed }, dict.reloadHost) : null,
-          saveState?.kind === 'failed'
-            ? h(Button, { key: 'reread', variant: 'ghost', size: 'sm', onClick: () => { reseed(); void reloadControl() } },
-              dict.reloadHost) : null,
-          h(Button, { key: 'discard', variant: 'ghost', size: 'sm', disabled: !writable || !dirtyNow,
-            onClick: () => setDraft(current => current === null ? current
-              : { ...current, values: { ...accepted }, stale: false }) }, dict.discard),
+          draftIsStale || saveState?.kind === 'failed'
+            ? h(Button, { key: 'reload', variant: 'ghost', size: 'sm', disabled: saveState?.kind === 'reloading', onClick: () => {
+              const reloadRuntime = saveState?.kind === 'failed'
+              reseed()
+              if (reloadRuntime) void reloadControl()
+            } }, dict.reloadHost) : null,
+          h(Button, { key: 'discard', variant: 'ghost', size: 'sm', disabled: !writable || !dirtyNow
+            || saveState?.kind === 'saving' || saveState?.kind === 'reloading' || formSaveBusy.current || decisionKeyBusy
+            || decisionCredentialBusy.current, onClick: discardDraft }, dict.discard),
           h(Button, { key: 'save', variant: 'primary', size: 'sm',
-            disabled: !writable || saveState?.kind === 'saving' || !dirtyNow, onClick: () => { void save() } },
+            disabled: !writable || draftIsStale || saveState?.kind === 'saving' || saveState?.kind === 'reloading'
+              || !dirtyNow,
+            onClick: () => { void save() } },
           saveState?.kind === 'saving' ? dict.saving : dict.save),
         ]),
       ])
@@ -2500,18 +3137,18 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       draft === null ? h('p', { key: 'l', className: 'mse-note' }, dict.loading) : h('div', { key: 'rows' }, [
         h('p', { key: 'tier-label', className: 'mse-hint' }, fill(dict.evalTierStatus,
           { tier: draftTier?.label ?? dict.evalTierCustom })),
-        h('div', { key: 'tiers', className: 'mse-actions', 'aria-label': dict.evalTier }, budgetTiers.map(tier =>
-          h(Button, { key: tier.id, variant: draftTier?.id === tier.id ? 'primary' : 'outline', size: 'sm',
+        h('div', { key: 'tiers', className: 'mse-budget-presets', 'aria-label': dict.evalTier }, budgetTiers.map(tier =>
+          h(Button, { key: tier.id, className: 'mse-budget-preset', variant: draftTier?.id === tier.id ? 'primary' : 'outline', size: 'sm',
             disabled: !writable, onClick: () => edit({ evaluationTokensPerDay: String(tier.tokens),
               evaluationCallsPerDay: String(tier.calls) }) }, tier.label))),
         row('tokens', dict.evalTokens, null,
           h(Input, { type: 'number', min: 0, max: EVAL_TOKENS_MAX, step: 1000, disabled: !writable,
-            className: 'mse-num-wide', 'aria-label': dict.evalTokens, value: draft.values.evaluationTokensPerDay,
-            onChange: event => edit({ evaluationTokensPerDay: event.target.value }) })),
+            className: 'mse-budget-value', 'aria-label': dict.evalTokens, value: draft.values.evaluationTokensPerDay,
+            onChange: event => edit({ evaluationTokensPerDay: event.target.value }) }), { className: 'mse-budget-row' }),
         row('calls', dict.evalCalls, null,
           h(Input, { type: 'number', min: 0, max: EVAL_CALLS_MAX, step: 1, disabled: !writable,
-            className: 'mse-num', 'aria-label': dict.evalCalls, value: draft.values.evaluationCallsPerDay,
-            onChange: event => edit({ evaluationCallsPerDay: event.target.value }) })),
+            className: 'mse-budget-value', 'aria-label': dict.evalCalls, value: draft.values.evaluationCallsPerDay,
+            onChange: event => edit({ evaluationCallsPerDay: event.target.value }) }), { className: 'mse-budget-row' }),
         h('div', { key: 'decision-settings', className: 'mse-decision-settings' }, [
           sectionTitle('decision-title', dict.decisionModel),
           h('div', { key: 'decision-source', className: 'mse-decision-source' }, [
@@ -2522,7 +3159,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
                 { id: 'openai_compatible', label: dict.decisionBackendOpenAI },
                 { id: 'jev', label: dict.decisionBackendJev },
                 { id: 'laya', label: dict.decisionBackendLaya },
-              ], onChange: decisionBackend => edit({ decisionBackend }), disabled: !writable,
+              ], onChange: decisionBackend => editDecisionRoute({ decisionBackend }),
+              disabled: !writable || saveState?.kind === 'saving',
               testId: 'decision-source', className: 'mse-picker-wide' }),
           ]),
           draft.values.decisionBackend === 'host'
@@ -2530,17 +3168,69 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
               dict.decisionHostCapability)
             : h('div', { key: 'decision-fields', className: 'mse-decision-fields' }, [
               row('decision-model', dict.decisionModelField, dict.decisionRemoteModelHint,
-                h(Input, { disabled: !writable, maxLength: 128, className: 'mse-decision-input',
+                h(Input, { disabled: !writable || saveState?.kind === 'saving', maxLength: 128,
+                  className: 'mse-decision-input',
                   'aria-label': dict.decisionModelField, value: draft.values.decisionModel,
                   onChange: event => edit({ decisionModel: event.target.value }) }), { stacked: true }),
+              decisionDiscovery.models?.length > 0
+                ? row('decision-model-list', dict.decisionModels, null,
+                  h(Picker, { label: dict.decisionChooseModel,
+                    value: decisionDiscovery.models.some(model => model.id === draft.values.decisionModel)
+                      ? draft.values.decisionModel : '',
+                    options: [{ id: '', label: dict.decisionChooseModel },
+                      ...decisionDiscovery.models.map(model => ({ id: model.id, label: model.id }))],
+                    onChange: decisionModel => edit({ decisionModel }),
+                    disabled: !writable || saveState?.kind === 'saving',
+                    testId: 'decision-model-list', className: 'mse-picker-wide' }), { stacked: true }) : null,
+              draft.values.decisionBackend === 'laya'
+                ? h('div', { key: 'decision-auto-model', className: 'mse-decision-actions' },
+                  h(Button, { variant: draft.values.decisionModel === 'auto' ? 'primary' : 'outline', size: 'sm',
+                    disabled: !writable || saveState?.kind === 'saving',
+                    onClick: () => edit({ decisionModel: 'auto' }) }, dict.decisionAutoModel)) : null,
               row('decision-endpoint', dict.decisionEndpoint, null, h(Input, {
-                disabled: !writable, maxLength: 2048, className: 'mse-decision-input', inputMode: 'url',
+                disabled: !writable || saveState?.kind === 'saving', maxLength: 2048,
+                className: 'mse-decision-input', inputMode: 'url',
                 'aria-label': dict.decisionEndpoint, value: draft.values.decisionEndpoint,
-                onChange: event => edit({ decisionEndpoint: event.target.value }) }), { stacked: true }),
-              row('decision-secret', dict.decisionSecretRef, dict.decisionSecretRefHint,
-                h(Input, { disabled: !writable, maxLength: 256, className: 'mse-decision-input',
-                  'aria-label': dict.decisionSecretRef, value: draft.values.decisionSecretRef,
-                  onChange: event => edit({ decisionSecretRef: event.target.value }) }), { stacked: true }),
+                onChange: event => editDecisionRoute({ decisionEndpoint: event.target.value }) }), { stacked: true }),
+              row('decision-api-key', dict.decisionApiKey, dict.decisionApiKeyHint,
+                h('div', { className: 'mse-decision-key' }, [
+                  h(Input, { key: 'input', type: 'password', autoComplete: 'new-password',
+                    disabled: !writable || decisionKeyBusy || saveState?.kind === 'saving',
+                    maxLength: 4096, className: 'mse-decision-input', 'aria-label': dict.decisionApiKey,
+                    placeholder: dict.decisionApiKeyPlaceholder, value: decisionApiKeyDraft,
+                    onChange: event => editDecisionApiKey(event.target.value) }),
+                  h('div', { key: 'actions', className: 'mse-decision-actions' }, [
+                    h(Button, { key: 'save-key', variant: 'outline', size: 'sm',
+                    disabled: !writable || draftIsStale || decisionKeyBusy || saveState?.kind === 'saving'
+                      || saveState?.kind === 'reloading'
+                      || decisionApiKeyDraft === ''
+                        || decisionCredentialState.payload?.serviceAvailable !== true
+                        || decisionCredentialState.payload?.writable !== true,
+                      onClick: () => { void saveDecisionApiKey() } }, dict.decisionSaveKey),
+                    h(Button, { key: 'clear-key', variant: 'ghost', size: 'sm',
+                    disabled: !writable || draftIsStale || decisionKeyBusy || saveState?.kind === 'saving'
+                      || saveState?.kind === 'reloading'
+                      || decisionCredentialState.payload?.stored !== true,
+                      onClick: () => { void clearDecisionApiKey() } }, dict.decisionClearKey),
+                  ]),
+                  h('p', { key: 'status', className: 'mse-decision-status', role: 'status' }, decisionCredentialText()),
+                ]), { stacked: true }),
+              h('div', { key: 'decision-discovery', className: 'mse-decision-discovery' }, [
+                h('div', { key: 'actions', className: 'mse-decision-actions' },
+                h(Button, { variant: 'outline', size: 'sm', disabled: !writable || draftIsStale
+                    || decisionKeyBusy || saveState?.kind === 'saving' || decisionDiscovery.kind === 'loading'
+                    || decisionEndpoint.trim() === '' || control === undefined || control === null,
+                  onClick: () => { void fetchDecisionModels() } }, dict.decisionDiscover)),
+                h('p', { key: 'status', className: 'mse-decision-status', role: 'status' }, decisionDiscoveryText()),
+                h('p', { key: 'hint', className: 'mse-hint' }, dict.decisionDiscoveryHint),
+              ]),
+              disclosure('decision-advanced', dict.decisionAdvanced, [
+                row('decision-secret', dict.decisionSecretRef, dict.decisionSecretRefHint,
+                  h(Input, { disabled: !writable || saveState?.kind === 'saving', maxLength: 256,
+                    className: 'mse-decision-input',
+                    'aria-label': dict.decisionSecretRef, value: draft.values.decisionSecretRef,
+                    onChange: event => editDecisionSecretRef(event.target.value) }), { stacked: true }),
+              ]),
               h('p', { key: 'decision-status', className: 'mse-decision-status', role: 'status' },
                 draft.values.decisionModel.trim() !== '' && draft.values.decisionEndpoint.trim() !== ''
                   ? dict.decisionRemoteReady : dict.decisionRemoteIncomplete),
@@ -2975,6 +3665,10 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         inject: () => ({ call, control, locale: locale(), hooks: { locale: ctx.locale } }),
       }, BundlePage))
       const form = ctx.configForms.get(SETTINGS_ID)
+      let settingsMirror = null
+      try {
+        if (typeof ctx.configForms.describe === 'function') settingsMirror = ctx.configForms.describe()
+      } catch { settingsMirror = null }
       // The section exists only while the host actually serves this namespace, so a profile
       // without the row never shows a page whose switches could not be saved.
       ctx.effect(() => ctx.configForms.whileServed([SETTINGS_ID], () => scope.slots.inject('settings.section',
@@ -2984,7 +3678,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           order: 66,
           label: () => (locale() === 'en' ? 'Self-evolution' : '自我进化'),
           locale: NS,
-          inject: () => ({ call, control, form, locale: locale(), hooks: { locale: ctx.locale } }),
+          inject: () => ({ call, control, form, settingsMirror, locale: locale(), hooks: { locale: ctx.locale } }),
         }, SettingsSection))))
     })
   }

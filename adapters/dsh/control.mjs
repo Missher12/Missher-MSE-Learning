@@ -29,12 +29,18 @@ import { CHECKER_KINDS, normalizeCases, scoreOutput, MAX_CASES, MIN_CASES } from
 import { CALL_DEADLINE_MS, JOB_DEADLINE_MS } from './jobs.mjs'
 import { usageTokens } from './usage.mjs'
 import { planIdentity } from './plan-identity.mjs'
+import { decisionCredentialRef, decisionEndpointError, discoverDecisionModels as discoverModelsFromEndpoint } from '../../src/decision-providers.mjs'
 import { latestRoute, readTurns, reviewability, outcomeOf, MAX_TURNS_LISTED } from './session-digest.mjs'
 import { bool, boundedList, int, oneOf, text } from './project.mjs'
 
 const ENDPOINTS = ['status', 'turns', 'planReview', 'startReview', 'planEvaluation', 'startEvaluation', 'job', 'cancel',
-  'authorizeProblemRecoveryRetry']
+  'authorizeProblemRecoveryRetry', 'describeDecisionCredential', 'setDecisionCredential', 'unsetDecisionCredential',
+  'discoverDecisionModels', 'cancelDecisionDiscovery']
 export const CONTROL_NAMESPACE = 'mseControl'
+const SETTINGS_NAMESPACE = 'mse-learning'
+const SECRET_REF = /^[A-Za-z_][A-Za-z0-9_]{0,254}$/u
+const DISCOVERY_CLIENT_ID = /^[A-Za-z0-9_-]{16,96}$/u
+const DISCOVERY_REQUEST_ID = /^[A-Za-z0-9_.:-]{8,96}$/u
 
 /** Token accounting bound for one paired model call (prompt + answer), not an output cap. */
 export const PER_CALL_TOKENS = 1500
@@ -171,6 +177,226 @@ export class MseControl extends TypertRemoteService {
   constructor(ctx) {
     super(ctx, CONTROL_NAMESPACE)
     this.version = 'unknown'
+    this.decisionDiscoveries = new Map()
+    this.decisionControlDisposed = false
+    if (typeof ctx.effect === 'function') {
+      ctx.effect(() => () => this.disposeDecisionDiscoveries(), 'mse-learning: cancel model discovery on unload')
+    }
+  }
+
+  /** Host settings writability and revision are checked again at the credential boundary. */
+  settingsRevision(input) {
+    if (!Number.isSafeInteger(input?.settingsRevision) || input.settingsRevision < 0) {
+      return { ok: false, code: 'invalid_settings_revision' }
+    }
+    let settings
+    try { settings = this.ctx.get('settings') } catch { settings = null }
+    if (settings === null || settings === undefined || settings.writable !== true
+      || typeof settings.describe !== 'function') return { ok: false, code: 'settings_unavailable' }
+    let rows
+    try {
+      const described = settings.describe({ redactSecrets: true })
+      rows = Array.isArray(described) ? described : described?.namespaces
+    } catch { return { ok: false, code: 'settings_unavailable' } }
+    const row = Array.isArray(rows) ? rows.find(item => item?.ns === SETTINGS_NAMESPACE) : null
+    if (!row || !Number.isSafeInteger(row.revision)) return { ok: false, code: 'settings_unavailable' }
+    if (row.revision !== input.settingsRevision) return { ok: false, code: 'settings_conflict' }
+    return { ok: true, settings, row }
+  }
+
+  /** Parse only route metadata and the environment-reference name; never accept credentials as config. */
+  decisionCredentialInput(input, allowedKeys) {
+    if (!isPlainObject(input) || Object.keys(input).some(key => !allowedKeys.includes(key))) {
+      return { ok: false, code: 'invalid_decision_credential_request' }
+    }
+    const backend = input.backend
+    const endpoint = input.endpoint
+    const secretRef = input.secretRef ?? ''
+    const secretBinding = input.secretBinding ?? ''
+    if (!['openai_compatible', 'jev', 'laya'].includes(backend)
+      || typeof endpoint !== 'string' || endpoint.length === 0 || endpoint.length > 2048
+      || typeof secretRef !== 'string' || secretRef.length > 256
+      || typeof secretBinding !== 'string' || secretBinding.length > 4096
+      || (secretRef !== '' && !SECRET_REF.test(secretRef))) {
+      return { ok: false, code: 'invalid_decision_credential_request' }
+    }
+    const endpointError = decisionEndpointError(backend, endpoint)
+    if (endpointError) return { ok: false, code: endpointError }
+    try {
+      let legacyAllowed = secretBinding === ''
+      if (!legacyAllowed) {
+        try {
+          const bound = JSON.parse(secretBinding)
+          legacyAllowed = Array.isArray(bound) && bound.length === 2
+            && decisionCredentialRef(bound[0], bound[1]) === decisionCredentialRef(backend, endpoint)
+        } catch { legacyAllowed = false }
+      }
+      return { ok: true, backend, endpoint, secretRef, secretBinding, legacyAllowed,
+        routeRef: decisionCredentialRef(backend, endpoint) }
+    } catch { return { ok: false, code: 'invalid_endpoint' } }
+  }
+
+  credentials() {
+    try {
+      const service = this.ctx.get('credentials')
+      return service !== undefined && service !== null ? service : null
+    } catch { return null }
+  }
+
+  /** Return metadata only; a credential value never crosses the Remote read path. */
+  async describeDecisionCredential(input = {}) {
+    const parsed = this.decisionCredentialInput(input, ['backend', 'endpoint', 'secretRef', 'secretBinding', 'settingsRevision'])
+    if (!parsed.ok) return parsed
+    const gate = this.settingsRevision(input)
+    if (!gate.ok) return gate
+    const credentials = this.credentials()
+    if (credentials === null || typeof credentials.describe !== 'function') {
+      return { ok: true, serviceAvailable: false, configured: false, stored: false,
+        legacyConfigured: false, writable: false }
+    }
+    try {
+      const meta = await credentials.describe(parsed.routeRef)
+      const legacy = parsed.secretRef === '' || !parsed.legacyAllowed ? null : await credentials.describe(parsed.secretRef)
+      return { ok: true, serviceAvailable: true, configured: meta?.configured === true,
+        stored: meta?.configured === true && meta?.source === 'file',
+        source: ['file', 'env', 'dotenv', 'home-dotenv'].includes(meta?.source) ? meta.source : null,
+        writable: meta?.writable === true,
+        legacyConfigured: legacy?.configured === true,
+        legacySource: ['file', 'env', 'dotenv', 'home-dotenv'].includes(legacy?.source) ? legacy.source : null,
+        legacyRequiresRebind: parsed.secretRef !== '' && !parsed.legacyAllowed }
+    } catch { return { ok: false, code: 'credential_status_unavailable' } }
+  }
+
+  /** Save the key under a hash-derived reference for this backend and canonical endpoint only. */
+  async setDecisionCredential(input = {}) {
+    const parsed = this.decisionCredentialInput(input, ['backend', 'endpoint', 'secretRef', 'secretBinding', 'settingsRevision', 'apiKey'])
+    if (!parsed.ok) return parsed
+    if (typeof input.apiKey !== 'string' || input.apiKey.length === 0 || input.apiKey.length > 4096) {
+      return { ok: false, code: 'invalid_api_key' }
+    }
+    const gate = this.settingsRevision(input)
+    if (!gate.ok) return gate
+    const credentials = this.credentials()
+    if (credentials === null || typeof credentials.set !== 'function') {
+      return { ok: false, code: 'credential_service_unavailable' }
+    }
+    try { await credentials.set(parsed.routeRef, input.apiKey) }
+    catch { return { ok: false, code: 'credential_save_failed' } }
+    const after = this.settingsRevision(input)
+    if (!after.ok) return { ok: true, configured: true, stored: true,
+      code: 'settings_changed_after_credential_save', settingsChanged: true }
+    return { ok: true, configured: true, stored: true }
+  }
+
+  /** Remove only the route-derived MSE credential, never an environment reference or another route. */
+  async unsetDecisionCredential(input = {}) {
+    const parsed = this.decisionCredentialInput(input, ['backend', 'endpoint', 'secretRef', 'secretBinding', 'settingsRevision'])
+    if (!parsed.ok) return parsed
+    const gate = this.settingsRevision(input)
+    if (!gate.ok) return gate
+    const credentials = this.credentials()
+    if (credentials === null || typeof credentials.describe !== 'function' || typeof credentials.unset !== 'function') {
+      return { ok: false, code: 'credential_service_unavailable' }
+    }
+    try {
+      const meta = await credentials.describe(parsed.routeRef)
+      if (meta?.source === 'file') await credentials.unset(parsed.routeRef)
+    } catch { return { ok: false, code: 'credential_remove_failed' } }
+    const after = this.settingsRevision(input)
+    if (!after.ok) return { ok: true, configured: false, stored: false,
+      code: 'settings_changed_after_credential_remove', settingsChanged: true }
+    let remaining = null
+    try { remaining = await credentials.describe(parsed.routeRef) }
+    catch { return { ok: false, code: 'credential_status_unavailable' } }
+    return { ok: true, configured: remaining?.configured === true,
+      stored: remaining?.configured === true && remaining?.source === 'file' }
+  }
+
+  async resolveDecisionApiKey(routeRef, secretRef, legacyAllowed) {
+    const credentials = this.credentials()
+    const resolve = async ref => {
+      if (credentials !== null && typeof credentials.resolve === 'function') {
+        const found = await credentials.resolve(ref)
+        if (typeof found?.value === 'string' && found.value.length > 0) return found.value
+        return null
+      }
+      const value = process.env[ref]
+      return typeof value === 'string' && value.length > 0 ? value : null
+    }
+    try {
+      const routeKey = await resolve(routeRef)
+      if (routeKey !== null) return { ok: true, apiKey: routeKey }
+      if (secretRef === '') return { ok: true, apiKey: undefined }
+      if (!legacyAllowed) return { ok: false, code: 'provider_secret_route_mismatch' }
+      const legacy = await resolve(secretRef)
+      return legacy === null ? { ok: false, code: 'provider_secret_unavailable' }
+        : { ok: true, apiKey: legacy }
+    } catch { return { ok: false, code: 'credential_resolution_failed' } }
+  }
+
+  /** Read the provider's advertised model directory only; this never reserves a decision or calls inference. */
+  async discoverDecisionModels(input = {}) {
+    const parsed = this.decisionCredentialInput(input, ['backend', 'endpoint', 'secretRef', 'secretBinding',
+      'settingsRevision', 'clientId', 'requestId', 'apiKey'])
+    if (!parsed.ok) return parsed
+    if (typeof input.clientId !== 'string' || !DISCOVERY_CLIENT_ID.test(input.clientId)
+      || typeof input.requestId !== 'string' || !DISCOVERY_REQUEST_ID.test(input.requestId)) {
+      return { ok: false, code: 'invalid_discovery_request' }
+    }
+    const gate = this.settingsRevision(input)
+    if (!gate.ok) return gate
+    if (this.decisionControlDisposed) return { ok: false, code: 'cancelled' }
+    const previous = this.decisionDiscoveries.get(input.clientId)
+    if (previous !== undefined) previous.controller.abort()
+    else if (this.decisionDiscoveries.size >= 16) return { ok: false, code: 'model_discovery_busy' }
+    const entry = { requestId: input.requestId, controller: new AbortController() }
+    this.decisionDiscoveries.set(input.clientId, entry)
+    try {
+      if (input.apiKey !== undefined && (typeof input.apiKey !== 'string' || input.apiKey.length === 0
+        || input.apiKey.length > 4096)) return { ok: false, code: 'invalid_api_key' }
+      const secret = input.apiKey === undefined
+        ? await this.resolveDecisionApiKey(parsed.routeRef, parsed.secretRef, parsed.legacyAllowed)
+        : { ok: true, apiKey: input.apiKey }
+      if (!secret.ok) return secret
+      const beforeFetch = this.settingsRevision(input)
+      if (!beforeFetch.ok) return beforeFetch
+      if (this.decisionControlDisposed || entry.controller.signal.aborted
+        || this.decisionDiscoveries.get(input.clientId) !== entry) return { ok: false, code: 'cancelled' }
+      const result = await discoverModelsFromEndpoint({ backend: parsed.backend, endpoint: parsed.endpoint,
+        ...(secret.apiKey === undefined ? {} : { apiKey: secret.apiKey }), signal: entry.controller.signal })
+      const after = this.settingsRevision(input)
+      if (!after.ok) return after
+      if (this.decisionDiscoveries.get(input.clientId) !== entry) return { ok: false, code: 'cancelled' }
+      return result
+    } catch (error) {
+      const code = ['cancelled', 'model_discovery_not_supported', 'model_discovery_auth_required',
+        'model_discovery_http_error', 'model_discovery_invalid_response', 'model_discovery_timeout',
+        'model_discovery_failed', 'provider_response_too_large', 'provider_invalid_json',
+        'provider_response_unbounded',
+        'provider_secret_unavailable', 'credential_resolution_failed', 'insecure_endpoint',
+        'invalid_endpoint'].includes(error?.message) ? error.message : 'model_discovery_failed'
+      return { ok: false, code }
+    } finally {
+      if (this.decisionDiscoveries.get(input.clientId) === entry) this.decisionDiscoveries.delete(input.clientId)
+    }
+  }
+
+  cancelDecisionDiscovery(input = {}) {
+    if (!isPlainObject(input) || Object.keys(input).some(key => !['clientId', 'requestId'].includes(key))
+      || typeof input.clientId !== 'string' || !DISCOVERY_CLIENT_ID.test(input.clientId)
+      || typeof input.requestId !== 'string' || !DISCOVERY_REQUEST_ID.test(input.requestId)) {
+      return { ok: false, code: 'invalid_discovery_request' }
+    }
+    const current = this.decisionDiscoveries.get(input.clientId)
+    if (current?.requestId !== input.requestId) return { ok: true, cancelled: false }
+    current.controller.abort()
+    return { ok: true, cancelled: true }
+  }
+
+  disposeDecisionDiscoveries() {
+    this.decisionControlDisposed = true
+    for (const entry of this.decisionDiscoveries.values()) entry.controller.abort()
+    this.decisionDiscoveries.clear()
   }
 
   /** The learning core, or null while it is unloaded. Never throws. */

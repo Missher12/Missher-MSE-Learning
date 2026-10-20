@@ -12,7 +12,7 @@ import { apply as applyDetails } from './details.mjs'
 import { apply as applyControl, readModel, REFLECTION_OUTPUT_BYTES } from './control.mjs'
 import { CALL_DEADLINE_MS, JobQueue } from './jobs.mjs'
 import { createAutoValidation } from './auto.mjs'
-import { decisionEndpointError, requestDecision } from '../../src/decision-providers.mjs'
+import { decisionCredentialRef, decisionEndpointError, requestDecision } from '../../src/decision-providers.mjs'
 import { PROBLEM_DEFER_PLAN_CODES } from '../../src/problems.mjs'
 import { latestRoute } from './session-digest.mjs'
 import { getDomainPack, listDomainPacks, packAdmits, packCaseCriteriaHash, packCases, packScenarioHash,
@@ -376,6 +376,7 @@ export function apply(ctx, config = {}) {
     decisionModel: String(readVolatile(config, 'decisionModel', '') ?? '').slice(0, 128),
     decisionEndpoint: String(readVolatile(config, 'decisionEndpoint', '') ?? '').slice(0, 2048),
     decisionSecretRef: String(readVolatile(config, 'decisionSecretRef', '') ?? '').slice(0, 256),
+    decisionSecretBinding: String(readVolatile(config, 'decisionSecretBinding', '') ?? '').slice(0, 4096),
   })
   const initial = readPolicy()
   // Environment identity stays the SDK default (`default`) unless the operator opts
@@ -1409,10 +1410,41 @@ export function apply(ctx, config = {}) {
         if (endpointError) return { ok: false, code: endpointError }
         endpoint = new URL(policy.decisionEndpoint)
       }
-      const secretRef = policy.decisionSecretRef
-      if (backend !== 'host' && secretRef !== '' && (!/^[A-Za-z_][A-Za-z0-9_]{0,254}$/u.test(secretRef)
-        || typeof process.env[secretRef] !== 'string' || process.env[secretRef] === '')) {
-        return { ok: false, code: 'provider_secret_unavailable' }
+      let secretRef = ''
+      let credentials = null
+      try { credentials = ctx.get('credentials') ?? null } catch { credentials = null }
+      const configuredSecret = async ref => {
+        if (!/^[A-Za-z_][A-Za-z0-9_]{0,254}$/u.test(ref)) return false
+        if (credentials !== null && typeof credentials.describe === 'function'
+          && typeof credentials.resolve === 'function') {
+          const described = await credentials.describe(ref)
+          return described?.configured === true
+        }
+        return typeof process.env[ref] === 'string' && process.env[ref] !== ''
+      }
+      if (backend !== 'host') {
+        let routeCredentialRef
+        try { routeCredentialRef = decisionCredentialRef(backend, policy.decisionEndpoint) }
+        catch { return { ok: false, code: 'invalid_endpoint' } }
+        try {
+          if (await configuredSecret(routeCredentialRef)) secretRef = routeCredentialRef
+          else if (policy.decisionSecretRef !== '') {
+            let legacyAllowed = policy.decisionSecretBinding === ''
+            if (!legacyAllowed) {
+              try {
+                const bound = JSON.parse(policy.decisionSecretBinding)
+                legacyAllowed = Array.isArray(bound) && bound.length === 2
+                  && decisionCredentialRef(bound[0], bound[1]) === routeCredentialRef
+              } catch { legacyAllowed = false }
+            }
+            if (!legacyAllowed) return { ok: false, code: 'provider_secret_route_mismatch' }
+            if (!/^[A-Za-z_][A-Za-z0-9_]{0,254}$/u.test(policy.decisionSecretRef)
+              || !await configuredSecret(policy.decisionSecretRef)) {
+              return { ok: false, code: 'provider_secret_unavailable' }
+            }
+            secretRef = policy.decisionSecretRef
+          }
+        } catch { return { ok: false, code: 'provider_secret_unavailable' } }
       }
       const scope = typeof candidate.projectKey === 'string' && candidate.projectKey !== ''
         ? candidate.projectKey : scopeOf(candidate)
@@ -1478,6 +1510,14 @@ export function apply(ctx, config = {}) {
       try {
         const answer = await requestDecision({ backend, endpoint: policy.decisionEndpoint,
           model, evidence, signal: runContext?.signal, outputTokens: primaryOutputTokens,
+          ...(secretRef === '' ? {} : { secretRef, resolveSecret: async ref => {
+            if (credentials !== null && typeof credentials.resolve === 'function'
+              && typeof credentials.describe === 'function') {
+              const resolved = await credentials.resolve(ref)
+              return resolved?.value
+            }
+            return process.env[ref]
+          } }),
           isAllowed: isDecisionAllowed,
           onDispatch: () => {
             if (!isDecisionAllowed()) return { ok: false, code: 'cancelled' }
@@ -1485,7 +1525,7 @@ export function apply(ctx, config = {}) {
             if (started?.ok === true) primaryDispatched = true
             return started
           },
-          ...(backend === 'host' ? { hostCall } : { ...(secretRef === '' ? {} : { secretRef, resolveSecret: name => process.env[name] }) })
+          ...(backend === 'host' ? { hostCall } : {})
         })
         primaryUsage = answer?.usage ?? null
         if (answer?.ok === false) {

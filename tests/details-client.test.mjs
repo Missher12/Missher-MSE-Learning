@@ -52,22 +52,24 @@ function fakeContext() {
     subscribe: () => () => {},
     mutate: async () => true,
   }
+  const settingsMirror = { getSnapshot: () => ({ status: 'ready', error: null, view: { namespaces: [] } }),
+    load: async () => {} }
   const ctx = {
     effect: fn => { record.effects += 1; const disposer = fn(); record.disposers.push(disposer) },
     locale: { register: (ns, dicts) => { record.locales.push({ ns, dicts }) } },
-    configForms: { get: id => { record.formIds.push(id); return form },
+    configForms: { get: id => { record.formIds.push(id); return form }, describe: () => settingsMirror,
       whileServed: (namespaces, register) => { record.served.push([...namespaces]); return register(new Set(namespaces)) } },
     remote: { $mount: async contribution => { record.mounted.push(contribution); return () => {} } },
     inject: (deps, run) => { record.injected.push(deps); run(scope) },
   }
-  return { ctx, record, scope, form }
+  return { ctx, record, scope, form, settingsMirror }
 }
 
 test('the bundle registers the real settings section and the bundle-config entry', async () => {
   const { id, module: mod } = loadClient()
   assert.equal(id, '@missher/dsh-mse-learning')
   assert.deepEqual(mod.inject, ['slots', 'locale', 'remote', 'configForms'])
-  const { ctx, record, form } = fakeContext()
+  const { ctx, record, form, settingsMirror } = fakeContext()
   await mod.apply(ctx)
   assert.equal(record.mounted.length, 2, 'both the read-only and the control Remote are mounted once')
   assert.equal(record.mounted[0].package, '@missher/dsh-mse-learning')
@@ -94,6 +96,8 @@ test('the bundle registers the real settings section and the bundle-config entry
   assert.equal(section.options.order, 66)
   assert.equal(section.options.label(), '自我进化')
   assert.equal(section.options.inject().form, form, 'the section is handed the host config form')
+  assert.equal(section.options.inject().settingsMirror, settingsMirror,
+    'the section receives the Host-owned read-only refresh mirror when available')
   assert.equal(bundle.options.inject().hooks.locale, ctx.locale, 'bundle page subscribes to live Host locale')
   assert.equal(section.options.inject().hooks.locale, ctx.locale, 'settings section subscribes to live Host locale')
 })
@@ -306,11 +310,26 @@ test('experience verification keeps its summary brief and nests capability detai
  * it only the first render pass is observable and a `ready` + writable settings document is
  * never exercised — which is exactly how an undefined binding survived until it was read.
  */
-async function renderPanel(registration, props, passes = 8, interact = undefined) {
+async function renderPanel(registration, props, passes = 8, interact = undefined, effectWaitMs = 0) {
   const store = new Map()
-  const effects = []
+  const refs = new Map()
+  const effectStore = new Map()
+  let pendingEffects = []
   let slot = 0
+  let refSlot = 0
+  let effectSlot = 0
   let dirty = false
+  const depsEqual = (left, right) => Array.isArray(left) && Array.isArray(right)
+    && left.length === right.length && left.every((value, index) => Object.is(value, right[index]))
+  const runEffects = () => {
+    for (const effect of pendingEffects) {
+      const previous = effectStore.get(effect.index)
+      if (typeof previous?.cleanup === 'function') previous.cleanup()
+      const cleanup = effect.fn()
+      effectStore.set(effect.index, { deps: effect.deps, cleanup: typeof cleanup === 'function' ? cleanup : null })
+    }
+    pendingEffects = []
+  }
   const react = {
     createElement: (type, elementProps, ...children) => ({ type, props: elementProps, children }),
     useState: initial => {
@@ -321,11 +340,21 @@ async function renderPanel(registration, props, passes = 8, interact = undefined
         dirty = true
       }]
     },
-    useEffect: fn => { effects.push(fn) },
+    useEffect: (fn, deps) => {
+      const index = effectSlot++
+      const previous = effectStore.get(index)
+      if (deps === undefined || previous === undefined || !depsEqual(previous.deps, deps)) {
+        pendingEffects.push({ index, fn, deps: Array.isArray(deps) ? [...deps] : deps })
+      }
+    },
     useLayoutEffect: () => {},
     useCallback: value => value,
     useMemo: fn => fn(),
-    useRef: value => ({ current: value }),
+    useRef: value => {
+      const index = refSlot++
+      if (!refs.has(index)) refs.set(index, { current: value })
+      return refs.get(index)
+    },
     Fragment: 'fragment',
   }
   // The element type stays the component identity the bundle passed to createElement, so the
@@ -346,9 +375,14 @@ async function renderPanel(registration, props, passes = 8, interact = undefined
   let acted = interact === undefined
   for (let pass = 0; pass < passes; pass++) {
     slot = 0
+    refSlot = 0
+    effectSlot = 0
+    pendingEffects = []
     dirty = false
     tree = Component(props)
-    if (pass === 0) for (const fn of effects) fn()
+    const hasPendingEffects = pendingEffects.length > 0
+    runEffects()
+    if (hasPendingEffects && effectWaitMs > 0) await new Promise(resolve => setTimeout(resolve, effectWaitMs))
     // Let the effects' RPC promises settle before the next pass, so the page reaches the state
     // the browser reaches instead of stopping at its loading branch.
     await new Promise(resolve => setImmediate(resolve))
@@ -361,8 +395,12 @@ async function renderPanel(registration, props, passes = 8, interact = undefined
   }
   // One final pass so the last settled response is painted.
   slot = 0
+  refSlot = 0
+  effectSlot = 0
+  pendingEffects = []
   dirty = false
   tree = Component(props)
+  runEffects()
   return tree
 }
 
@@ -383,6 +421,9 @@ const labelOf = node => (node.children ?? []).filter(child => typeof child === '
 
 const READY_VALUES = Object.freeze({ enabled: true, reflectionEnabled: true, maxContextBytes: 768,
   evaluationTokensPerDay: 0, evaluationCallsPerDay: 2 })
+const REMOTE_READY_VALUES = Object.freeze({ ...READY_VALUES, decisionBackend: 'openai_compatible',
+  decisionModel: 'model-before-edit', decisionEndpoint: 'https://example.test/v1',
+  decisionSecretRef: '', decisionSecretBinding: '' })
 
 test('a ready writable form renders the settings rows and a disabled save', async () => {
   let registration
@@ -820,7 +861,7 @@ const hostCalls = payloads => async (method, input) => ({ ok: true, value: metho
 const RENDER_FORM = { getSnapshot: () => ({ status: 'ready', writable: true, mode: 'host', revision: 1,
   value: { ...READY_VALUES } }), subscribe: () => () => {}, mutate: () => true }
 
-test('decision model settings preserve remote drafts across Host and save only the backend change', async () => {
+test('decision model settings preserve remote drafts across Host and bind legacy refs across route changes', async () => {
   const { registration, module: mod } = loadClient()
   const remoteValues = { ...READY_VALUES, decisionBackend: 'laya', decisionModel: ` ${'model-'.repeat(15)} `,
     decisionEndpoint: ` https://example.test/${'route/'.repeat(90)} `, decisionSecretRef: 'MSE_DECISION_KEY' }
@@ -847,9 +888,11 @@ test('decision model settings preserve remote drafts across Host and save only t
         assert.ok(JSON.stringify(modelHeading).includes(mod.__test.zh.decisionModel))
         assert.deepEqual(picker.props.options.map(option => option.label), [mod.__test.zh.decisionBackendHost,
           mod.__test.zh.decisionBackendOpenAI, mod.__test.zh.decisionBackendJev, mod.__test.zh.decisionBackendLaya])
-        assert.equal(decisionInputs.length, 3)
+        assert.equal(decisionInputs.length, 4)
         assert.deepEqual(decisionInputs.map(node => node.props['aria-label']).sort(), [mod.__test.zh.decisionModelField,
-          mod.__test.zh.decisionEndpoint, mod.__test.zh.decisionSecretRef].sort())
+          mod.__test.zh.decisionEndpoint, mod.__test.zh.decisionApiKey, mod.__test.zh.decisionSecretRef].sort())
+        assert.equal(decisionInputs.find(node => node.props['aria-label'] === mod.__test.zh.decisionApiKey).props.type,
+          'password', 'the API key is entered in a masked field')
         picker.props.onChange('host')
         phase = 1
         return false
@@ -868,23 +911,35 @@ test('decision model settings preserve remote drafts across Host and save only t
       }
       if (phase === 2) {
         if (writes.length === 0) return false
-        assert.deepEqual(writes[0], { revision: 37,
-          ops: [{ op: 'set', path: ['decisionBackend'], value: 'host' }] })
+        assert.deepEqual(writes[0], { revision: 37, ops: [
+          { op: 'set', path: ['decisionBackend'], value: 'host' },
+          { op: 'set', path: ['decisionSecretBinding'], value: JSON.stringify(['laya', remoteValues.decisionEndpoint.trim()]) },
+        ] })
         picker.props.onChange('laya')
         phase = 3
         return false
       }
       if (phase === 3) {
         const byLabel = new Map(decisionInputs.map(node => [node.props['aria-label'], node.props.value]))
-        if (decisionInputs.length !== 3) return false
+        if (decisionInputs.length !== 4) return false
         assert.equal(byLabel.get(mod.__test.zh.decisionModelField), remoteValues.decisionModel)
         assert.equal(byLabel.get(mod.__test.zh.decisionEndpoint), remoteValues.decisionEndpoint)
         assert.equal(byLabel.get(mod.__test.zh.decisionSecretRef), remoteValues.decisionSecretRef)
-        const status = nodes.find(node => node.props?.className === 'mse-decision-status')
+        assert.equal(byLabel.get(mod.__test.zh.decisionApiKey), '')
+        const status = nodes.find(node => node.props?.className === 'mse-decision-status'
+          && node.children?.[0] === mod.__test.zh.decisionRemoteReady)
         assert.equal(status.children[0], mod.__test.zh.decisionRemoteReady)
         assert.ok(mod.__test.en.decisionRemoteReady.includes('not been tested'))
-        assert.match(SOURCE, /\.mse-decision-input\{display:block;width:100%;min-width:0;max-width:100%;box-sizing:border-box\}/u)
+        assert.ok(nodes.some(node => node.props?.className === 'mse-decision-key'), 'the key has its own credential controls')
+        assert.ok(nodes.some(node => node.props?.className === 'mse-decision-discovery'), 'the read-only model directory controls render')
+        assert.ok(nodes.some(node => node.props?.className === 'mse-budget-presets'), 'budget presets use their own layout')
+        const budgetInputs = nodes.filter(node => node.type?.uiName === 'Input'
+          && node.props?.className === 'mse-budget-value')
+        assert.equal(budgetInputs.length, 2)
+        assert.match(SOURCE, /\.mse-decision-input\{display:flex;width:100%;min-width:0;max-width:100%;box-sizing:border-box\}/u)
         assert.match(SOURCE, /\.mse-decision-source \.mse-picker-wide\{width:100%;max-width:100%\}/u)
+        assert.match(SOURCE, /\.mse-budget-presets\{display:grid;grid-template-columns:repeat\(auto-fit/u)
+        assert.match(SOURCE, /\.mse-budget-row \.mse-row-side\{width:156px;flex:none\}/u)
         phase = 4
         return true
       }
@@ -899,6 +954,522 @@ test('decision model settings preserve remote drafts across Host and save only t
   const readOnlyPicker = elementsOf(readOnly)
     .find(node => typeof node.type === 'function' && node.props?.testId === 'decision-source')
   assert.equal(readOnlyPicker.props.disabled, true, 'the Host Picker remains disabled without write access')
+})
+
+test('a pending API key marks the remote form dirty and Save stores only the credential', async () => {
+  const { registration, module: mod } = loadClient()
+  const snapshot = { status: 'ready', writable: true, mode: 'host', revision: 88,
+    value: { ...REMOTE_READY_VALUES } }
+  let mutateCalls = 0
+  const form = { getSnapshot: () => snapshot, subscribe: () => () => {},
+    mutate: async () => { mutateCalls += 1; return true } }
+  const calls = []
+  const control = async (method, input) => {
+    calls.push({ method, input })
+    if (method === 'describeDecisionCredential') return { ok: true, value: { ok: true,
+      serviceAvailable: true, configured: false, stored: false, writable: true, legacyConfigured: false } }
+    if (method === 'setDecisionCredential') return { ok: true, value: { ok: true,
+      configured: true, stored: true } }
+    return { ok: true, value: { ok: true } }
+  }
+  const call = hostCalls({ overview: { ok: true, version: 'test', runtime: 'dsh',
+    budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 }, counts: {}, store: { readable: true, schema: 2 } } })
+  const apiKey = 'synthetic-key-only-save'
+  let phase = 0
+  await renderPanel(registration, { locale: 'zh', initialTab: 'budget', call, control, form }, 24,
+    ({ nodes }) => {
+      const key = nodes.find(node => node.type?.uiName === 'Input'
+        && node.props?.['aria-label'] === mod.__test.zh.decisionApiKey)
+      const save = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === mod.__test.zh.save)
+      if (phase === 0) {
+        if (!key || !save) return false
+        key.props.onChange({ target: { value: apiKey } })
+        phase = 1
+        return false
+      }
+      if (phase === 1) {
+        if (!save || save.props.disabled) return false
+        assert.ok(JSON.stringify(nodes).includes(mod.__test.zh.unsaved), 'the pending key marks the form unsaved')
+        save.props.onClick()
+        phase = 2
+        return false
+      }
+      if (phase === 2) {
+        if (!calls.some(row => row.method === 'setDecisionCredential') || key?.props.value !== '') return false
+        assert.equal(mutateCalls, 0, 'a key-only save does not mutate ordinary configuration')
+        phase = 3
+        return true
+      }
+      return true
+    }, 230)
+  assert.equal(phase, 3)
+  assert.equal(mutateCalls, 0)
+  const keyWrite = calls.find(row => row.method === 'setDecisionCredential')
+  assert.equal(keyWrite?.input.apiKey, apiKey)
+  assert.equal(keyWrite?.input.settingsRevision, 88)
+  assert.equal(calls.filter(row => row.method === 'setDecisionCredential').length, 1)
+})
+
+test('Discard clears a key-only remote draft without saving credentials or starting discovery', async () => {
+  const { registration, module: mod } = loadClient()
+  const snapshot = { status: 'ready', writable: true, mode: 'host', revision: 89,
+    value: { ...REMOTE_READY_VALUES } }
+  let mutateCalls = 0
+  const form = { getSnapshot: () => snapshot, subscribe: () => () => {},
+    mutate: async () => { mutateCalls += 1; return true } }
+  const call = hostCalls({ overview: { ok: true, version: 'test', runtime: 'dsh',
+    budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 }, counts: {}, store: { readable: true, schema: 2 } } })
+  const apiKey = 'synthetic-key-discard'
+  let phase = 0
+  await renderPanel(registration, { locale: 'zh', initialTab: 'budget', call, control: undefined, form }, 20,
+    ({ nodes }) => {
+      const key = nodes.find(node => node.type?.uiName === 'Input'
+        && node.props?.['aria-label'] === mod.__test.zh.decisionApiKey)
+      const save = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === mod.__test.zh.save)
+      const discard = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === mod.__test.zh.discard)
+      if (phase === 0) {
+        if (!key || !save || !discard) return false
+        key.props.onChange({ target: { value: apiKey } })
+        phase = 1
+        return false
+      }
+      if (phase === 1) {
+        if (!key || !save || !discard || save.props.disabled || discard.props.disabled) return false
+        assert.ok(JSON.stringify(nodes).includes(mod.__test.zh.unsaved))
+        discard.props.onClick()
+        phase = 2
+        return false
+      }
+      if (phase === 2) {
+        assert.equal(key?.props.value, '')
+        assert.equal(save?.props.disabled, true)
+        assert.equal(discard?.props.disabled, true)
+        assert.equal(mutateCalls, 0)
+        phase = 3
+        return true
+      }
+      return true
+    })
+  assert.equal(phase, 3)
+  assert.equal(mutateCalls, 0)
+})
+
+test('Discard stays disabled and cannot clear a draft while the settings save is pending', async () => {
+  const { registration } = loadClient()
+  const snapshot = { status: 'ready', writable: true, mode: 'host', revision: 90, value: { ...READY_VALUES } }
+  let resolveMutate
+  let mutateCalls = 0
+  const form = { getSnapshot: () => snapshot, subscribe: () => () => {},
+    mutate: async () => {
+      mutateCalls += 1
+      return new Promise(resolve => { resolveMutate = () => resolve(true) })
+    } }
+  const call = async method => ({ ok: true, value: method === 'overview'
+    ? { ok: true, version: 'test', runtime: 'dsh', budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 },
+      counts: {}, store: { readable: true, schema: 2 } }
+    : { ok: true, sessions: [] } })
+  let phase = 0
+  await renderPanel(registration, { locale: 'zh', call, control: undefined, form }, 20,
+    ({ nodes }) => {
+      const input = nodes.find(node => node.type?.uiName === 'Input'
+        && node.props?.['aria-label'] === ZH_DICT.contextBytes)
+      const save = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === ZH_DICT.save)
+      const discard = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === ZH_DICT.discard)
+      if (phase === 0) {
+        if (!input) return false
+        input.props.onChange({ target: { value: '1024' } })
+        phase = 1
+        return false
+      }
+      if (phase === 1) {
+        if (!save || save.props.disabled) return false
+        save.props.onClick()
+        phase = 2
+        return false
+      }
+      if (phase === 2) {
+        if (!discard || resolveMutate === undefined) return false
+        assert.equal(discard.props.disabled, true)
+        assert.equal(mutateCalls, 1)
+        discard.props.onClick()
+        phase = 3
+        return false
+      }
+      if (phase === 3) {
+        if (!input || !discard || resolveMutate === undefined) return false
+        assert.equal(input.props.value, '1024', 'a fresh render keeps the draft after the old discard handler')
+        assert.equal(discard.props.disabled, true)
+        assert.equal(mutateCalls, 1, 'the pending save completes once')
+        resolveMutate()
+        phase = 4
+        return false
+      }
+      if (phase === 4) {
+        // The loop supplies nodes from one render; wait until the async mutation paints success.
+        if (mutateCalls !== 1) return false
+        const save = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === ZH_DICT.save)
+        const saved = nodes.some(node => node.props?.className === 'mse-ok'
+          && node.children?.includes(ZH_DICT.saved))
+        if (!saved || save === undefined) return false
+        assert.equal(mutateCalls, 1, 'the pending save completes once')
+        phase = 5
+        return true
+      }
+      return true
+    })
+  assert.equal(phase, 5)
+})
+
+test('general Save stores a pending remote key before the config CAS and clears it only after the key is stored', async () => {
+  const { registration, module: mod } = loadClient()
+  let snapshot = { status: 'ready', writable: true, mode: 'host', revision: 81, value: { ...READY_VALUES } }
+  const writes = []
+  const order = []
+  const form = { getSnapshot: () => snapshot, subscribe: () => () => {},
+    mutate: async (ops, revision) => { order.push('config'); writes.push({ ops, revision }); return true } }
+  const calls = []
+  let resolveKeyWrite
+  const control = async (method, input) => {
+    calls.push({ method, input })
+    if (method === 'setDecisionCredential') {
+      order.push('credential')
+      return new Promise(resolve => { resolveKeyWrite = () => resolve({ ok: true,
+        value: { ok: true, configured: true, stored: true } }) })
+    }
+    if (method === 'describeDecisionCredential') return { ok: true, value: { ok: true,
+      serviceAvailable: true, configured: false, stored: false, writable: true, legacyConfigured: false } }
+    return { ok: true, value: { ok: true } }
+  }
+  const call = hostCalls({ overview: { ok: true, version: 'test', runtime: 'dsh',
+    budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 }, counts: {}, store: { readable: true, schema: 2 } } })
+  const apiKey = 'synthetic-key-for-general-save'
+  let phase = 0
+  await renderPanel(registration, { locale: 'zh', initialTab: 'budget', call, control, form }, 24,
+    ({ nodes }) => {
+      if (phase === 0) {
+        const source = nodes.find(node => typeof node.type === 'function' && node.props?.testId === 'decision-source')
+        if (source === undefined) return false
+        source.props.onChange('openai_compatible')
+        phase = 1
+        return false
+      }
+      const inputFor = label => nodes.find(node => node.type?.uiName === 'Input' && node.props?.['aria-label'] === label)
+      if (phase === 1) {
+        const model = inputFor(mod.__test.zh.decisionModelField)
+        const endpoint = inputFor(mod.__test.zh.decisionEndpoint)
+        const key = inputFor(mod.__test.zh.decisionApiKey)
+        if (!model || !endpoint || !key) return false
+        endpoint.props.onChange({ target: { value: 'https://api.example.test/v1' } })
+        model.props.onChange({ target: { value: 'gpt-synthetic' } })
+        key.props.onChange({ target: { value: apiKey } })
+        phase = 2
+        return false
+      }
+      if (phase === 2) {
+        const save = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === mod.__test.zh.save)
+        if (!save || save.props.disabled) return false
+        save.props.onClick()
+        phase = 3
+        return false
+      }
+      if (phase === 3) {
+        const key = inputFor(mod.__test.zh.decisionApiKey)
+        if (!key || key.props.disabled !== true || resolveKeyWrite === undefined) return false
+        assert.equal(writes.length, 0, 'the config CAS waits for the credentials write')
+        assert.equal(calls.find(row => row.method === 'setDecisionCredential')?.input.apiKey, apiKey)
+        resolveKeyWrite()
+        phase = 4
+        return false
+      }
+      if (phase === 4) {
+        const key = inputFor(mod.__test.zh.decisionApiKey)
+        if (writes.length !== 1 || key?.props.value !== '') return false
+        phase = 5
+        return true
+      }
+      return true
+    })
+  assert.equal(phase, 5)
+  assert.deepEqual(order, ['credential', 'config'], 'the Host stores the key before the route settings CAS')
+  assert.equal(writes[0].revision, 81)
+  assert.equal(calls.find(row => row.method === 'setDecisionCredential')?.input.settingsRevision, 81)
+  const paths = writes[0].ops.map(op => op.path.join('.'))
+  assert.ok(paths.includes('decisionBackend'))
+  assert.ok(paths.includes('decisionModel'))
+  assert.ok(paths.includes('decisionEndpoint'))
+  assert.ok(!JSON.stringify(writes[0].ops).includes(apiKey), 'the API key never enters ordinary settings')
+})
+
+test('a failed general Save keeps the API key draft and does not submit the settings', async () => {
+  const { registration, module: mod } = loadClient()
+  const snapshot = { status: 'ready', writable: true, mode: 'host', revision: 82, value: { ...READY_VALUES } }
+  const writes = []
+  const form = { getSnapshot: () => snapshot, subscribe: () => () => {},
+    mutate: async (ops, revision) => { writes.push({ ops, revision }); return true } }
+  const calls = []
+  const control = async (method, input) => {
+    calls.push({ method, input })
+    if (method === 'setDecisionCredential') return { ok: true,
+      value: { ok: false, code: 'credential_save_failed' } }
+    return { ok: true, value: { ok: true } }
+  }
+  const call = hostCalls({ overview: { ok: true, version: 'test', runtime: 'dsh',
+    budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 }, counts: {}, store: { readable: true, schema: 2 } } })
+  const apiKey = 'synthetic-key-retained-on-failure'
+  let phase = 0
+  const tree = await renderPanel(registration, { locale: 'zh', initialTab: 'budget', call, control, form }, 20,
+    ({ nodes }) => {
+      if (phase === 0) {
+        const source = nodes.find(node => typeof node.type === 'function' && node.props?.testId === 'decision-source')
+        if (!source) return false
+        source.props.onChange('openai_compatible')
+        phase = 1
+        return false
+      }
+      const inputFor = label => nodes.find(node => node.type?.uiName === 'Input' && node.props?.['aria-label'] === label)
+      if (phase === 1) {
+        const endpoint = inputFor(mod.__test.zh.decisionEndpoint)
+        const model = inputFor(mod.__test.zh.decisionModelField)
+        const key = inputFor(mod.__test.zh.decisionApiKey)
+        if (!endpoint || !model || !key) return false
+        endpoint.props.onChange({ target: { value: 'https://api.example.test/v1' } })
+        model.props.onChange({ target: { value: 'gpt-synthetic' } })
+        key.props.onChange({ target: { value: apiKey } })
+        phase = 2
+        return false
+      }
+      if (phase === 2) {
+        const save = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === mod.__test.zh.save)
+        if (!save || save.props.disabled) return false
+        save.props.onClick()
+        phase = 3
+        return false
+      }
+      if (phase === 3) {
+        if (!calls.some(row => row.method === 'setDecisionCredential')) return false
+        assert.equal(inputFor(mod.__test.zh.decisionApiKey)?.props.value, apiKey)
+        assert.equal(writes.length, 0)
+        phase = 4
+        return true
+      }
+      return true
+    })
+  assert.equal(phase, 4)
+  assert.equal(writes.length, 0)
+  assert.ok(JSON.stringify(tree).includes(mod.__test.zh.decisionKeySaveFailed))
+})
+
+test('a config CAS failure after storing the API key reports that only the key was saved', async () => {
+  const { registration, module: mod } = loadClient()
+  const snapshot = { status: 'ready', writable: true, mode: 'host', revision: 87, value: { ...READY_VALUES } }
+  const writes = []
+  const form = { getSnapshot: () => snapshot, subscribe: () => () => {},
+    mutate: async (ops, revision) => { writes.push({ ops, revision }); return false } }
+  const calls = []
+  const control = async (method, input) => {
+    calls.push({ method, input })
+    if (method === 'setDecisionCredential') return { ok: true,
+      value: { ok: true, configured: true, stored: true } }
+    return { ok: true, value: { ok: true } }
+  }
+  const call = hostCalls({ overview: { ok: true, version: 'test', runtime: 'dsh',
+    budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 }, counts: {}, store: { readable: true, schema: 2 } } })
+  const apiKey = 'synthetic-key-only-credential-save'
+  let phase = 0
+  const tree = await renderPanel(registration, { locale: 'zh', initialTab: 'budget', call, control, form }, 20,
+    ({ nodes }) => {
+      if (phase === 0) {
+        const source = nodes.find(node => typeof node.type === 'function' && node.props?.testId === 'decision-source')
+        if (!source) return false
+        source.props.onChange('openai_compatible')
+        phase = 1
+        return false
+      }
+      const inputFor = label => nodes.find(node => node.type?.uiName === 'Input' && node.props?.['aria-label'] === label)
+      if (phase === 1) {
+        const endpoint = inputFor(mod.__test.zh.decisionEndpoint)
+        const model = inputFor(mod.__test.zh.decisionModelField)
+        const key = inputFor(mod.__test.zh.decisionApiKey)
+        if (!endpoint || !model || !key) return false
+        endpoint.props.onChange({ target: { value: 'https://api.example.test/v1' } })
+        model.props.onChange({ target: { value: 'gpt-synthetic' } })
+        key.props.onChange({ target: { value: apiKey } })
+        phase = 2
+        return false
+      }
+      if (phase === 2) {
+        const save = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === mod.__test.zh.save)
+        if (!save || save.props.disabled) return false
+        save.props.onClick()
+        phase = 3
+        return false
+      }
+      if (phase === 3) {
+        const key = inputFor(mod.__test.zh.decisionApiKey)
+        if (writes.length !== 1 || key?.props.value !== '') return false
+        phase = 4
+        return true
+      }
+      return true
+    })
+  assert.equal(phase, 4)
+  assert.equal(calls.find(row => row.method === 'setDecisionCredential')?.input.apiKey, apiKey)
+  assert.equal(writes.length, 1)
+  assert.ok(JSON.stringify(tree).includes(mod.__test.zh.decisionConfigNotSavedKeySaved))
+})
+
+test('editing the API key cancels discovery and fences a late model-list response', async () => {
+  const { registration, module: mod } = loadClient()
+  const snapshot = { status: 'ready', writable: true, mode: 'host', revision: 83,
+    value: { ...REMOTE_READY_VALUES } }
+  const form = { getSnapshot: () => snapshot, subscribe: () => () => {}, mutate: async () => true }
+  const calls = []
+  let markDiscoveryStarted
+  const discoveryStarted = new Promise(resolve => { markDiscoveryStarted = resolve })
+  let resolveDiscovery
+  const control = async (method, input) => {
+    calls.push({ method, input })
+    if (method === 'describeDecisionCredential') return { ok: true, value: { ok: true,
+      serviceAvailable: true, configured: false, stored: false, writable: true, legacyConfigured: false } }
+    if (method === 'discoverDecisionModels') {
+      markDiscoveryStarted()
+      return new Promise(resolve => { resolveDiscovery = () => resolve({ ok: true,
+        value: { ok: true, models: [{ id: 'old-key-model' }], autoAvailable: false } }) })
+    }
+    return { ok: true, value: { ok: true } }
+  }
+  const call = hostCalls({ overview: { ok: true, version: 'test', runtime: 'dsh',
+    budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 }, counts: {}, store: { readable: true, schema: 2 } } })
+  let phase = 0
+  const tree = await renderPanel(registration, { locale: 'zh', initialTab: 'budget', call, control, form }, 24,
+    async ({ nodes }) => {
+      const key = nodes.find(node => node.type?.uiName === 'Input'
+        && node.props?.['aria-label'] === mod.__test.zh.decisionApiKey)
+      if (phase === 0) {
+        if (!key) return false
+        key.props.onChange({ target: { value: 'synthetic-old-key' } })
+        phase = 1
+        return false
+      }
+      if (phase === 1) {
+        const discover = nodes.find(node => node.type?.uiName === 'Button'
+          && labelOf(node) === mod.__test.zh.decisionDiscover)
+        if (!discover || discover.props.disabled) return false
+        discover.props.onClick()
+        phase = 2
+        return false
+      }
+      if (phase === 2) {
+        await discoveryStarted
+        const latestKey = nodes.find(node => node.type?.uiName === 'Input'
+          && node.props?.['aria-label'] === mod.__test.zh.decisionApiKey)
+        latestKey.props.onChange({ target: { value: 'synthetic-new-key' } })
+        resolveDiscovery()
+        phase = 3
+        return false
+      }
+      if (phase === 3) {
+        assert.ok(!nodes.some(node => node.props?.key === 'decision-model-list'),
+          'models returned for the earlier key are not rendered')
+        assert.equal(key?.props.value, 'synthetic-new-key', 'the replacement key remains in the field')
+        assert.ok(calls.some(row => row.method === 'cancelDecisionDiscovery'))
+        phase = 4
+        return true
+      }
+      return true
+    })
+  assert.equal(phase, 4)
+  assert.ok(!JSON.stringify(tree).includes('old-key-model'))
+})
+
+test('a changed settings revision blocks credential and discovery actions with only a pending API key', async () => {
+  const { registration, module: mod } = loadClient()
+  let snapshot = { status: 'ready', writable: true, mode: 'host', revision: 84,
+    value: { ...REMOTE_READY_VALUES } }
+  let notify
+  const writes = []
+  const form = { getSnapshot: () => snapshot, subscribe: listener => { notify = listener; return () => {} },
+    mutate: async (ops, revision) => { writes.push({ ops, revision }); return true } }
+  const calls = []
+  const control = async (method, input) => {
+    calls.push({ method, input })
+    if (method === 'describeDecisionCredential') return { ok: true, value: { ok: true,
+      serviceAvailable: true, configured: false, stored: false, writable: true, legacyConfigured: false } }
+    return { ok: true, value: { ok: true } }
+  }
+  const call = hostCalls({ overview: { ok: true, version: 'test', runtime: 'dsh',
+    budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 }, counts: {}, store: { readable: true, schema: 2 } } })
+  let phase = 0
+  const tree = await renderPanel(registration, { locale: 'zh', initialTab: 'budget', call, control, form }, 20,
+    ({ nodes }) => {
+      const byLabel = label => nodes.find(node => node.type?.uiName === 'Input' && node.props?.['aria-label'] === label)
+      if (phase === 0) {
+        const key = byLabel(mod.__test.zh.decisionApiKey)
+        if (!key || notify === undefined) return false
+        key.props.onChange({ target: { value: 'synthetic-stale-key' } })
+        phase = 1
+        return false
+      }
+      if (phase === 1) {
+        const save = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === mod.__test.zh.save)
+        assert.equal(save.props.disabled, false, 'a key-only edit is a dirty form before the Host revision changes')
+        assert.ok(JSON.stringify(nodes).includes(mod.__test.zh.unsaved))
+        snapshot = { ...snapshot, revision: 85 }
+        notify()
+        phase = 2
+        return false
+      }
+      if (phase === 2) {
+        const saveKey = nodes.find(node => node.type?.uiName === 'Button'
+          && labelOf(node) === mod.__test.zh.decisionSaveKey)
+        const discover = nodes.find(node => node.type?.uiName === 'Button'
+          && labelOf(node) === mod.__test.zh.decisionDiscover)
+        const save = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === mod.__test.zh.save)
+        assert.equal(saveKey.props.disabled, true)
+        assert.equal(discover.props.disabled, true)
+        assert.equal(save.props.disabled, true)
+        assert.ok(JSON.stringify(nodes).includes(mod.__test.zh.draftStale))
+        assert.equal(byLabel(mod.__test.zh.decisionApiKey)?.props.value, 'synthetic-stale-key')
+        // Exercise the handlers too: a stale callback must be rejected even if a browser event
+        // was already queued before the disabled state painted.
+        saveKey.props.onClick()
+        discover.props.onClick()
+        save.props.onClick()
+        phase = 3
+        return true
+      }
+      return true
+    })
+  assert.equal(phase, 3)
+  assert.equal(writes.length, 0)
+  assert.ok(!calls.some(row => ['setDecisionCredential', 'unsetDecisionCredential',
+    'discoverDecisionModels'].includes(row.method)))
+})
+
+test('remote key status distinguishes an empty or invalid API address from an absent Host credential service', async () => {
+  const { registration, module: mod } = loadClient()
+  const call = hostCalls({ overview: { ok: true, version: 'test', runtime: 'dsh',
+    budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 }, counts: {}, store: { readable: true, schema: 2 } } })
+  const renderStatus = async (endpoint, describe) => {
+    const snapshot = { status: 'ready', writable: true, mode: 'host', revision: 86,
+      value: { ...REMOTE_READY_VALUES, decisionEndpoint: endpoint } }
+    const form = { getSnapshot: () => snapshot, subscribe: () => () => {}, mutate: async () => true }
+    const control = async method => method === 'describeDecisionCredential'
+      ? { ok: true, value: describe() } : { ok: true, value: { ok: true } }
+    return renderPanel(registration, { locale: 'zh', initialTab: 'budget', call, control, form }, 12, undefined, 230)
+  }
+  const empty = await renderStatus('', () => ({ ok: false, code: 'invalid_decision_credential_request' }))
+  assert.ok(JSON.stringify(empty).includes(mod.__test.zh.decisionEndpointRequired))
+  assert.ok(!JSON.stringify(empty).includes(mod.__test.zh.decisionCredentialUnavailable))
+  assert.equal(mod.__test.zh.decisionEndpoint, 'API 地址')
+
+  const invalid = await renderStatus('not-an-url', () => ({ ok: false, code: 'invalid_endpoint' }))
+  assert.ok(JSON.stringify(invalid).includes(mod.__test.zh.decisionEndpointInvalid))
+  assert.ok(!JSON.stringify(invalid).includes(mod.__test.zh.decisionCredentialUnavailable))
+
+  const absent = await renderStatus('https://example.test/v1', () => ({ ok: true,
+    serviceAvailable: false, configured: false, stored: false, writable: false }))
+  assert.ok(JSON.stringify(absent).includes(mod.__test.zh.decisionCredentialUnavailable))
 })
 
 test('the verification-session row never invents a session and states what is saved', () => {
@@ -1104,7 +1675,7 @@ test('常规 renders the verification picker, and a saved id missing from the di
   ] })
 })
 
-test('a settings save rechecks write permission and preserves the draft revision', async () => {
+test('a settings save rejects a changed revision, preserves a stable draft revision, and rechecks permission', async () => {
   const { registration } = loadClient()
   let snapshot = { status: 'ready', writable: true, revision: 19, value: { ...READY_VALUES } }
   const writes = []
@@ -1115,7 +1686,7 @@ test('a settings save rechecks write permission and preserves the draft revision
       counts: {}, store: { readable: true, schema: 2 } }
     : { ok: true, sessions: [] } })
   let phase = 0
-  await renderPanel(registration, { locale: 'zh', call, control: undefined, form }, 14, ({ nodes }) => {
+  const staleTree = await renderPanel(registration, { locale: 'zh', call, control: undefined, form }, 14, ({ nodes }) => {
     if (phase === 0) {
       const picker = nodes.find(node => typeof node.type === 'function' && node.props?.testId === 'verify-session')
       const input = nodes.find(node => node.type?.uiName === 'Input' && node.props?.['aria-label'] === ZH_DICT.contextBytes)
@@ -1127,17 +1698,46 @@ test('a settings save rechecks write permission and preserves the draft revision
     }
     const save = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === '保存')
     if (save === undefined || save.props.disabled) return false
-    // Update the Host revision without notifying React: save must retain the draft's old revision.
+    // This latest rendered handler still cannot write against a Host revision that changed unseen.
     snapshot = { ...snapshot, revision: 20 }
     save.props.onClick()
     phase = 2
     return true
   })
+  assert.equal(phase, 2)
+  assert.equal(writes.length, 0, 'a stale draft is refused before mutate')
+  assert.ok(JSON.stringify(staleTree).includes(ZH_DICT.draftStale))
+
+  // A fresh form at a stable revision remains writable and sends the revision it was seeded with.
+  snapshot = { ...snapshot, revision: 21, writable: true }
+  phase = 0
+  const stableTree = await renderPanel(registration, { locale: 'zh', call, control: undefined, form }, 14, ({ nodes }) => {
+    if (phase === 0) {
+      const picker = nodes.find(node => typeof node.type === 'function' && node.props?.testId === 'verify-session')
+      const input = nodes.find(node => node.type?.uiName === 'Input' && node.props?.['aria-label'] === ZH_DICT.contextBytes)
+      if (picker === undefined || input === undefined) return false
+      picker.props.onChange('session-bbbbcccc-2222')
+      input.props.onChange({ target: { value: '1280' } })
+      phase = 1
+      return false
+    }
+    if (phase === 2) {
+      if (writes.length !== 1) return false
+      phase = 3
+      return true
+    }
+    const save = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === '保存')
+    if (save === undefined || save.props.disabled) return false
+    save.props.onClick()
+    phase = 2
+    return false
+  })
+  assert.equal(phase, 3)
   assert.equal(writes.length, 1)
-  assert.equal(writes[0].revision, 19, 'the Host call uses the revision captured by the draft')
+  assert.equal(writes[0].revision, 21, 'a current draft writes using the revision it was seeded with')
+  assert.ok(JSON.stringify(stableTree).includes(ZH_DICT.saved))
 
   writes.length = 0
-  snapshot = { ...snapshot, writable: true }
   phase = 0
   await renderPanel(registration, { locale: 'zh', call, control: undefined, form }, 14, ({ nodes }) => {
     if (phase === 0) {
@@ -1148,13 +1748,14 @@ test('a settings save rechecks write permission and preserves the draft revision
       return false
     }
     const save = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === '保存')
-    if (save === undefined) return false
+    if (save === undefined || save.props.disabled) return false
     // This models the permission revoking after render but before the event handler runs.
     snapshot = { ...snapshot, writable: false }
     save.props.onClick()
     phase = 2
     return true
   })
+  assert.equal(phase, 2)
   assert.equal(writes.length, 0, 'permission revoked at save time results in zero writes')
 })
 
@@ -1188,6 +1789,310 @@ test('a Host mutate refusal is never presented as a successful settings save', a
   assert.ok(rendered.includes(mod.__test.zh.reloadNeeded), 'a rejected atomic mutation requests a host reread')
   assert.ok(!elementsOf(tree).some(node => node.props?.className === 'mse-ok'),
     'a rejected mutation has no successful-save indicator')
+})
+
+test('a Host revision conflict offers one reload action and refreshes credential metadata', async () => {
+  const { registration, module: mod } = loadClient()
+  let snapshot = { status: 'ready', writable: true, revision: 23, value: { ...READY_VALUES,
+    decisionBackend: 'openai_compatible', decisionModel: 'before-conflict',
+    decisionEndpoint: 'https://example.test/v1', decisionSecretRef: '', decisionSecretBinding: '' } }
+  const writes = []
+  let notifySnapshot = null
+  const form = { getSnapshot: () => snapshot, subscribe: listener => {
+    notifySnapshot = listener
+    return () => { if (notifySnapshot === listener) notifySnapshot = null }
+  },
+    mutate: async (ops, revision) => {
+      writes.push({ ops, revision })
+      snapshot = { ...snapshot, revision: 24, value: { ...snapshot.value, decisionModel: 'host-model-after-conflict' } }
+      notifySnapshot?.()
+      return false
+    } }
+  const settingsMirror = { getSnapshot: () => ({ status: 'ready', error: null,
+    view: { namespaces: [{ ns: 'mse-learning', revision: snapshot.revision }] } }), load: async () => {} }
+  const call = hostCalls({ overview: { ok: true, version: 'test', runtime: 'dsh',
+    budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 }, counts: {},
+    store: { readable: true, schema: 2 } } })
+  let statusReads = 0
+  const descriptions = []
+  const control = async (method, input) => {
+    if (method === 'status') {
+      statusReads += 1
+      return { ok: true, value: { ok: true, runtime: { jobs: [] } } }
+    }
+    if (method === 'describeDecisionCredential') {
+      return await new Promise(resolve => descriptions.push({ input, resolve }))
+    }
+    return { ok: true, value: { ok: true } }
+  }
+  let phase = 0
+  let statusReadsBeforeRecovery = 0
+  let oldDescription
+  let currentDescription
+  await renderPanel(registration, { locale: 'zh', initialTab: 'budget', call, control, form, settingsMirror }, 30, async ({ nodes }) => {
+    const rendered = JSON.stringify(nodes)
+    if (phase === 0) {
+      const input = nodes.find(node => node.type?.uiName === 'Input'
+        && node.props?.['aria-label'] === mod.__test.zh.decisionModelField)
+      if (input === undefined) return false
+      input.props.onChange({ target: { value: 'draft-model-before-conflict' } })
+      phase = 1
+      return false
+    }
+    if (phase === 1) {
+      oldDescription = descriptions.find(request => request.input.settingsRevision === 23)
+      if (oldDescription === undefined) return false
+      const save = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === ZH_DICT.save)
+      if (save === undefined || save.props.disabled) return false
+      save.props.onClick()
+      phase = 2
+      return false
+    }
+    if (phase === 2) {
+      const reloads = nodes.filter(node => node.type?.uiName === 'Button' && labelOf(node) === mod.__test.zh.reloadHost)
+      if (reloads.length === 0 || !rendered.includes(mod.__test.zh.draftStale)
+        || !rendered.includes(mod.__test.zh.reloadNeeded)) return false
+      assert.equal(reloads.length, 1, 'stale and failed states share one recovery action')
+      assert.equal(writes.length, 1)
+      assert.equal(writes[0].revision, 23)
+      assert.equal(snapshot.revision, 24, 'the rejected write leaves a newer Host revision')
+      statusReadsBeforeRecovery = statusReads
+      reloads[0].props.onClick()
+      assert.equal(statusReads, statusReadsBeforeRecovery + 1, 'the failed-save recovery refreshes runtime status')
+      phase = 3
+      return false
+    }
+    if (phase === 3) {
+      currentDescription = descriptions.find(request => request.input.settingsRevision === 24)
+      if (currentDescription === undefined) return false
+      assert.equal(currentDescription.input.backend, 'openai_compatible')
+      assert.equal(currentDescription.input.endpoint, 'https://example.test/v1')
+      const input = nodes.find(node => node.type?.uiName === 'Input'
+        && node.props?.['aria-label'] === mod.__test.zh.decisionModelField)
+      const save = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === ZH_DICT.save)
+      if (input === undefined || save === undefined) return false
+      assert.equal(input.props.value, 'host-model-after-conflict', 'reseed uses the latest Host model value')
+      assert.equal(save.props.disabled, true, 'save stays disabled after the clean reseed')
+      assert.ok(!rendered.includes(mod.__test.zh.draftStale))
+      assert.ok(!rendered.includes(mod.__test.zh.reloadNeeded))
+      assert.ok(nodes.some(node => node.props?.className === 'mse-decision-status'
+        && node.children?.[0] === mod.__test.zh.loading), 'credential status shows loading while the 200ms read is pending')
+      currentDescription.resolve({ ok: true, value: { ok: true, serviceAvailable: true,
+        configured: false, stored: false, writable: true } })
+      phase = 4
+      return false
+    }
+    if (phase === 4) {
+      const status = nodes.find(node => node.props?.className === 'mse-decision-status'
+        && node.children?.[0] === mod.__test.zh.decisionNoSavedKey)
+      if (status === undefined) return false
+      assert.ok(!rendered.includes(mod.__test.zh.draftStale), 'the old conflict hint is cleared')
+      assert.equal(oldDescription.input.settingsRevision, 23)
+      oldDescription.resolve({ ok: true, value: { ok: true, serviceAvailable: true,
+        configured: true, stored: true, writable: true } })
+      await new Promise(resolve => setImmediate(resolve))
+      phase = 5
+      return false
+    }
+    if (phase === 5) {
+      const status = nodes.find(node => node.props?.className === 'mse-decision-status'
+        && node.children?.[0] === mod.__test.zh.decisionNoSavedKey)
+      if (status === undefined) return false
+      assert.ok(!rendered.includes(mod.__test.zh.decisionSavedKey), 'late old metadata cannot mark the new revision configured')
+      phase = 6
+      return true
+    }
+    return true
+  }, 220)
+  assert.equal(phase, 6, 'the conflict recovery refreshes metadata and ignores a late older response')
+  assert.equal(writes.length, 1, 'recovery does not resubmit the rejected write')
+})
+
+test('a credential conflict refreshes the Host mirror before reseeding a stale ConfigForm', async () => {
+  const { registration, module: mod } = loadClient()
+  const latestValue = { ...REMOTE_READY_VALUES, decisionModel: 'host-model-after-external-change' }
+  let snapshot = { status: 'ready', writable: true, mode: 'host', revision: 0, value: { ...REMOTE_READY_VALUES } }
+  let notifySnapshot = null
+  let mirrorSnapshot = { status: 'ready', error: null,
+    view: { namespaces: [{ ns: 'mse-learning', revision: 0 }] } }
+  let mirrorLoads = 0
+  const settingsMirror = {
+    getSnapshot: () => mirrorSnapshot,
+    load: async () => {
+      mirrorLoads += 1
+      mirrorSnapshot = { status: 'ready', error: null,
+        view: { namespaces: [{ ns: 'mse-learning', revision: 2 }] } }
+      snapshot = { ...snapshot, revision: 2, value: latestValue }
+      notifySnapshot?.()
+    },
+  }
+  const writes = []
+  const form = { getSnapshot: () => snapshot, subscribe: listener => {
+    notifySnapshot = listener
+    return () => { if (notifySnapshot === listener) notifySnapshot = null }
+  }, mutate: async (ops, revision) => { writes.push({ ops, revision }); return true } }
+  const calls = []
+  const control = async (method, input) => {
+    calls.push({ method, input })
+    if (method === 'setDecisionCredential') {
+      return { ok: true, value: { ok: false, code: 'settings_conflict' } }
+    }
+    if (method === 'describeDecisionCredential') {
+      return { ok: true, value: input.settingsRevision === 0
+        ? { ok: false, code: 'settings_conflict' }
+        : { ok: true, serviceAvailable: true, configured: false, stored: false,
+          writable: true, legacyConfigured: false } }
+    }
+    if (method === 'status') return { ok: true, value: { ok: true, runtime: { jobs: [] } } }
+    return { ok: true, value: { ok: true } }
+  }
+  const call = hostCalls({ overview: { ok: true, version: 'test', runtime: 'dsh',
+    budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 }, counts: {},
+    store: { readable: true, schema: 2 } } })
+  const apiKey = 'synthetic-stale-revision-key'
+  let phase = 0
+  const tree = await renderPanel(registration,
+    { locale: 'zh', initialTab: 'budget', call, control, form, settingsMirror }, 30, ({ nodes }) => {
+      const inputFor = label => nodes.find(node => node.type?.uiName === 'Input' && node.props?.['aria-label'] === label)
+      if (phase === 0) {
+        const key = inputFor(mod.__test.zh.decisionApiKey)
+        if (!key) return false
+        key.props.onChange({ target: { value: apiKey } })
+        phase = 1
+        return false
+      }
+      if (phase === 1) {
+        const save = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === mod.__test.zh.save)
+        if (!save || save.props.disabled) return false
+        save.props.onClick()
+        phase = 2
+        return false
+      }
+      if (phase === 2) {
+        const reload = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === mod.__test.zh.reloadHost)
+        if (!reload || !JSON.stringify(nodes).includes(mod.__test.zh.draftStale)) return false
+        assert.equal(snapshot.revision, 0, 'the ConfigForm mirror still holds the initial revision')
+        assert.equal(writes.length, 0, 'the credential conflict returned before ConfigForm.mutate')
+        assert.equal(calls.find(row => row.method === 'setDecisionCredential')?.input.settingsRevision, 0)
+        reload.props.onClick()
+        phase = 3
+        return false
+      }
+      if (phase === 3) {
+        if (!calls.some(row => row.method === 'describeDecisionCredential' && row.input.settingsRevision === 2)) {
+          return false
+        }
+        assert.equal(mirrorLoads, 1, 'explicit reload performs a fresh Host settings.describe read')
+        assert.equal(snapshot.revision, 2, 'the form revision follows the refreshed namespace revision')
+        assert.equal(writes.length, 0, 'refresh does not use an empty mutate or retry the rejected credential save')
+        const model = inputFor(mod.__test.zh.decisionModelField)
+        const key = inputFor(mod.__test.zh.decisionApiKey)
+        if (!model || !key) return false
+        assert.equal(model.props.value, 'host-model-after-external-change')
+        assert.equal(key.props.value, '', 'only a successful refresh clears the key draft')
+        phase = 4
+        return false
+      }
+      if (phase === 4) {
+        const cleanStatus = nodes.find(node => node.props?.className === 'mse-decision-status'
+          && node.children?.[0] === mod.__test.zh.decisionNoSavedKey)
+        if (!cleanStatus) return false
+        assert.ok(!JSON.stringify(nodes).includes(mod.__test.zh.draftStale))
+        phase = 5
+        return true
+      }
+      return true
+    }, 220)
+  assert.equal(phase, 5, 'the refreshed revision drives a clean credential metadata read')
+  assert.equal(writes.length, 0)
+  assert.ok(!JSON.stringify(tree).includes(mod.__test.zh.draftStale))
+})
+
+test('a failed settings refresh keeps the draft and any edits made while it is pending', async () => {
+  const { registration, module: mod } = loadClient()
+  let snapshot = { status: 'ready', writable: true, mode: 'host', revision: 0, value: { ...REMOTE_READY_VALUES } }
+  let notifySnapshot = null
+  let mirrorSnapshot = { status: 'ready', error: null,
+    view: { namespaces: [{ ns: 'mse-learning', revision: 0 }] } }
+  let resolveLoad
+  let mirrorLoads = 0
+  const settingsMirror = {
+    getSnapshot: () => mirrorSnapshot,
+    load: () => {
+      mirrorLoads += 1
+      return new Promise(resolve => { resolveLoad = () => {
+        mirrorSnapshot = { status: 'ready', error: 'describe_unavailable',
+          view: { namespaces: [{ ns: 'mse-learning', revision: 0 }] } }
+        resolve()
+      } })
+    },
+  }
+  const form = { getSnapshot: () => snapshot, subscribe: listener => {
+    notifySnapshot = listener
+    return () => { if (notifySnapshot === listener) notifySnapshot = null }
+  }, mutate: async () => { throw new Error('credential conflict must not reach ConfigForm.mutate') } }
+  const control = async (method, input) => {
+    if (method === 'setDecisionCredential') return { ok: true, value: { ok: false, code: 'settings_conflict' } }
+    if (method === 'describeDecisionCredential') return { ok: true,
+      value: { ok: false, code: 'settings_conflict' } }
+    if (method === 'status') return { ok: true, value: { ok: true, runtime: { jobs: [] } } }
+    return { ok: true, value: { ok: true } }
+  }
+  const call = hostCalls({ overview: { ok: true, version: 'test', runtime: 'dsh',
+    budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 }, counts: {},
+    store: { readable: true, schema: 2 } } })
+  const apiKey = 'synthetic-key-kept-on-refresh-failure'
+  let phase = 0
+  const tree = await renderPanel(registration,
+    { locale: 'zh', initialTab: 'budget', call, control, form, settingsMirror }, 30, ({ nodes }) => {
+      const inputFor = label => nodes.find(node => node.type?.uiName === 'Input' && node.props?.['aria-label'] === label)
+      if (phase === 0) {
+        const key = inputFor(mod.__test.zh.decisionApiKey)
+        if (!key) return false
+        key.props.onChange({ target: { value: apiKey } })
+        phase = 1
+        return false
+      }
+      if (phase === 1) {
+        const save = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === mod.__test.zh.save)
+        if (!save || save.props.disabled) return false
+        save.props.onClick()
+        phase = 2
+        return false
+      }
+      if (phase === 2) {
+        const reload = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === mod.__test.zh.reloadHost)
+        if (!reload || !JSON.stringify(nodes).includes(mod.__test.zh.draftStale)) return false
+        reload.props.onClick()
+        phase = 3
+        return false
+      }
+      if (phase === 3) {
+        if (mirrorLoads !== 1 || typeof resolveLoad !== 'function') return false
+        const model = inputFor(mod.__test.zh.decisionModelField)
+        if (!model) return false
+        model.props.onChange({ target: { value: 'follow-up-edit-during-refresh' } })
+        resolveLoad()
+        phase = 4
+        return false
+      }
+      if (phase === 4) {
+        const model = inputFor(mod.__test.zh.decisionModelField)
+        const key = inputFor(mod.__test.zh.decisionApiKey)
+        const rendered = JSON.stringify(nodes)
+        if (!model || !key || !rendered.includes(mod.__test.zh.settingsReloadFailed)) return false
+        assert.equal(model.props.value, 'follow-up-edit-during-refresh', 'refresh cannot overwrite a later edit')
+        assert.equal(key.props.value, apiKey, 'a failed refresh keeps the secret draft')
+        assert.equal(snapshot.revision, 0)
+        assert.ok(rendered.includes(mod.__test.zh.draftStale), 'the stale draft remains marked')
+        phase = 5
+        return true
+      }
+      return true
+    }, 220)
+  assert.equal(phase, 5)
+  assert.equal(snapshot.revision, 0)
+  assert.ok(JSON.stringify(tree).includes(mod.__test.zh.settingsReloadFailed))
 })
 
 test('常规 shows the whole library by default and the selected project beside it', async () => {

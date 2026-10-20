@@ -43,7 +43,8 @@ const SIGNATURES = {
 }
 
 const CONTROL_METHODS = ['status', 'turns', 'planReview', 'startReview', 'planEvaluation', 'startEvaluation', 'job', 'cancel',
-  'authorizeProblemRecoveryRetry']
+  'authorizeProblemRecoveryRetry', 'describeDecisionCredential', 'setDecisionCredential', 'unsetDecisionCredential',
+  'discoverDecisionModels', 'cancelDecisionDiscovery']
 const CONTROL_SIGNATURES = {
   status: 'status(input?: MseControlRequest): Promise<MseControlResult>',
   turns: 'turns(input: MseControlRequest): Promise<MseControlResult>',
@@ -54,6 +55,11 @@ const CONTROL_SIGNATURES = {
   job: 'job(input: MseControlRequest): Promise<MseControlResult>',
   cancel: 'cancel(input: MseControlRequest): Promise<MseControlResult>',
   authorizeProblemRecoveryRetry: 'authorizeProblemRecoveryRetry(input: MseControlRequest): Promise<MseControlResult>',
+  describeDecisionCredential: 'describeDecisionCredential(input: MseControlRequest): Promise<MseControlResult>',
+  setDecisionCredential: 'setDecisionCredential(input: MseControlRequest): Promise<MseControlResult>',
+  unsetDecisionCredential: 'unsetDecisionCredential(input: MseControlRequest): Promise<MseControlResult>',
+  discoverDecisionModels: 'discoverDecisionModels(input: MseControlRequest): Promise<MseControlResult>',
+  cancelDecisionDiscovery: 'cancelDecisionDiscovery(input: MseControlRequest): Promise<MseControlResult>',
 }
 
 export const TYPERT = {

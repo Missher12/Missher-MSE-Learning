@@ -1,8 +1,10 @@
 import { isIP } from 'node:net'
+import { createHash } from 'node:crypto'
 import { parseDecision, normalizeDecisionUsage } from './decision.mjs'
 
 const MAX_RESPONSE_BYTES = 64 * 1024
 const MAX_EVIDENCE_BYTES = 16 * 1024
+const MAX_DISCOVERED_MODELS = 500
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 
 function safeModel(value) {
@@ -27,8 +29,13 @@ function summarizeEvidence(evidence) {
   return body
 }
 
-async function boundedJson(response) {
-  const declared = Number(response.headers?.get?.('content-length'))
+async function boundedJson(response, signal) {
+  const checkCancelled = () => {
+    if (signal?.aborted) throw new Error('cancelled')
+  }
+  checkCancelled()
+  const contentLength = response.headers?.get?.('content-length')
+  const declared = contentLength === null || contentLength === undefined ? Number.NaN : Number(contentLength)
   if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) throw new Error('provider_response_too_large')
   let text
   if (response.body?.getReader) {
@@ -37,9 +44,14 @@ async function boundedJson(response) {
     try {
       while (true) {
         const { done, value } = await reader.read()
+        checkCancelled()
         if (done) break
         size += value.byteLength
-        if (size > MAX_RESPONSE_BYTES) { await reader.cancel(); throw new Error('provider_response_too_large') }
+        if (size > MAX_RESPONSE_BYTES) {
+          await reader.cancel()
+          checkCancelled()
+          throw new Error('provider_response_too_large')
+        }
         chunks.push(value)
       }
     } finally { reader.releaseLock?.() }
@@ -47,10 +59,24 @@ async function boundedJson(response) {
     let offset = 0
     for (const chunk of chunks) { joined.set(chunk, offset); offset += chunk.byteLength }
     text = new TextDecoder().decode(joined)
+  } else if (response.body?.[Symbol.asyncIterator]) {
+    const chunks = []
+    let size = 0
+    for await (const value of response.body) {
+      checkCancelled()
+      const chunk = value instanceof Uint8Array ? value : new Uint8Array(value)
+      size += chunk.byteLength
+      if (size > MAX_RESPONSE_BYTES) throw new Error('provider_response_too_large')
+      chunks.push(chunk)
+    }
+    const joined = new Uint8Array(size)
+    let offset = 0
+    for (const chunk of chunks) { joined.set(chunk, offset); offset += chunk.byteLength }
+    text = new TextDecoder().decode(joined)
   } else {
-    text = await response.text()
-    if (Buffer.byteLength(text, 'utf8') > MAX_RESPONSE_BYTES) throw new Error('provider_response_too_large')
+    throw new Error('provider_response_unbounded')
   }
+  checkCancelled()
   try { return JSON.parse(text) } catch { throw new Error('provider_invalid_json') }
 }
 
@@ -124,6 +150,180 @@ export function decisionEndpointError(backend, endpoint) {
   return privateAddress ? null : 'insecure_endpoint'
 }
 
+const trimPath = path => path.replace(/\/+$/u, '')
+const joinPath = (base, suffix) => `${trimPath(base)}/${suffix}`
+
+/**
+ * Normalize the three supported address forms to one service identity and its concrete paths.
+ * A reverse-proxy prefix is retained. An OpenAI-compatible bare service root gets the standard
+ * `/v1` prefix; explicit full protocol paths remain explicit. Jev and Laya use SystemOne.
+ */
+export function decisionEndpointRoutes(backend, endpoint) {
+  if (!['openai_compatible', 'jev', 'laya'].includes(backend)) throw new TypeError('unsupported_decision_backend')
+  const error = decisionEndpointError(backend, endpoint)
+  if (error) throw new TypeError(error)
+  const url = new URL(endpoint)
+  const originalPath = url.pathname
+  const path = trimPath(originalPath)
+  const hasTrailingSlash = url.pathname.length > 1 && url.pathname.endsWith('/')
+  let apiRoot
+  let requestPath
+  let discoveryPath
+  let identityPath
+
+  if (backend === 'openai_compatible') {
+    if (path.endsWith('/chat/completions')) {
+      const candidateRoot = trimPath(path.slice(0, -'/chat/completions'.length))
+      if (candidateRoot === '/v1' || candidateRoot.endsWith('/v1')) {
+        apiRoot = candidateRoot
+        requestPath = originalPath
+        discoveryPath = joinPath(apiRoot, 'models')
+        identityPath = apiRoot
+      } else {
+        // Only the standard `/v1/chat/completions` shape is recognized. Preserve any other
+        // configured full endpoint exactly and do not infer where its model directory lives.
+        apiRoot = null
+        requestPath = originalPath
+        discoveryPath = null
+        identityPath = originalPath
+      }
+    } else if (path === '' || path.endsWith('/v1')) {
+      apiRoot = path.endsWith('/v1') ? path : joinPath(path, 'v1')
+      requestPath = joinPath(apiRoot, 'chat/completions')
+      discoveryPath = joinPath(apiRoot, 'models')
+      identityPath = apiRoot
+    } else {
+      // Earlier releases POSTed the configured path verbatim. An unknown path is therefore a
+      // legacy full endpoint, not a prefix to which this version may silently add `/v1`.
+      apiRoot = null
+      requestPath = originalPath
+      discoveryPath = null
+      identityPath = originalPath
+    }
+  } else if (backend === 'jev') {
+    if (path.endsWith('/v1/systemone')) apiRoot = trimPath(path.slice(0, -'/systemone'.length))
+    else apiRoot = path.endsWith('/v1') ? path : joinPath(path, 'v1')
+    requestPath = path.endsWith('/v1/systemone') ? path : joinPath(apiRoot, 'systemone')
+    discoveryPath = joinPath(apiRoot, 'models')
+    identityPath = apiRoot || '/v1'
+  } else {
+    let prefix
+    if (path.endsWith('/v1/systemone')) prefix = trimPath(path.slice(0, -'/v1/systemone'.length))
+    else if (path === '' || path.endsWith('/v1') || hasTrailingSlash) {
+      prefix = path.endsWith('/v1') ? trimPath(path.slice(0, -'/v1'.length)) : path
+    } else {
+      // Jev and Laya historically treated the configured value as a base URL and appended
+      // `/v1/systemone`; retain that behavior for older non-standard proxy prefixes.
+      prefix = path
+    }
+    apiRoot = joinPath(prefix, 'v1')
+    requestPath = path.endsWith('/v1/systemone') ? path : joinPath(apiRoot, 'systemone')
+    discoveryPath = joinPath(prefix, 'health')
+    identityPath = apiRoot || '/v1'
+  }
+
+  const build = pathname => {
+    const target = new URL(url.origin)
+    target.pathname = pathname || '/'
+    return target
+  }
+  return Object.freeze({
+    requestUrl: build(requestPath).toString(),
+    discoveryUrl: discoveryPath === null ? null : build(discoveryPath).toString(),
+    identity: `${backend}\n${url.origin}\n${identityPath}`,
+  })
+}
+
+/** Route-scoped reference used only inside the Host credentials provider. */
+export function decisionCredentialRef(backend, endpoint) {
+  const route = decisionEndpointRoutes(backend, endpoint)
+  const digest = createHash('sha256').update(route.identity).digest('hex')
+  return `MSE_DECISION_KEY_${digest}`
+}
+
+function projectDiscoveredModels(items, getId) {
+  if (!Array.isArray(items) || items.length > MAX_DISCOVERED_MODELS) {
+    throw new Error('model_discovery_invalid_response')
+  }
+  const seen = new Set()
+  const models = []
+  for (const item of items) {
+    const raw = getId(item)
+    if (typeof raw !== 'string') continue
+    const id = raw.trim()
+    if (id.length === 0 || id.length > 128 || /[\u0000-\u001f\u007f]/u.test(id) || seen.has(id)) continue
+    seen.add(id)
+    models.push({ id })
+  }
+  if (items.length > 0 && models.length === 0) throw new Error('model_discovery_invalid_response')
+  return models
+}
+
+/** Read-only model-directory request. It never saves settings or makes an inference request. */
+export async function discoverDecisionModels({ backend, endpoint, apiKey, signal, timeoutMs = 8_000,
+  fetchImpl = globalThis.fetch }) {
+  const route = decisionEndpointRoutes(backend, endpoint)
+  if (route.discoveryUrl === null) throw new Error('model_discovery_not_supported')
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 30_000) {
+    throw new TypeError('invalid_timeout')
+  }
+  if (typeof fetchImpl !== 'function') throw new Error('model_discovery_unavailable')
+  if (apiKey !== undefined && (typeof apiKey !== 'string' || apiKey.length === 0 || apiKey.length > 4096)) {
+    throw new Error('provider_secret_unavailable')
+  }
+  if (signal?.aborted) throw new Error('cancelled')
+  const target = new URL(route.discoveryUrl)
+  const origin = new URL(endpoint).origin
+  if (target.origin !== origin) throw new Error('invalid_endpoint')
+
+  const controller = new AbortController()
+  const abort = () => controller.abort()
+  let timedOut = false
+  const assertActive = () => {
+    if (timedOut) throw new Error('model_discovery_timeout')
+    if (signal?.aborted || controller.signal.aborted) throw new Error('cancelled')
+  }
+  signal?.addEventListener('abort', abort, { once: true })
+  const timer = setTimeout(() => { timedOut = true; controller.abort() }, timeoutMs)
+  try {
+    const headers = { accept: 'application/json' }
+    if (apiKey !== undefined) headers.authorization = `Bearer ${apiKey}`
+    const response = await fetchImpl(target.toString(), { method: 'GET', headers,
+      signal: controller.signal, redirect: 'error' })
+    assertActive()
+    if (response.status === 404) throw new Error('model_discovery_not_supported')
+    if (response.status === 401 || response.status === 403) throw new Error('model_discovery_auth_required')
+    if (!response.ok) throw new Error('model_discovery_http_error')
+    const payload = await boundedJson(response, controller.signal)
+    assertActive()
+    if (backend === 'laya') {
+      if (!isObject(payload) || payload.status !== 'ok') throw new Error('model_discovery_invalid_response')
+      if (!Array.isArray(payload.loaded)) {
+        return { ok: true, code: 'model_discovery_details_unavailable', models: [], autoAvailable: true }
+      }
+      const models = projectDiscoveredModels(payload.loaded, item => item)
+      return { ok: true, code: models.length === 0 ? 'model_discovery_no_loaded_models' : null,
+        models, autoAvailable: true }
+    }
+    const items = backend === 'jev' ? payload?.models : payload?.data ?? payload?.models
+    const models = projectDiscoveredModels(items,
+      item => backend === 'jev' ? item?.name : item?.id)
+    return { ok: true, code: models.length === 0 ? 'model_discovery_empty' : null,
+      models, autoAvailable: false }
+  } catch (error) {
+    if (signal?.aborted || error?.name === 'AbortError' && !timedOut) throw new Error('cancelled')
+    if (timedOut) throw new Error('model_discovery_timeout')
+    if (['model_discovery_not_supported', 'model_discovery_auth_required', 'model_discovery_http_error',
+      'model_discovery_invalid_response', 'provider_response_too_large', 'provider_invalid_json',
+      'provider_response_unbounded', 'provider_secret_unavailable', 'invalid_endpoint', 'insecure_endpoint'].includes(error?.message)) throw error
+    throw new Error('model_discovery_failed')
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', abort)
+    controller.abort()
+  }
+}
+
 /** One bounded request with caller-controlled cancellation. No SDK retries or hidden replay. */
 export async function requestDecision({ backend, endpoint, model, evidence, signal, timeoutMs = 30_000,
   fetchImpl = globalThis.fetch, resolveSecret, secretRef, hostCall, outputTokens = 512,
@@ -164,7 +364,7 @@ export async function requestDecision({ backend, endpoint, model, evidence, sign
   if (typeof fetchImpl !== 'function' || (secretRef && typeof resolveSecret !== 'function')) throw new Error('provider_unavailable')
   const endpointError = decisionEndpointError(backend, endpoint)
   if (endpointError) throw new TypeError(endpointError)
-  const url = new URL(endpoint)
+  const routes = decisionEndpointRoutes(backend, endpoint)
   const controller = new AbortController()
   const abort = () => controller.abort()
   signal?.addEventListener('abort', abort, { once: true })
@@ -193,12 +393,11 @@ export async function requestDecision({ backend, endpoint, model, evidence, sign
     }
     const headers = { 'content-type': 'application/json', accept: 'application/json' }
     if (secret) headers.authorization = `Bearer ${secret}`
-    let requestUrl = url.toString()
+    let requestUrl = routes.requestUrl
     let body
     if (backend === 'jev' || backend === 'laya') {
-      requestUrl = requestUrl.replace(/\/$/u, '')
-      if (!requestUrl.endsWith('/v1/systemone')) requestUrl += '/v1/systemone'
-      body = { state: JSON.parse(state), model, questions: { action: { type: 'choice',
+      body = { state: JSON.parse(state), model: backend === 'laya' && model === 'auto' ? undefined : model,
+        questions: { action: { type: 'choice',
         instructions: 'Classify the candidate disposition from the supplied evidence. This is advisory only. Choose exactly one action.',
         criteria: { prioritize_validation: 'Prioritize this candidate for existing trusted objective validation; does not assert success.',
           suggest_merge: 'Suggest generating a new candidate only with a mergeTarget copied exactly from state.mergeCandidates. If there is no unique safe target, choose wait.',
@@ -242,12 +441,13 @@ export async function requestDecision({ backend, endpoint, model, evidence, sign
   } catch (error) {
     if (signal?.aborted) throw new Error('cancelled')
     if (controller.signal.aborted) throw new Error('provider_timeout')
-    if (['cancelled', 'provider_timeout', 'provider_response_too_large', 'provider_invalid_json',
+    if (['cancelled', 'provider_timeout', 'provider_response_too_large', 'provider_response_unbounded', 'provider_invalid_json',
       'provider_unavailable', 'provider_secret_unavailable', 'insecure_endpoint', 'invalid_endpoint'].includes(error?.message)) throw error
     if (error?.message === 'provider_http_error') throw error
     throw new Error('provider_failed')
   } finally {
     clearTimeout(timer)
     signal?.removeEventListener('abort', abort)
+    controller.abort()
   }
 }
