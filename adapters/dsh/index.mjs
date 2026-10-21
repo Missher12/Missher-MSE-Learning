@@ -372,6 +372,8 @@ export function apply(ctx, config = {}) {
       0, EVALUATION_TOKENS_MAX, SETTINGS_DEFAULTS.evaluationTokensPerDay),
     evaluationCallsPerDay: boundedInt(readVolatile(config, 'evaluationCallsPerDay', SETTINGS_DEFAULTS.evaluationCallsPerDay),
       0, EVALUATION_CALLS_MAX, SETTINGS_DEFAULTS.evaluationCallsPerDay),
+    evaluationBudgetMode: readVolatile(config, 'evaluationBudgetMode', SETTINGS_DEFAULTS.evaluationBudgetMode) === 'unlimited'
+      ? 'unlimited' : 'limited',
     decisionBackend: readVolatile(config, 'decisionBackend', SETTINGS_DEFAULTS.decisionBackend),
     decisionModel: String(readVolatile(config, 'decisionModel', '') ?? '').slice(0, 128),
     decisionEndpoint: String(readVolatile(config, 'decisionEndpoint', '') ?? '').slice(0, 2048),
@@ -391,7 +393,8 @@ export function apply(ctx, config = {}) {
   const engine = new LearningEngine({ stateRoot: ctx.dshHomePath('mse-learning'), adapterId: 'dsh',
     maxContextBytes: initial.maxContextBytes,
     ...(verifiedNow === null ? {} : { now: verifiedNow }),
-    evaluationTokensPerDay: initial.evaluationTokensPerDay, evaluationCallsPerDay: initial.evaluationCallsPerDay })
+    evaluationTokensPerDay: initial.evaluationTokensPerDay, evaluationCallsPerDay: initial.evaluationCallsPerDay,
+    evaluationBudgetMode: initial.evaluationBudgetMode })
   // DSH 0.2.1-alpha.2 executes registered guards synchronously after its pre-execute waterfall and
   // before dispatch. Only host configuration can register a deterministic template; model/tool
   // output never reaches this seam. No templates are installed by default. Registration returns an
@@ -410,6 +413,7 @@ export function apply(ctx, config = {}) {
   // Identity of the last volatile snapshots seen. Volatile reads return a new frozen object per
   // committed write, so a reference change is exactly "the operator saved something".
   let seen = null
+  let pendingBudgetModeChange = false
   let reasons = Object.freeze(['plugin_not_started'])
   // THE HOST-FACT GENERATION, declared before ANY code path that can be reached from a wake-up.
   //
@@ -630,6 +634,9 @@ export function apply(ctx, config = {}) {
     // files on disk never changed. `lifecycle` is what separates the two uses: a read recomputes and
     // REPORTS the permission, and only a real settings write or lifecycle event applies it.
     const p = readPolicy()
+    if (seen !== null && seen.evaluationBudgetMode !== p.evaluationBudgetMode) {
+      pendingBudgetModeChange = true
+    }
     // An explicit settings change that switches automatic validation OFF cancels what it started;
     // the running provider request is aborted through the job's own signal. Read-only callers never
     // reach this branch because they do not change the policy.
@@ -645,7 +652,8 @@ export function apply(ctx, config = {}) {
       && seen.autoValidationEnabled === p.autoValidationEnabled
       && seen.verificationSessionId === p.verificationSessionId
       && seen.maxContextBytes === p.maxContextBytes && seen.evaluationTokensPerDay === p.evaluationTokensPerDay
-      && seen.evaluationCallsPerDay === p.evaluationCallsPerDay && seen.legacy === legacyOwner
+      && seen.evaluationCallsPerDay === p.evaluationCallsPerDay
+      && seen.evaluationBudgetMode === p.evaluationBudgetMode && seen.legacy === legacyOwner
       && seen.disposed === disposed) {
       // Nothing changed. A READ still recomputes and reports, but it applies nothing: with no
       // lifecycle moment there is nothing to apply, and re-applying on a read is how a page refresh
@@ -656,7 +664,7 @@ export function apply(ctx, config = {}) {
     seen = { ...p, legacy: legacyOwner, disposed }
     try {
       engine.configure({ maxContextBytes: p.maxContextBytes, evaluationTokensPerDay: p.evaluationTokensPerDay,
-        evaluationCallsPerDay: p.evaluationCallsPerDay })
+        evaluationCallsPerDay: p.evaluationCallsPerDay, evaluationBudgetMode: p.evaluationBudgetMode })
     } catch (error) { ctx.logger.warn('mse-learning: %s', error?.code ?? 'invalid_configuration') }
     const next = []
     if (disposed) next.push('plugin_disposed')
@@ -714,7 +722,8 @@ export function apply(ctx, config = {}) {
       decisions: { latest: [], scopeRequired: true },
       user: { enabled: p.enabled, reflectionEnabled: p.reflectionEnabled,
         autoValidationEnabled: p.autoValidationEnabled, maxContextBytes: p.maxContextBytes,
-        evaluationTokensPerDay: p.evaluationTokensPerDay, evaluationCallsPerDay: p.evaluationCallsPerDay },
+        evaluationTokensPerDay: p.evaluationTokensPerDay, evaluationCallsPerDay: p.evaluationCallsPerDay,
+        evaluationBudgetMode: p.evaluationBudgetMode },
       verificationCapabilities: {
         taskContractCore: 'available', projectTestHostRunner: 'not_connected',
         structuredArtifactHostIntake: taskManifestIntake ? 'dsh_root_package_json_checker' : 'not_connected',
@@ -735,11 +744,14 @@ export function apply(ctx, config = {}) {
       autoState: (() => {
         if (current.length > 0) return 'disabled'
         if (!p.autoValidationEnabled) return 'off'
-        if (p.evaluationTokensPerDay <= 0 || p.evaluationCallsPerDay <= 0) return 'budget_exhausted'
+        if (p.evaluationBudgetMode === 'limited'
+          && (p.evaluationTokensPerDay <= 0 || p.evaluationCallsPerDay <= 0)) return 'budget_exhausted'
         const paid = (() => { try { return engine.status() } catch { return null } })()
-        if (paid?.evaluationUnknown24h > 0) return 'cost_unknown'
-        if (paid?.evaluationTokensReserved24h >= p.evaluationTokensPerDay
-          || paid?.evaluationCallsLast24h >= p.evaluationCallsPerDay) return 'waiting_budget'
+        if (paid?.evaluationLedgerFull === true) return 'spend_ledger_full'
+        if (p.evaluationBudgetMode === 'limited' && paid?.evaluationUnknown24h > 0) return 'cost_unknown'
+        if (p.evaluationBudgetMode === 'limited'
+          && (paid?.evaluationTokensReserved24h >= p.evaluationTokensPerDay
+            || paid?.evaluationCallsLast24h >= p.evaluationCallsPerDay)) return 'waiting_budget'
         // JobQueue.status().running is the active job ID (string) or null, not a count.
         // Check it before route readiness: a live job is already executing under its frozen route.
         const runningJob = (() => { try { return jobs.status().running } catch { return null } })()
@@ -761,10 +773,12 @@ export function apply(ctx, config = {}) {
         // first scan, so they cannot answer this question.)
         autoValidation: current.length === 0 && p.autoValidationEnabled
           && (autoRoutesReady() || (p.verificationSessionId !== '' && backfillRoute !== null))
-          && p.evaluationTokensPerDay > 0 && p.evaluationCallsPerDay > 0,
+          && (p.evaluationBudgetMode === 'unlimited'
+            || (p.evaluationTokensPerDay > 0 && p.evaluationCallsPerDay > 0)),
         reasons: [...current], legacyOwner, disposed },
       budget: { turnBytes: p.maxContextBytes, sessionBytes: 1536, maxLessons: 2, storeCap: null,
-        evaluationTokensPerDay: p.evaluationTokensPerDay, evaluationCallsPerDay: p.evaluationCallsPerDay },
+        evaluationTokensPerDay: p.evaluationTokensPerDay, evaluationCallsPerDay: p.evaluationCallsPerDay,
+        evaluationBudgetMode: p.evaluationBudgetMode },
       // THE PAID BUDGET, STATED EXACTLY. The operator chose "20 000 tokens / at most 2 tasks a day",
       // and a card that just repeated the limit would hide three things that matter:
       //   • BOTH paid tracks count against it — a model review and an objective evaluation are both
@@ -792,21 +806,35 @@ export function apply(ctx, config = {}) {
         const jobsOpen = Number.isSafeInteger(status?.evaluationJobsOpen) ? status.evaluationJobsOpen : null
         const nextAvailableAt = Number.isFinite(status?.evaluationNextAvailableAt)
           ? status.evaluationNextAvailableAt : null
-        const budgetState = unknown === null ? 'unavailable' : unknown > 0 ? 'cost_unknown'
-          : (reserved !== null && reserved >= p.evaluationTokensPerDay)
-            || (calls !== null && calls >= p.evaluationCallsPerDay) ? 'waiting_budget'
-            : jobsOpen > 0 ? 'running' : 'ready'
-        return { state: budgetState, window: 'rolling_24h', coversTasks: ['model_review', 'objective_evaluation'],
+        const ledgerFull = status?.evaluationLedgerFull === true
+        const budgetState = status === null ? 'unavailable' : ledgerFull ? 'spend_ledger_full'
+          : p.evaluationBudgetMode === 'unlimited' ? jobsOpen > 0 ? 'running' : 'unlimited'
+            : unknown === null ? 'unavailable' : unknown > 0 ? 'cost_unknown'
+              : (reserved !== null && reserved >= p.evaluationTokensPerDay)
+                || (calls !== null && calls >= p.evaluationCallsPerDay) ? 'waiting_budget'
+                : jobsOpen > 0 ? 'running' : 'ready'
+        return { state: budgetState, window: 'rolling_24h', coversTasks: ['model_review', 'objective_evaluation', 'controlled_merge'],
+          evaluationBudgetMode: p.evaluationBudgetMode,
+          explanation: p.evaluationBudgetMode === 'unlimited'
+            ? 'No rolling 24-hour token or logical-task allowance; per-request safeguards and bounded receipt storage remain active.'
+            : 'Rolling 24-hour token and logical-task allowances apply.',
           tokensPerDay: p.evaluationTokensPerDay, callsPerDay: p.evaluationCallsPerDay,
           tokensReserved: reserved, tokensKnown: known, callsUsed: calls, requestsUsed: requests, tasksUnknown: unknown,
-          jobsOpen, nextAvailableAt,
+          jobsOpen, nextAvailableAt, ledgerRows: status?.evaluationLedgerRows ?? null,
+          ledgerCapacity: status?.evaluationLedgerCapacity ?? null,
+          ledgerBytes: status?.evaluationLedgerBytes ?? null,
+          ledgerByteCapacity: status?.evaluationLedgerByteCapacity ?? null,
           // `known: true` means every paid attempt in this window reported a readable measurement, so
           // the measured total can be presented as an actual. `null` on any field means the core could
           // not answer — reported as unknown, never as a zero.
           known: reserved === null ? null : (unknown === 0),
-          remainingTokens: reserved === null ? null
+          remainingTokens: p.evaluationBudgetMode === 'unlimited' || reserved === null ? null
             : Math.max(0, p.evaluationTokensPerDay - reserved),
-          remainingCalls: calls === null ? null : Math.max(0, p.evaluationCallsPerDay - calls) }
+          remainingCalls: p.evaluationBudgetMode === 'unlimited' || calls === null ? null
+            : Math.max(0, p.evaluationCallsPerDay - calls),
+          remainingExplanation: p.evaluationBudgetMode === 'unlimited'
+            ? 'Unlimited mode: no remaining token or task allowance is calculated.'
+            : 'A null value means the usage counter could not be read.' }
       })(),
       review, settlement, jobs: jobs.status(),
       // The durable pause the user asked for, and — if the control write has not been confirmed —
@@ -1014,7 +1042,8 @@ export function apply(ctx, config = {}) {
           if (prepared.dispatchHash) {
             const dispatched = engine.reflectionDispatch({ ticket, dispatchHash: prepared.dispatchHash })
             if (dispatched?.ok !== true) {
-              if (dispatched?.code === 'evaluation_budget' || dispatched?.code === 'evaluation_budget_calls') {
+              if (dispatched?.code === 'evaluation_budget' || dispatched?.code === 'evaluation_budget_calls'
+                || dispatched?.code === 'spend_ledger_full') {
                 return { state: 'done', code: null, result: { kind: 'reflection', status: 'skipped',
                   reason: 'reflection_budget' } }
               }
@@ -2442,19 +2471,12 @@ export function apply(ctx, config = {}) {
   // Without this, a pause was only observed by the next `sync()` call site, so an automatic
   // review could be started, and its result written, long after the operator paused.
   ctx.effect(() => ctx.on('settings/document-updated', namespace => {
-    // A settings write is exactly when the operator may have just opened the automatic switch — or
-    // raised the allowance that parked a plan. Both are re-armed here.
-    // Re-arm ONLY when the switch is actually on. Unconditionally re-arming here undid the abort an
-    // explicit auto-off had just performed (the handler runs before this timeout), so a run that was
-    // cancelled went on holding the provider.
-    if (namespace === SETTINGS_NAMESPACE) setTimeout(() => {
-      if (!readPolicy().autoValidationEnabled || disposed) return
-      automation.rearm()
-      scheduleAutoValidation()
-    }, 0)
+    const previousBudgetMode = seen?.evaluationBudgetMode
     if (disposed) return
     if (typeof namespace === 'string' && namespace !== SETTINGS_NAMESPACE) return
     sync()
+    const budgetModeChanged = pendingBudgetModeChange || (previousBudgetMode !== undefined
+      && previousBudgetMode !== readPolicy().evaluationBudgetMode)
     // The host emits this event with a `void` return, so it is a notification, not a receipt:
     // the settings document being saved proves nothing about the durable settlement control.
     // The control transaction is attempted here and its outcome is reported separately.
@@ -2462,6 +2484,15 @@ export function apply(ctx, config = {}) {
     invalidateHostFacts()
     void refreshHostFacts().catch(() => {})
     sync({ resume: true, lifecycle: true })
+    // A mode switch wakes only allowance/storage waits; it does not retry unknown results or reset
+    // provider-failure backoff. Other settings retain the existing general rearm behavior.
+    if (namespace === SETTINGS_NAMESPACE) setTimeout(() => {
+      if (!readPolicy().autoValidationEnabled || disposed) return
+      if (budgetModeChanged) automation.rearmBudgetWaiters()
+      else automation.rearm()
+      scheduleAutoValidation()
+    }, 0)
+    if (budgetModeChanged && namespace === SETTINGS_NAMESPACE) pendingBudgetModeChange = false
     const wanted = !(volatileSettings().enabled ?? SETTINGS_DEFAULTS.enabled)
     // A settings NOTIFICATION is not a control change. `lastControlPaused` starts as `null` in every
     // new process, and comparing `wanted` with `null` made the first settings event of every start

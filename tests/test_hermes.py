@@ -316,6 +316,20 @@ class HermesTests(unittest.TestCase):
             self.assertEqual(hooks.config["evaluationCallsPerDay"], 1)
 
 
+    def test_evaluation_budget_mode_defaults_limited_and_reads_config_before_environment(self):
+        with patch.dict(os.environ, {"MSE_EVALUATION_BUDGET_MODE": "limited"}):
+            hooks = module.Hooks(config=self.config)
+            self.assertEqual(hooks.config["evaluationBudgetMode"], "limited")
+        with patch.dict(os.environ, {"MSE_EVALUATION_BUDGET_MODE": "unlimited"}):
+            hooks = module.Hooks(config=self.config)
+            self.assertEqual(hooks.config["evaluationBudgetMode"], "unlimited")
+            configured = module.Hooks(config={**self.config, "evaluationBudgetMode": "limited"})
+            self.assertEqual(configured.config["evaluationBudgetMode"], "limited")
+        with patch.dict(os.environ, {"MSE_EVALUATION_BUDGET_MODE": "unrecognised"}):
+            hooks = module.Hooks(config=self.config)
+            self.assertEqual(hooks.config["evaluationBudgetMode"], "limited")
+
+
     def test_review_keeps_nested_default_model_provider_and_cancellation(self):
         calls = []
         def resolve_route(**kwargs):

@@ -4,7 +4,9 @@ English | [中文](README.md) · [Desktop and downloads](https://github.com/Miss
 
 Persists scoped user corrections and method candidates for DSH, recalls relevant lessons within a byte budget, and records adoption and verification established by the trusted host. It does not train model weights or guarantee that a model will never repeat a mistake.
 
-Package: `@missher/dsh-mse-learning`, version **0.12.0**. Remote decision settings bring the model name, API endpoint and actual API key into one page, with optional model-directory discovery. Keys use route-scoped Host credential storage. Budget controls wrap at narrow widths, and upgrades preserve saved settings. See [release notes](docs/AUTONOMY_0.12.0.md), [delivery status and checksums](https://github.com/Missher12/Missher-MSE-Learning/blob/main/PUBLICATION.md) and [validation](VALIDATION.md).
+Package: `@missher/dsh-mse-learning`, version **0.13.0**. Remote decision settings bring the model name, API endpoint and actual API key into one page, with optional model-directory discovery. Keys use route-scoped Host credential storage. Budget controls wrap at narrow widths, and upgrades preserve saved settings. See the [0.13.0 notes](docs/AUTONOMY_0.13.0.md), [delivery status and checksums](https://github.com/Missher12/Missher-MSE-Learning/blob/main/PUBLICATION.md) and [validation](VALIDATION.md).
+
+This release combines the budget slider with Limited and Unlimited modes. Limited uses slider presets or exact numeric values. Unlimited continuously handles eligible work while retaining pause controls, measured usage and protection against duplicate execution. See the [validation record](VALIDATION.md) for evidence at each delivery layer.
 
 The host-title session pickers from alpha.17 remain. Titles are display-only and do not alter scope, recall identity or budgets. DSH scheduling does not establish equivalent lifecycle integration for every Agent. The historical `dsh-missher-evolution` package is a separate product; this plugin does not read or migrate its data.
 
@@ -23,8 +25,9 @@ Default recall limits are **2 lessons / 768 UTF-8 bytes per turn** and **1536 by
 
 - **Trial does not mean proven benefit.** Candidate and baseline answer independently on the same route; a separate judge sees anonymous answers and checks both label orders. Safe, applicable advice with known costs can become `reviewed` / `trial`; a neutral-safe tie still has `benefit=unproven`. Injected trial text explicitly identifies its unverified status.
 - **Objective evidence determines validated.** Registered algorithms or the Host-owned `mse-lifecycle-v1` scenario pack supply fixed checks; models supply answers only. Injection, model self-reports and claimed success are not verification. A domain verdict covers its registered request-generation, concurrent-ticket and acceptance-evidence cases, not arbitrary tasks.
-- **Automatic validation is off by default** (`autoValidationEnabled=false`) and the evaluation token budget defaults to **0**. An explicit zero issues no paid evaluation calls. Manual and automatic evaluations share rolling 24-hour limits and reserve before requesting; unknown usage is not zero.
-- **Evaluation presets** are pause, 20K/2, 50K/5, 100K/10, 200K/20 and custom. A task is a distinct ticket that dispatched at least one physical request in the rolling 24-hour window; multiple steps in one task count once. Physical provider requests are counted separately. Missing budget fields in legacy settings remain fail-closed at 0/2; a preset takes effect only after explicit selection and save.
+- **Automatic validation is off by default** (`autoValidationEnabled=false`) and the evaluation token budget defaults to **0**. In Limited mode, an explicit zero issues no paid evaluation calls. Unlimited retains the saved finite values without applying them as rolling aggregate caps. Manual and automatic evaluations share accounting and admission checks and reserve before requesting; unknown usage is not zero.
+- **Limited is the default budget mode.** Version 0.13.0 adds an Unlimited mode that removes the shared rolling 24-hour token and logical-task caps. Per-request limits, physical-call counts, one-at-a-time concurrency, unknown-cost isolation, pause/source/version gates, deduplication, promotion gates and bounded receipt storage remain active. Actual token, task, request and unknown-cost counters remain visible; remaining allowance is shown as “Continuous” in Unlimited mode. Switching modes preserves the finite values and does not clear tickets or replay work. Automatic validation remains a separate opt-in and is never enabled by changing the budget mode.
+- **Limited-mode evaluation presets** are pause, 20K/2, 50K/5, 100K/10, 200K/20 and custom. A task is a distinct ticket that dispatched at least one physical request in the rolling 24-hour window; multiple steps in one task count once. Physical provider requests are counted separately. Missing budget fields in legacy settings remain fail-closed at 0/2; a preset takes effect only after explicit selection and save.
 - DSH and Hermes persist per-step request identity, response and usage. Resume reuses completed steps; a dispatched step with unknown cost is never replayed. A fresh Hermes process resumes only after the original source session reports a trusted `pre_api_request` route again; without that proof it waits.
 - New candidates bind their actual source session/turn and route. Historical candidates whose source cannot be recovered require an **explicit verification session**. Its provider/model/reasoning effort supplies the backfill route without changing the original project or silently borrowing the latest session's model.
 - The overview separates recorded lessons, corrections, pending work, trials, validation and adoption. Library-wide reads do not widen recall scope. Original applicability/exclusion text remains; unsupported conditions block recall with a visible reason.
@@ -48,18 +51,20 @@ Discovery sends read-only requests and does not run inference. A model list or s
 
 1. Confirm the version and checksum on the project release page before installing.
 2. Turn on **automatic validation**. For historical candidates without a recoverable source, explicitly select a **verification session** with a configured model route. It supplies the provider, model and reasoning effort without changing the lesson's original project.
-3. Set a **nonzero evaluation token allowance** you accept, and ensure the evaluation-count allowance permits a plan. After saving, inspect actual control acknowledgement, queue stages and blocking reasons. A recorded candidate does not imply immediate promotion.
+3. Choose a budget mode: **Limited** uses your saved token and task allowances; **Unlimited** removes the rolling aggregate caps and can incur continuing costs. After saving, inspect actual control acknowledgement, queue stages and blocking reasons. A recorded candidate does not imply immediate promotion.
 4. Distinguish recorded lessons, trials and validation. Safety review can admit a trial; objective checks are required for validated status within the registered domain. Turning off automatic validation stops later automatic steps. Reflection has its own switch and frequency limits.
 
-Defaults remain **automatic validation off, token allowance 0 and task allowance 2**; legacy settings missing budget fields also use 0/2. A preset changes these values only after explicit selection and save. Tasks and physical requests are counted separately. Reading the page does not start models.
+Defaults remain **Limited mode, automatic validation off, token allowance 0 and task allowance 2**; legacy settings missing the mode or budget fields use these defaults too. Mode and allowance changes require explicit selection and save. Tasks and physical requests are counted separately. Reading the page does not start models.
 
 ## Settings screenshots
 
-These are actual 0.12.0 controls in an isolated Ubuntu community 0.2.1-rc.2 desktop, using a synthetic model, loopback endpoint and empty key field, with both background switches off. The background Disconnected label comes from offline acceptance, not a production service failure. Actual content widths of approximately 311 and 559 pixels were checked; other platforms are not inferred from these images.
+The model/key example is retained from 0.12.0; the budget slider example comes from this 0.13.0 acceptance. These are actual isolated Ubuntu community 0.2.1-rc.2 controls with synthetic data. Disconnected reflects offline acceptance. Budget content widths of about 311 and 559 pixels were checked; these images do not establish acceptance on other platforms.
 
 ![Model, endpoint and saved API key status](https://raw.githubusercontent.com/Missher12/Missher-MSE-Learning/v0.12.0/docs/images/native-rc2-0.12.0-settings.png)
 
-![Wrapped budget presets and aligned inputs](https://raw.githubusercontent.com/Missher12/Missher-MSE-Learning/v0.12.0/docs/images/native-rc2-0.12.0-budget.png)
+![Budget mode, slider and precise inputs](https://raw.githubusercontent.com/Missher12/Missher-MSE-Learning/v0.13.0/docs/images/native-rc2-0.13.0-budget.png)
+
+[View the narrow budget layout](https://raw.githubusercontent.com/Missher12/Missher-MSE-Learning/v0.13.0/docs/images/native-rc2-0.13.0-budget-narrow.png)
 
 ## Evidence and platform boundaries
 

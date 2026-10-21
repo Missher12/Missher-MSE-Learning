@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { LessonStore, LearningError, check } from './store.mjs'
+import { LessonStore, LearningError, MAX_STORE_BYTES, check } from './store.mjs'
 import { getMethod, listMethods, checkArtifact as inspectArtifact, applyMethod, registeredTrials } from './checks.mjs'
 import { assessEvaluation } from './evaluation.mjs'
 import { buildJudgePrompt, interpretReview, planHash, JUDGE_SYSTEM_PROMPT, MAX_ARM_CHARS,
@@ -53,6 +53,15 @@ const TRUSTED_RESPONSE_MAX_BYTES = 8_192
 const CLI_RESPONSE_NEWLINE_BYTES = 1
 export const DEFAULT_CONTEXT_BYTES = 768
 export const MAX_CONTEXT_BYTES = 1536
+// Spend receipts must remain exact for the full rolling window and while a ticket is live.
+// This is storage protection, not an evaluation allowance: when all rows are still protected,
+// new paid admissions wait for normal pruning instead of dropping cost/idempotency evidence.
+const MAX_SPEND_ROWS = 4_096
+const SPEND_ROW_GROWTH_RESERVE_BYTES = 2 * 1024
+// One physical answer is bounded to 8 KiB of UTF-8, which can expand to roughly 48 KiB in JSON
+// when control characters need escaping. Keep enough room for that checkpoint plus ticket metadata.
+const LIVE_TICKET_SETTLEMENT_RESERVE_BYTES = 64 * 1024
+const STORE_WRITE_RESERVE_BYTES = 64 * 1024
 /**
  * The frozen contract of the stage-3c adoption index: how many sessions it keeps, how many lessons
  * one session may bind and how long a binding stays usable as attribution evidence. Exported so an
@@ -423,6 +432,42 @@ function budgetNextAt(rows, now) {
     ? row.budgetEntries.filter(entry => entry.at > cutoff && entry.dispatched === true)
     : (row.at > cutoff ? [{ at: row.at }] : []))
   return entries.length ? Math.min(...entries.map(entry => entry.at + DAY)) : null
+}
+
+function storeBodyBytes(state, includeNextRevision = false) {
+  const persistedState = includeNextRevision ? { ...state, revision: state.revision + 1 } : state
+  return Buffer.byteLength(JSON.stringify(persistedState), 'utf8')
+}
+
+function spendCapacityUseBytes(state, count = 0, additionalLiveTickets = 0, includeNextRevision = true) {
+  if (!Number.isSafeInteger(count) || count < 0 || !Number.isSafeInteger(additionalLiveTickets)
+    || additionalLiveTickets < 0 || (state.spends?.length ?? 0) + count > MAX_SPEND_ROWS) return Infinity
+  const bodyBytes = storeBodyBytes(state, includeNextRevision)
+  const ticketReserve = (state.jobs ?? []).reduce((total, job) => total
+    + (Number.isSafeInteger(job.storeReserveRemaining) ? job.storeReserveRemaining
+      : LIVE_TICKET_SETTLEMENT_RESERVE_BYTES), 0)
+  const liveTickets = (state.events ?? []).reduce((total, event) => {
+    if (event?.reflection !== true || event.settled === true) return total
+    return total + 1 + (typeof event.generationSpendId === 'string' ? 1 : 0)
+  }, 0) + additionalLiveTickets
+  const reserve = STORE_WRITE_RESERVE_BYTES + ticketReserve + liveTickets * LIVE_TICKET_SETTLEMENT_RESERVE_BYTES
+    + count * SPEND_ROW_GROWTH_RESERVE_BYTES
+  return bodyBytes + reserve
+}
+
+function hasSpendCapacity(state, count = 1, additionalLiveTickets = 0, includeNextRevision = true) {
+  return spendCapacityUseBytes(state, count, additionalLiveTickets, includeNextRevision) <= MAX_STORE_BYTES
+}
+
+function ensureTicketStorageReserve(state, job) {
+  const previous = job.storeReserveRemaining
+  const remaining = Number.isSafeInteger(previous) ? previous : LIVE_TICKET_SETTLEMENT_RESERVE_BYTES
+  if (remaining >= LIVE_TICKET_SETTLEMENT_RESERVE_BYTES) return true
+  job.storeReserveRemaining = LIVE_TICKET_SETTLEMENT_RESERVE_BYTES
+  if (hasSpendCapacity(state, 0)) return true
+  if (previous === undefined) delete job.storeReserveRemaining
+  else job.storeReserveRemaining = previous
+  return false
 }
 
 /**
@@ -1735,7 +1780,7 @@ function validateState(state) {
   if (state.schema === 2) {
     check(Array.isArray(state.experiments) && state.experiments.length <= 256
       && Array.isArray(state.jobs) && state.jobs.length <= 32
-      && Array.isArray(state.spends) && state.spends.length <= 128, 'invalid_store')
+      && Array.isArray(state.spends) && state.spends.length <= MAX_SPEND_ROWS, 'invalid_store')
     for (const s of state.spends) check(Number.isFinite(s.at) && ['reflection', 'evaluation', 'review', 'decision', 'generation'].includes(s.kind)
       && Number.isSafeInteger(s.tokens) && s.tokens >= 0
       && (s.budgetEntries === undefined || (Array.isArray(s.budgetEntries) && s.budgetEntries.length <= 38
@@ -1746,6 +1791,9 @@ function validateState(state) {
           && (row.known === undefined || row.known === null || typeof row.known === 'boolean')
           && (row.dispatched === undefined || typeof row.dispatched === 'boolean')))), 'invalid_store')
     for (const job of state.jobs) {
+      check(job.storeReserveRemaining === undefined || (Number.isSafeInteger(job.storeReserveRemaining)
+        && job.storeReserveRemaining >= 0 && job.storeReserveRemaining <= LIVE_TICKET_SETTLEMENT_RESERVE_BYTES),
+      'invalid_store')
       if (job.taskReplayCases === undefined) continue
       check(job.packId === 'package-json-structure-v1' && Array.isArray(job.taskReplayCases)
         && job.taskReplayCases.length >= 1 && job.taskReplayCases.length <= 2
@@ -2883,7 +2931,7 @@ function decisionTicketHasKnownSettledCost(state, row) {
 
 function decisionTicketNeverDispatched(state, row) {
   if (row?.state !== 'wait'
-    || !['evaluation_budget', 'evaluation_budget_calls', 'decision_not_dispatched'].includes(row.error)
+    || !['evaluation_budget', 'evaluation_budget_calls', 'spend_ledger_full', 'decision_not_dispatched'].includes(row.error)
     || row.usage !== undefined || row.primaryResult !== undefined || row.checkpoint !== undefined
     || row.fallbackCheckpoint !== undefined || state.jobs.some(job => job.ticket === row.ticket)) return false
   const spend = state.spends.find(item => item.ticket === row.ticket && item.kind === 'decision')
@@ -2894,14 +2942,16 @@ function decisionTicketNeverDispatched(state, row) {
 /** Trusted local host API. A model's tool call must not be allowed to mint verified evidence. */
 export class LearningEngine {
   constructor({ stateRoot, adapterId, instanceId = 'default', maxContextBytes = DEFAULT_CONTEXT_BYTES, maxLessons = 2,
-    evaluationTokensPerDay = 0, evaluationCallsPerDay = 2, now = Date.now }) {
+    evaluationTokensPerDay = 0, evaluationCallsPerDay = 2, evaluationBudgetMode = 'limited', now = Date.now }) {
     this.adapter = id(adapterId); this.instance = id(instanceId)
     check(Number.isSafeInteger(maxContextBytes) && maxContextBytes >= 128 && maxContextBytes <= MAX_CONTEXT_BYTES)
     check(Number.isSafeInteger(maxLessons) && maxLessons >= 1 && maxLessons <= 2)
     this.budget = maxContextBytes; this.maxLessons = maxLessons; this.now = now
     check(Number.isSafeInteger(evaluationTokensPerDay) && evaluationTokensPerDay >= 0 && evaluationTokensPerDay <= 1_000_000)
     check(Number.isSafeInteger(evaluationCallsPerDay) && evaluationCallsPerDay >= 0 && evaluationCallsPerDay <= 20)
+    check(['limited', 'unlimited'].includes(evaluationBudgetMode), 'invalid_evaluation_budget_mode')
     this.evaluationTokensPerDay = evaluationTokensPerDay; this.evaluationCallsPerDay = evaluationCallsPerDay
+    this.evaluationBudgetMode = evaluationBudgetMode
     this.store = new LessonStore(stateRoot, hash(JSON.stringify([this.adapter, this.instance])))
   }
   /**
@@ -2919,12 +2969,13 @@ export class LearningEngine {
    * limits it was prepared with.
    *
    * `undefined` means "leave as is"; a present key is always validated, never coerced.
-   * @param input - `{ maxContextBytes?, evaluationTokensPerDay?, evaluationCallsPerDay? }`
+   * @param input - `{ maxContextBytes?, evaluationTokensPerDay?, evaluationCallsPerDay?, evaluationBudgetMode? }`
    * @returns the effective values after the change.
    */
   configure(input = {}) {
     check(input !== null && typeof input === 'object' && !Array.isArray(input), 'invalid_configuration')
-    check(Object.keys(input).every(key => ['maxContextBytes', 'evaluationTokensPerDay', 'evaluationCallsPerDay'].includes(key)),
+    check(Object.keys(input).every(key => ['maxContextBytes', 'evaluationTokensPerDay', 'evaluationCallsPerDay',
+      'evaluationBudgetMode'].includes(key)),
       'invalid_configuration')
     const next = {}
     if (input.maxContextBytes !== undefined) {
@@ -2942,9 +2993,14 @@ export class LearningEngine {
         && input.evaluationCallsPerDay <= 20, 'invalid_evaluation_calls')
       next.evaluationCallsPerDay = input.evaluationCallsPerDay
     }
+    if (input.evaluationBudgetMode !== undefined) {
+      check(['limited', 'unlimited'].includes(input.evaluationBudgetMode), 'invalid_evaluation_budget_mode')
+      next.evaluationBudgetMode = input.evaluationBudgetMode
+    }
     Object.assign(this, next)
     return { ok: true, maxContextBytes: this.budget, sessionBudgetBytes: 1536, maxLessons: this.maxLessons,
-      evaluationTokensPerDay: this.evaluationTokensPerDay, evaluationCallsPerDay: this.evaluationCallsPerDay }
+      evaluationTokensPerDay: this.evaluationTokensPerDay, evaluationCallsPerDay: this.evaluationCallsPerDay,
+      evaluationBudgetMode: this.evaluationBudgetMode }
   }
   /** Read-only idempotent decision lookup. The evidence body is never persisted in the ledger. */
   decisionGet(input = {}) {
@@ -3174,7 +3230,8 @@ export class LearningEngine {
         return { ok: true, duplicate: true, record: structuredClone(pending) }
       }
       const prior = state.decisionRecords.find(row => row.key === identity.key)
-      if (prior && !(prior.state === 'wait' && ['evaluation_budget', 'evaluation_budget_calls', 'decision_not_dispatched'].includes(prior.error))) {
+      if (prior && !(prior.state === 'wait' && ['evaluation_budget', 'evaluation_budget_calls',
+        'spend_ledger_full', 'decision_not_dispatched'].includes(prior.error))) {
         return { ok: true, duplicate: true, record: structuredClone(prior) }
       }
       if (prior) state.decisionRecords = state.decisionRecords.filter(row => row.key !== identity.key)
@@ -3205,7 +3262,8 @@ export class LearningEngine {
         && row.version === identity.version && row.evidenceRevision === identity.evidenceRevision
         && row.inputDigest === identity.inputDigest && row.ruleVersion === identity.ruleVersion
         && row.role === identity.role && !(row.state === 'wait'
-          && ['evaluation_budget', 'evaluation_budget_calls', 'decision_not_dispatched'].includes(row.error))
+          && ['evaluation_budget', 'evaluation_budget_calls', 'spend_ledger_full',
+            'decision_not_dispatched'].includes(row.error))
         && !(['complete', 'wait', 'failed'].includes(row.state)
           && Number.isSafeInteger(row.usage?.totalTokens)))
       if (sameEvidence) return { ok: true, duplicate: true, routeChanged: sameEvidence.key !== identity.key,
@@ -3233,6 +3291,7 @@ export class LearningEngine {
         }
         if (state.decisionRecords.length >= 256) return { ok: false, code: 'decision_ledger_full' }
       }
+      if (!hasSpendCapacity(state, 1, 1)) return { ok: false, code: 'spend_ledger_full' }
       const ticket = randomUUID()
       const record = { ...identity, state: 'queued', createdAt: now, updatedAt: now, ticket }
       if (identity.mergeCandidates.length > 0) record.mergeCandidates = identity.mergeCandidates
@@ -3273,7 +3332,7 @@ export class LearningEngine {
     }
     const started = this.ticketStepStart({ ticket, stepKey, requestHash: input.requestHash })
     if (!started.ok) {
-      if (['evaluation_budget', 'evaluation_budget_calls'].includes(started.code)) {
+      if (['evaluation_budget', 'evaluation_budget_calls', 'spend_ledger_full'].includes(started.code)) {
         this.transaction((state, now) => {
           const job = state.jobs.find(item => item.ticket === ticket && item.kind === 'decision')
           const reservation = job?.stepReservations?.find(item => item.stepKey === stepKey)
@@ -3295,7 +3354,7 @@ export class LearningEngine {
       }
       row.state = 'dispatched'; row.updatedAt = now
       return { ok: true, key: row.key }
-    })
+    }, { reserveTicket: ticket })
   }
   /** Release a reserved decision step that never reached its provider boundary. */
   decisionAbortBeforeDispatch(input = {}) {
@@ -3381,7 +3440,7 @@ export class LearningEngine {
         row.primaryUsage = usage
         row.primaryError = input.code
         row.state = 'dispatched'; row.updatedAt = now
-        return { ok: true, record: structuredClone(row), needsHostFallback: true, replayAllowed: false }
+      return { ok: true, record: structuredClone(row), needsHostFallback: true, replayAllowed: false }
       }
       if (row.primaryResult !== undefined) {
         row.result = row.primaryResult
@@ -3411,7 +3470,7 @@ export class LearningEngine {
       spend.terminalAt = now
       state.jobs = state.jobs.filter(item => item.ticket !== ticket)
       return { ok: true, record: structuredClone(row), replayAllowed: false }
-    })
+    }, { reserveTicket: ticket })
   }
   /** Persist one bounded structured opinion and settle the ticket. This never validates or promotes. */
   decisionComplete(input = {}) {
@@ -3508,9 +3567,9 @@ export class LearningEngine {
       spend.terminalAt = now
       state.jobs = state.jobs.filter(item => item.ticket !== ticket)
       return { ok: true, record: structuredClone(row), promotable: false }
-    })
+    }, { reserveTicket: ticket })
   }
-  transaction(fn) {
+  transaction(fn, { reserveTicket = null } = {}) {
     return this.store.update(state => {
       validateState(state)
       check(state.schema === 2, 'migration_required')
@@ -3522,7 +3581,38 @@ export class LearningEngine {
       // indefinitely and be consulted by a much later correction. It only runs when the field already
       // exists, so a transaction on a document without adoptions never creates it.
       if (state.recentAdoptions !== undefined) pruneRecentAdoptions(ensureRecentAdoptions(state), now)
+      // Capacity checks describe the body this update will persist. LessonStore increments the
+      // revision after this callback, so project that metadata before admitting growth or debiting
+      // a live ticket's reserve. Keep the repair baseline at the currently stored revision.
+      const baselineCanPersist = hasSpendCapacity(state, 0, 0, true)
+      const baselineCapacityUse = baselineCanPersist ? null : spendCapacityUseBytes(state, 0, 0, false)
+      const baselineSpendRows = state.spends?.length ?? 0
+      const reserveBaselineBytes = reserveTicket === null ? null : storeBodyBytes(state)
       const result = fn(state, now)
+      if (reserveTicket !== null) {
+        const job = (state.jobs ?? []).find(row => row.ticket === reserveTicket)
+        if (job !== undefined) {
+          // Materialize a legacy ticket's implicit reserve before measuring growth. The field itself
+          // consumes bytes in the document and must come from the same ticket allowance as its
+          // checkpoint/fallback data. Measuring before adding it would make an old in-flight job
+          // appear to have a few more bytes available than the persisted state actually does.
+          const remaining = Number.isSafeInteger(job.storeReserveRemaining)
+            ? job.storeReserveRemaining : LIVE_TICKET_SETTLEMENT_RESERVE_BYTES
+          job.storeReserveRemaining = remaining
+          const afterBytes = storeBodyBytes(state, true)
+          const growth = Math.max(0, afterBytes - reserveBaselineBytes)
+          check(growth <= remaining, 'spend_ledger_full')
+          job.storeReserveRemaining = remaining - growth
+        }
+      }
+      // Ordinary writes may not consume the reserved room for an in-flight ticket or reflection
+      // receipt. A bounded ticket checkpoint can debit its own reserve; closing it releases any
+      // remainder only after its result is durably settled. A pre-existing nearly full legacy store
+      // may still commit a repair that reduces its byte use without adding spend rows.
+      if (!hasSpendCapacity(state, 0, 0, true)) {
+        check(!baselineCanPersist && (state.spends?.length ?? 0) <= baselineSpendRows
+          && spendCapacityUseBytes(state, 0, 0, true) <= baselineCapacityUse, 'spend_ledger_full')
+      }
       validateState(state)
       return result
     })
@@ -5033,6 +5123,9 @@ export class LearningEngine {
     }
   status() {
     const state = this.store.read(); validateState(state)
+    const ledgerState = state.schema === 2 ? pruneState(structuredClone(state), this.now()) : null
+    const ledgerRows = ledgerState?.spends.length ?? null
+    const ledgerBytes = ledgerState === null ? null : Buffer.byteLength(JSON.stringify(ledgerState), 'utf8')
     return { ok: true, schema: state.schema, migrationRequired: state.schema !== 2,
       lessons: state.lessons.length, budgetBytes: this.budget, sessionBudgetBytes: 1536, maxLessons: this.maxLessons,
       counts: Object.fromEntries(STATUSES.map(k => [k, state.lessons.filter(x => x.status === k).length])),
@@ -5087,6 +5180,15 @@ export class LearningEngine {
       evaluationNextAvailableAt: budgetNextAt((state.spends ?? []).filter(x => PAID_EVALUATION_KINDS.has(x.kind)), this.now()),
       evaluationTokensPerDay: this.evaluationTokensPerDay,
       evaluationCallsPerDay: this.evaluationCallsPerDay,
+      evaluationBudgetMode: this.evaluationBudgetMode,
+      evaluationBudgetExplanation: this.evaluationBudgetMode === 'unlimited'
+        ? 'No rolling 24-hour token or logical-task allowance; request safeguards and receipt capacity still apply.'
+        : 'Rolling 24-hour token and logical-task allowances apply.',
+      evaluationLedgerRows: ledgerRows,
+      evaluationLedgerCapacity: MAX_SPEND_ROWS,
+      evaluationLedgerBytes: ledgerBytes,
+      evaluationLedgerByteCapacity: MAX_STORE_BYTES,
+      evaluationLedgerFull: ledgerState === null ? false : !hasSpendCapacity(ledgerState, 1, 1),
       evaluationJobsOpen: (state.jobs ?? []).length,
       // Problem ledger counts: what the host reported and what is still waiting, never lesson text.
       problems: (() => {
@@ -6325,13 +6427,20 @@ export class LearningEngine {
     const recent = state.spends.filter(x => PAID_EVALUATION_KINDS.has(x.kind))
     const tokens = Number.isSafeInteger(input.maxTokens) && input.maxTokens > 0 ? input.maxTokens : 0
     const callsUsed = budgetCalls(recent, this.now())
-    const remainingCalls = Math.max(0, this.evaluationCallsPerDay - callsUsed)
-    const remainingTokens = Math.max(0, this.evaluationTokensPerDay - recent.reduce((sum, row) => sum + budgetTokens(row, this.now()), 0))
-    if (callsUsed >= this.evaluationCallsPerDay) reasons.push('review_budget_calls')
-    if (tokens > 0 && tokens > remainingTokens) reasons.push('review_budget_tokens')
-    if (this.evaluationTokensPerDay === 0 || this.evaluationCallsPerDay === 0) reasons.push('review_budget_disabled')
+    const limited = this.evaluationBudgetMode === 'limited'
+    const remainingCalls = limited ? Math.max(0, this.evaluationCallsPerDay - callsUsed) : null
+    const remainingTokens = limited
+      ? Math.max(0, this.evaluationTokensPerDay - recent.reduce((sum, row) => sum + budgetTokens(row, this.now()), 0))
+      : null
+    if (limited && callsUsed >= this.evaluationCallsPerDay) reasons.push('review_budget_calls')
+    if (limited && tokens > 0 && tokens > remainingTokens) reasons.push('review_budget_tokens')
+    if (limited && (this.evaluationTokensPerDay === 0 || this.evaluationCallsPerDay === 0)) {
+      reasons.push('review_budget_disabled')
+    }
+    if (!hasSpendCapacity(state, 1, 1)) reasons.push('spend_ledger_full')
     return { ok: reasons.length === 0, reasons, allowed: reasons.length === 0, lessonId: lesson.id,
       version: lesson.version, maxTokens: tokens, remainingCalls, remainingTokens,
+      evaluationBudgetMode: this.evaluationBudgetMode,
       queueKey: planHash({ lessonId: lesson.id, version: lesson.version,
         environment: lesson.environment ?? 'default', track: 'review' }) }
   }
@@ -6461,10 +6570,12 @@ export class LearningEngine {
       const recent = state.spends.filter(x => PAID_EVALUATION_KINDS.has(x.kind))
       // Same shared caps as the evaluation track; nothing is reserved when either is exhausted. The
       // comparison uses the WHOLE-PLAN reservation, so what the operator authorised is what may be sent.
-      if (state.jobs.length || budgetCalls(recent, now) >= this.evaluationCallsPerDay
-        || recent.reduce((sum, row) => sum + budgetTokens(row, now), 0) + tokens > this.evaluationTokensPerDay) {
+      if (state.jobs.length || (this.evaluationBudgetMode === 'limited'
+        && (budgetCalls(recent, now) >= this.evaluationCallsPerDay
+          || recent.reduce((sum, row) => sum + budgetTokens(row, now), 0) + tokens > this.evaluationTokensPerDay))) {
         return { ok: true, skipped: 'evaluation_budget' }
       }
+      if (!hasSpendCapacity(state, 1, 1)) return { ok: true, skipped: 'spend_ledger_full' }
       const ticket = randomUUID()
       // The reservation freezes the comparison: the plan, the scenario, the criteria, the
       // generation in force AND the review licence. Everything a result is later judged against is
@@ -6983,12 +7094,18 @@ export class LearningEngine {
       const alreadyCountedTask = Array.isArray(debit.budgetEntries)
         && debit.budgetEntries.some(entry => entry.dispatched === true && entry.at > now - DAY)
       const recent = (state.spends ?? []).filter(row => PAID_EVALUATION_KINDS.has(row.kind))
-      if (!alreadyCountedTask && budgetCalls(recent, now) >= this.evaluationCallsPerDay) {
+      if (this.evaluationBudgetMode === 'limited' && (this.evaluationCallsPerDay === 0
+        || (!alreadyCountedTask && budgetCalls(recent, now) >= this.evaluationCallsPerDay))) {
         return { ok: false, code: 'evaluation_budget_calls' }
       }
       const projected = (state.spends ?? []).filter(row => PAID_EVALUATION_KINDS.has(row.kind))
         .reduce((sum, row) => sum + budgetTokens(row, now), 0) + amount
-      if (projected > this.evaluationTokensPerDay) return { ok: false, code: 'evaluation_budget' }
+      if (this.evaluationBudgetMode === 'limited'
+        && (this.evaluationTokensPerDay === 0 || projected > this.evaluationTokensPerDay)) {
+        return { ok: false, code: 'evaluation_budget' }
+      }
+      if (!hasSpendCapacity(state, 0)) return { ok: false, code: 'spend_ledger_full' }
+      if (!ensureTicketStorageReserve(state, job)) return { ok: false, code: 'spend_ledger_full' }
       debit.tokens += amount
       debit.reserved = (debit.reserved ?? 0) + amount
       job.tokens = (job.tokens ?? 0) + amount
@@ -6998,7 +7115,7 @@ export class LearningEngine {
         inputTokens: input.inputTokens, outputTokens: input.outputTokens, at: now,
         dispatched: false, completed: false })
       return { ok: true, duplicate: false, reserved: debit.reserved }
-    })
+    }, { reserveTicket: ticket })
   }
   /** Mark a reserved physical request as entered. A started step without a durable result is UNKNOWN
    * after restart and must never be replayed. */
@@ -7023,14 +7140,19 @@ export class LearningEngine {
       const cutoff = now - DAY
       const alreadyCountedTask = debit.budgetEntries.some(entry => entry.dispatched === true && entry.at > cutoff)
       const recent = state.spends.filter(row => PAID_EVALUATION_KINDS.has(row.kind))
-      if (!alreadyCountedTask && budgetCalls(recent, now) >= this.evaluationCallsPerDay) {
+      if (this.evaluationBudgetMode === 'limited' && (this.evaluationCallsPerDay === 0
+        || (!alreadyCountedTask && budgetCalls(recent, now) >= this.evaluationCallsPerDay))) {
         return { ok: false, code: 'evaluation_budget_calls' }
       }
       const reservationTokens = reservation.inputTokens + reservation.outputTokens
       const bucketIsCurrent = bucket !== undefined && bucket.at > cutoff
       const projected = recent.reduce((sum, row) => sum + budgetTokens(row, now), 0)
         + (bucketIsCurrent ? 0 : reservationTokens)
-      if (projected > this.evaluationTokensPerDay) return { ok: false, code: 'evaluation_budget' }
+      if (this.evaluationBudgetMode === 'limited'
+        && (this.evaluationTokensPerDay === 0 || projected > this.evaluationTokensPerDay)) {
+        return { ok: false, code: 'evaluation_budget' }
+      }
+      if (!hasSpendCapacity(state, 0)) return { ok: false, code: 'spend_ledger_full' }
       if (!bucketIsCurrent) {
         bucket = { at: now, tokens: reservationTokens, stepKey, measuredTokens: null, known: null }
         debit.budgetEntries.push(bucket)
@@ -7041,7 +7163,7 @@ export class LearningEngine {
       reservation.dispatched = true
       reservation.startedAt = now
       return { ok: true, duplicate: false }
-    })
+    }, { reserveTicket: ticket })
   }
   /** Read exactly one checkpoint under its still-live ticket and frozen plan binding. */
   planProgress(input = {}) {
@@ -7123,7 +7245,7 @@ export class LearningEngine {
       reservation.completedAt = now
       check(Buffer.byteLength(JSON.stringify(plan.progress), 'utf8') <= 300_000, 'checkpoint_capacity')
       return { ok: true, duplicate: false }
-    })
+    }, { reserveTicket: ticket })
   }
   /**
    * Record a MEASUREMENT against a ticket that is still open, without touching the attempt itself.
@@ -7155,7 +7277,7 @@ export class LearningEngine {
         spent: recorded.tokens,
         reserved: Number.isSafeInteger(recorded.reserved) ? recorded.reserved : recorded.tokens,
         measured: recorded.usage === undefined ? null : { ...recorded.usage } }
-    })
+    }, { reserveTicket: ticket })
   }
   /**
    * Read-only: whether ONE live paid ticket may still run its NEXT physical step.
@@ -7882,8 +8004,12 @@ export class LearningEngine {
         return { ok: true, skipped: 'reservation_insufficient', required: objectiveFloor.floor }
       }
       const recent = state.spends.filter(x => PAID_EVALUATION_KINDS.has(x.kind))
-      if (state.jobs.length || budgetCalls(recent, now) >= this.evaluationCallsPerDay
-        || recent.reduce((n, x) => n + budgetTokens(x, now), 0) + input.maxTokens > this.evaluationTokensPerDay) return { ok: true, skipped: 'evaluation_budget' }
+      if (state.jobs.length || (this.evaluationBudgetMode === 'limited'
+        && (budgetCalls(recent, now) >= this.evaluationCallsPerDay
+          || recent.reduce((n, x) => n + budgetTokens(x, now), 0) + input.maxTokens > this.evaluationTokensPerDay))) {
+        return { ok: true, skipped: 'evaluation_budget' }
+      }
+      if (!hasSpendCapacity(state, 1, 1)) return { ok: true, skipped: 'spend_ledger_full' }
       const ticket = randomUUID()
       state.jobs.push({ ticket, lessonId: lesson.id, version: lesson.version, tokens: input.maxTokens,
         manifestHash: hash(JSON.stringify(manifest)), expiresAt: frozen === null ? now + 30 * 60_000 : now + 48 * 60 * 60_000,
@@ -7955,20 +8081,23 @@ export class LearningEngine {
     const state = pruneState({ ...stored }, now)
     const lesson = this.findLesson(state, input)
     check(lesson.kind === 'method' && lesson.status !== 'suspended' && input.expectedVersion === lesson.version, 'method_not_evaluable')
-    const recent = state.spends.filter(x => PAID_EVALUATION_KINDS.has(x.kind))
-    const tokensUsed = recent.reduce((sum, row) => sum + budgetTokens(row, now), 0)
+      const recent = state.spends.filter(x => PAID_EVALUATION_KINDS.has(x.kind))
+      const tokensUsed = recent.reduce((sum, row) => sum + budgetTokens(row, now), 0)
     const maxTokens = Number.isSafeInteger(input.maxTokens) && input.maxTokens > 0 ? input.maxTokens : 0
-    const reasons = []
-    if (state.jobs.length > 0) reasons.push('evaluation_job_open')
-    const callsUsed = budgetCalls(recent, now)
-    if (callsUsed >= this.evaluationCallsPerDay) reasons.push('evaluation_calls_exhausted')
-    if (tokensUsed + maxTokens > this.evaluationTokensPerDay) reasons.push('evaluation_tokens_exhausted')
-    return { ok: true, allowed: lesson.methodId ? true : reasons.length === 0, reasons,
+      const reasons = []
+      if (state.jobs.length > 0) reasons.push('evaluation_job_open')
+      const callsUsed = budgetCalls(recent, now)
+      const limited = this.evaluationBudgetMode === 'limited'
+      if (limited && callsUsed >= this.evaluationCallsPerDay) reasons.push('evaluation_calls_exhausted')
+      if (limited && tokensUsed + maxTokens > this.evaluationTokensPerDay) reasons.push('evaluation_tokens_exhausted')
+      if (!lesson.methodId && !hasSpendCapacity(state, 1, 1)) reasons.push('spend_ledger_full')
+      return { ok: true, allowed: lesson.methodId ? true : reasons.length === 0, reasons,
       lessonId: lesson.id, version: lesson.version, status: lesson.status, methodId: lesson.methodId ?? null,
       basis: lesson.methodId ? 'registered_algorithm' : 'host_trial', modelRequired: !lesson.methodId,
-      tokensUsed, callsUsed, remainingTokens: Math.max(0, this.evaluationTokensPerDay - tokensUsed),
-      remainingCalls: Math.max(0, this.evaluationCallsPerDay - callsUsed), jobsOpen: state.jobs.length,
-      evaluationTokensPerDay: this.evaluationTokensPerDay, evaluationCallsPerDay: this.evaluationCallsPerDay }
+      tokensUsed, callsUsed, remainingTokens: limited ? Math.max(0, this.evaluationTokensPerDay - tokensUsed) : null,
+      remainingCalls: limited ? Math.max(0, this.evaluationCallsPerDay - callsUsed) : null, jobsOpen: state.jobs.length,
+      evaluationTokensPerDay: this.evaluationTokensPerDay, evaluationCallsPerDay: this.evaluationCallsPerDay,
+      evaluationBudgetMode: this.evaluationBudgetMode }
   }
   /**
    * Read-only twin of `reflectionRequest`. Reports the exact verdict — duplicate, rolling
@@ -8149,9 +8278,9 @@ export class LearningEngine {
       if (merge !== null) {
         const reservedTokens = Buffer.byteLength(JSON.stringify(generationRequest), 'utf8') + generationRequest.maxTokens
         const paid = state.spends.filter(row => PAID_EVALUATION_KINDS.has(row.kind))
-        if (this.evaluationCallsPerDay === 0 || this.evaluationTokensPerDay === 0
+        if (this.evaluationBudgetMode === 'limited' && (this.evaluationCallsPerDay === 0 || this.evaluationTokensPerDay === 0
           || budgetCalls(paid, now) >= this.evaluationCallsPerDay
-          || paid.reduce((sum, row) => sum + budgetTokens(row, now), 0) + reservedTokens > this.evaluationTokensPerDay) {
+          || paid.reduce((sum, row) => sum + budgetTokens(row, now), 0) + reservedTokens > this.evaluationTokensPerDay)) {
           merge.decision.mergeStatus = { state: 'waiting', reason: 'reflection_budget' }
           merge.decision.updatedAt = now
           return { ok: true, skipped: 'evaluation_budget', releaseAt: budgetNextAt(paid, now) }
@@ -8223,6 +8352,16 @@ export class LearningEngine {
         // itself clamps to a positive wait.
         if (problem !== null) parkProblemInState(problem, gate.skipped, now, gate.releaseAt)
         return { ok: true, skipped: gate.skipped, releaseAt: gate.releaseAt }
+      }
+      const spendRowsNeeded = 1 + (generationReservation === undefined ? 0 : 1)
+      if (!hasSpendCapacity(state, spendRowsNeeded, spendRowsNeeded)) {
+        if (problem !== null) parkProblemInState(problem, 'spend_ledger_full', now, null)
+        if (merge !== null) {
+          merge.decision.mergeStatus = { state: 'waiting', reason: 'spend_ledger_full',
+            generationKey: merge.generationKey }
+          merge.decision.updatedAt = now
+        }
+        return { ok: true, skipped: 'spend_ledger_full', releaseAt: null }
       }
       const eventId = gate.eventId
       const ticket = randomUUID()
@@ -8359,9 +8498,9 @@ export class LearningEngine {
       }
       const paid = state.spends.filter(row => PAID_EVALUATION_KINDS.has(row.kind))
       const tokens = budgetTokens(debit, now)
-      if (this.evaluationCallsPerDay === 0 || this.evaluationTokensPerDay === 0
+      if (this.evaluationBudgetMode === 'limited' && (this.evaluationCallsPerDay === 0 || this.evaluationTokensPerDay === 0
         || budgetCalls(paid, now) >= this.evaluationCallsPerDay
-        || paid.reduce((sum, row) => sum + budgetTokens(row, now), 0) > this.evaluationTokensPerDay) {
+        || paid.reduce((sum, row) => sum + budgetTokens(row, now), 0) > this.evaluationTokensPerDay)) {
         state.spends = state.spends.filter(row => row.id !== debit.id
           && !(row.kind === 'reflection' && row.ticket === ticket))
         state.events = state.events.filter(row => row.id !== event.id)

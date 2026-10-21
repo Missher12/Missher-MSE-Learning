@@ -38,6 +38,7 @@ export const SETTINGS_DEFAULTS = Object.freeze({
   // standard 50k/5 as an explicit preset the operator can save.
   evaluationTokensPerDay: 0,
   evaluationCallsPerDay: 2,
+  evaluationBudgetMode: 'limited',
   decisionBackend: 'host',
   decisionModel: '',
   decisionEndpoint: '',
@@ -73,6 +74,9 @@ export const Config = z.object({
     .default(SETTINGS_DEFAULTS.evaluationTokensPerDay).volatile(),
   evaluationCallsPerDay: z.number().min(0).max(EVALUATION_CALLS_MAX).step(1)
     .default(SETTINGS_DEFAULTS.evaluationCallsPerDay).volatile(),
+  /** Unlimited removes only the shared rolling allowance; per-request and ledger safeguards remain. */
+  evaluationBudgetMode: z.union([z.const('limited'), z.const('unlimited')])
+    .default(SETTINGS_DEFAULTS.evaluationBudgetMode).volatile(),
   /** Decision routing is independent of task execution; credentials are references only. */
   decisionBackend: z.union([z.const('host'), z.const('openai_compatible'), z.const('jev'), z.const('laya')])
     .default(SETTINGS_DEFAULTS.decisionBackend).volatile(),

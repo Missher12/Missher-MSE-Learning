@@ -65,7 +65,8 @@ MIN_GAP_SECONDS = 1.0
 # them keeps its attempts and is retried when its own due time arrives. Nothing here is a local
 # policy: the codes are the core's own.
 WAIT_CODES = frozenset({
-    "review_budget", "evaluation_budget", "evaluation_budget_calls", "review_budget_calls", "review_budget_tokens",
+    "review_budget", "evaluation_budget", "evaluation_budget_calls", "spend_ledger_full",
+    "review_budget_calls", "review_budget_tokens",
     "review_budget_disabled", "renewal_waiting_evidence", "review_not_allowed",
     "auto_plan_unknown", "auto_plan_stale", "slot_busy", "plan_not_runnable",
 })

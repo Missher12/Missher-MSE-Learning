@@ -65,6 +65,36 @@ const plan = (track, extra = {}) => ({ queueKey: `q-${track}`, planHash: `p-${tr
   environment: 'default', track, stage: 'queued', evidence: 'none', source: { kind: 'turn' }, ticket: null,
   attempts: 0, maxAttempts: 2, nextAttemptAt: 0, reason: null, updatedAt: 0, ...extra })
 
+test('a budget-mode change rearms only budget waits and preserves their ticket progress', () => {
+  const budgetWait = plan('review', { reason: 'evaluation_budget_calls', attempts: 1, nextAttemptAt: 90_000,
+    ticket: 'ticket-budget', progress: { step: 2, requestHash: 'a'.repeat(64) } })
+  const storageWait = plan('objective', { queueKey: 'q-storage', reason: 'spend_ledger_full',
+    attempts: 1, nextAttemptAt: 120_000, progress: { cursor: 3 } })
+  const unknown = plan('review', { queueKey: 'q-unknown', reason: 'model_unknown', attempts: 1,
+    nextAttemptAt: 180_000, ticket: 'ticket-unknown', progress: { step: 1 } })
+  const paused = plan('objective', { queueKey: 'q-paused', reason: 'review_cancelled', attempts: 0,
+    nextAttemptAt: 30_000, ticket: 'ticket-paused' })
+  const failed = plan('review', { queueKey: 'q-failed', reason: 'review_judge_failed', attempts: 1,
+    nextAttemptAt: 60_000 })
+  const engine = fakeEngine({ plans: [budgetWait, storageWait, unknown, paused, failed] })
+  const scheduler = createAutoValidation({ engine, context: () => null, objectiveContext: () => null,
+    route: () => null, callModel: async () => null, enabled: () => true, now: () => 1000 })
+
+  assert.equal(scheduler.rearmBudgetWaiters(), 2)
+  const after = new Map(engine.autoPlans().map(row => [row.queueKey, row]))
+  for (const [before, key] of [[budgetWait, 'q-review'], [storageWait, 'q-storage']]) {
+    const row = after.get(key)
+    assert.equal(row.reason, null)
+    assert.equal(row.nextAttemptAt, 0)
+    assert.equal(row.attempts, before.attempts)
+    assert.equal(row.ticket, before.ticket)
+    assert.deepEqual(row.progress, before.progress)
+  }
+  for (const before of [unknown, paused, failed]) {
+    assert.deepEqual(after.get(before.queueKey), before, `${before.reason} keeps its retry state`)
+  }
+})
+
 test('the review track runs two arms and two swapped judge passes, then commits', async () => {
   const engine = fakeEngine({ plans: [] })
   const prompts = []
@@ -75,7 +105,9 @@ test('the review track runs two arms and two swapped judge passes, then commits'
       return { text: '{"winner":"A","criteria":[{"id":"lifecycle_scope","met":"both"}]}', tokens: 100 }
     },
     enabled: () => true, now: () => 1000 })
-  const result = await scheduler.scan([{ id: 'lesson_1', version: 1, projectKey: '/synthetic/p', instruction: '方法' }])
+  const lesson = { id: 'lesson_1', version: 1, projectKey: '/synthetic/p', instruction: '方法' }
+  await scheduler.scan([lesson]) // this pass registers the persistent plan after advancing existing plans
+  const result = await scheduler.scan([lesson])
   assert.equal(result.ok, true)
   // Two arm answers and two judge verdicts: the swapped pair is a real cross-check.
   assert.equal(prompts.length, 4, `expected four calls, got ${prompts.length}`)
@@ -96,7 +128,9 @@ test('the objective track reserves a pack ticket, answers every case and settles
     route: () => ({ provider: 'deepseek-account', model: 'deepseek-flash', reasoningEffort: 'max' }),
     callModel: async () => { calls += 1; return { text: '答案', tokens: 50 } },
     enabled: () => true, now: () => 1000 })
-  await scheduler.scan([{ id: 'lesson_1', version: 1, projectKey: '/synthetic/p', instruction: '代次 锁 提交' }])
+  const lesson = { id: 'lesson_1', version: 1, projectKey: '/synthetic/p', instruction: '代次 锁 提交' }
+  await scheduler.scan([lesson])
+  await scheduler.scan([lesson])
   // Two arms per case, and nothing else: the pack's own checker does the judging inside the core.
   assert.equal(calls, CASES.length * 2, `expected ${CASES.length * 2} arms, got ${calls}`)
   const reserved = engine.calls.find(([name]) => name === 'evaluationRequest')
@@ -169,7 +203,9 @@ test('a cold start runs on the plan route, with no warm-up of its own', async ()
     source: () => ({ kind: 'turn', sessionId: 'session-cold', turnId: '7',
       route: { provider: 'deepseek-account', model: 'deepseek-flash', reasoningEffort: 'max' } }),
     enabled: () => true, now: () => 1000 })
-  await scheduler.scan([{ id: 'lesson_1', version: 1, projectKey: '/synthetic/p', instruction: '核对会话请求代次并丢弃旧响应' }])
+  const lesson = { id: 'lesson_1', version: 1, projectKey: '/synthetic/p', instruction: '核对会话请求代次并丢弃旧响应' }
+  await scheduler.scan([lesson])
+  await scheduler.scan([lesson])
   assert.equal(seen.length, 4, `the review run must make its four calls, got ${seen.length}`)
   for (const call of seen) {
     assert.equal(call.route?.provider, 'deepseek-account', 'every call carries the plan route')
@@ -199,7 +235,9 @@ test('a pause between two arms stops the very next request', async () => {
     callModel: async request => { calls += 1; if (calls === 1) allowed = false; return { text: '{"winner":"A"}', tokens: 100 } },
     source: () => ({ kind: 'turn', route: { provider: 'p', model: 'm' } }),
     enabled: () => allowed, now: () => 1000 })
-  await gate.scan([{ id: 'lesson_1', version: 1, projectKey: '/synthetic/p', instruction: '核对会话请求代次' }])
+  const lesson = { id: 'lesson_1', version: 1, projectKey: '/synthetic/p', instruction: '核对会话请求代次' }
+  await gate.scan([lesson])
+  await gate.scan([lesson])
   assert.equal(calls, 1, `a paused run must not send the next arm, got ${calls}`)
   assert.ok(engine.calls.some(([name]) => name === 'cancel' || name === 'update'),
     'the run reports its cancellation rather than a verdict')
@@ -222,7 +260,9 @@ test('an archived source stops the next paid step and the commit', async () => {
     source: () => ({ kind: 'turn', sessionId: 'session-src', route: { provider: 'p', model: 'm' } }),
     permit: () => (archived ? { ok: false, reason: 'source_archived' } : { ok: true }),
     enabled: () => true, now: () => 1000 })
-  await scheduler.scan([{ id: 'lesson_1', version: 1, projectKey: '/synthetic/p', instruction: '核对会话请求代次' }])
+  const lesson = { id: 'lesson_1', version: 1, projectKey: '/synthetic/p', instruction: '核对会话请求代次' }
+  await scheduler.scan([lesson])
+  await scheduler.scan([lesson])
   assert.equal(calls, 1, `an archived source must stop the run, got ${calls} calls`)
   assert.equal(engine.calls.some(([name]) => name === 'reviewResult'), false, 'nothing is committed')
   assert.ok(engine.calls.some(([name]) => name === 'cancel'), 'the reservation is released')

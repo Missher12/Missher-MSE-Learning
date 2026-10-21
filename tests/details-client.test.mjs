@@ -242,6 +242,14 @@ test('the settings draft only sends the fields that actually changed', () => {
   const clean = diffOps(defaultDraft(accepted), accepted)
   assert.deepEqual(clean.ops, [], 'an untouched form writes nothing')
   assert.deepEqual(clean.problems, [])
+  assert.equal(defaultDraft(accepted).evaluationBudgetMode, 'limited', 'an older config without the field migrates closed')
+  const continuous = diffOps({ ...defaultDraft(accepted), evaluationBudgetMode: 'unlimited' }, accepted)
+  assert.deepEqual(continuous.ops, [{ op: 'set', path: ['evaluationBudgetMode'], value: 'unlimited' }],
+    'switching modes preserves both saved finite caps')
+  const backToLimited = diffOps({ ...defaultDraft({ ...accepted, evaluationBudgetMode: 'unlimited' }),
+    evaluationBudgetMode: 'limited' }, { ...accepted, evaluationBudgetMode: 'unlimited' })
+  assert.deepEqual(backToLimited.ops, [{ op: 'set', path: ['evaluationBudgetMode'], value: 'limited' }],
+    'switching back does not reset the finite settings')
   const changed = diffOps({ ...defaultDraft(accepted), enabled: false, maxContextBytes: '512' }, accepted)
   assert.deepEqual(changed.ops, [
     { op: 'set', path: ['enabled'], value: false },
@@ -461,13 +469,207 @@ test('a ready writable form renders the settings rows and a disabled save', asyn
   const toggles = controls('Switch')
   assert.deepEqual(toggles.map(node => node.props.label),
     ['持久学习', '自动复盘', '自动审查候选经验', '每 20 秒自动刷新'],
-    `the two settings switches and the periodic refresh entry, got ${JSON.stringify(toggles.map(node => node.props.label))}`)
+    `the settings switches and the periodic refresh entry, got ${JSON.stringify(toggles.map(node => node.props.label))}`)
   const save = controls('Button').find(node => labelOf(node) === '保存')
   assert.ok(save !== undefined, 'the save control exists')
   assert.equal(save.props.disabled, true, 'saving an unmodified draft is disabled')
   const discard = controls('Button').find(node => labelOf(node) === '取消')
   assert.ok(discard !== undefined)
   assert.equal(discard.props.disabled, true, 'discarding an unmodified draft is disabled')
+})
+
+test('the budget panel saves and reads back unlimited mode while retaining metrics and the opt-in switch', async () => {
+  const { registration, module: mod } = loadClient()
+  let snapshot = { status: 'ready', writable: true, mode: 'host', revision: 1, value: { ...READY_VALUES } }
+  const writes = []
+  const listeners = new Set()
+  const form = { getSnapshot: () => snapshot, subscribe: listener => {
+    listeners.add(listener)
+    return () => listeners.delete(listener)
+  }, mutate: async (ops, revision) => {
+    writes.push({ ops, revision })
+    const value = { ...snapshot.value }
+    for (const op of ops) value[op.path[0]] = op.value
+    snapshot = { ...snapshot, revision: revision + 1, value }
+    for (const listener of listeners) listener()
+    return true
+  } }
+  const call = hostCalls({ overview: { ok: true, version: 'test', runtime: 'dsh',
+    budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 }, counts: {}, store: { readable: true, schema: 2 } } })
+  const control = async () => {
+    const unlimited = snapshot.value.evaluationBudgetMode === 'unlimited'
+    return { ok: true, value: { ok: true, effective: {}, settings: { paidBudget: {
+      evaluationBudgetMode: unlimited ? 'unlimited' : 'limited', state: unlimited ? 'unlimited' : 'running',
+      remainingTokens: unlimited ? null : 0, remainingCalls: unlimited ? null : 2,
+      tokensReserved: 12_345, tokensKnown: 9_876, callsUsed: 7, requestsUsed: 11, tasksUnknown: 2,
+    } } } }
+  }
+  let phase = 0
+  let sawLimitedSlider = false
+  const tree = await renderPanel(registration, { locale: 'zh', initialTab: 'budget', call, control, form }, 24,
+    ({ nodes }) => {
+      if (phase === 0) {
+        const mode = nodes.find(node => typeof node.type === 'function'
+          && node.props?.testId === 'evaluation-budget-mode')
+        if (!mode) return false
+        sawLimitedSlider = nodes.some(node => node.props?.type === 'range')
+        mode.props.onChange('unlimited')
+        phase = 1
+        return false
+      }
+      if (phase === 1) {
+        const rendered = JSON.stringify(nodes)
+        assert.equal(nodes.some(node => node.props?.type === 'range'), false,
+          'the original slider is hidden in the unlimited draft')
+        assert.ok(rendered.includes('待保存：持续处理（不限额）（当前：按额度）'),
+          'the pending selection is distinguished from the currently effective mode')
+        const toggle = nodes.find(node => node.type?.uiName === 'Switch' && node.props?.label === mod.__test.zh.autoValidate)
+        assert.ok(toggle, 'automatic validation stays visible in the budget section')
+        assert.equal(toggle.props.checked, false, 'saving a budget mode does not enable automatic validation')
+        const save = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === mod.__test.zh.save)
+        assert.ok(save && !save.props.disabled)
+        save.props.onClick()
+        phase = 2
+        return false
+      }
+      if (phase === 2) {
+        if (snapshot.value.evaluationBudgetMode !== 'unlimited') return false
+        const rendered = JSON.stringify(nodes)
+        assert.ok(rendered.includes('12345'))
+        assert.ok(rendered.includes('9876'))
+        assert.ok(rendered.includes('7 / 11'))
+        assert.ok(rendered.includes('2'))
+        phase = 3
+        return true
+      }
+      return true
+    })
+  assert.equal(phase, 3)
+  assert.equal(sawLimitedSlider, true)
+  assert.equal(snapshot.value.evaluationTokensPerDay, READY_VALUES.evaluationTokensPerDay)
+  assert.equal(snapshot.value.evaluationCallsPerDay, READY_VALUES.evaluationCallsPerDay)
+  assert.deepEqual(writes, [{ revision: 1, ops: [
+    { op: 'set', path: ['evaluationBudgetMode'], value: 'unlimited' },
+  ] }])
+  assert.equal(snapshot.value.autoValidationEnabled, undefined,
+    'an absent opt-in remains absent and disabled after the mode write')
+  assert.ok(JSON.stringify(tree).includes(mod.__test.zh.evalUnlimitedHint))
+})
+
+test('a new budget draft hides stale success and discard or resave reports the current state', async () => {
+  const { registration, module: mod } = loadClient()
+  let snapshot = { status: 'ready', writable: true, mode: 'host', revision: 1,
+    value: { ...READY_VALUES, evaluationTokensPerDay: 50_000, evaluationCallsPerDay: 2,
+      evaluationBudgetMode: 'limited' } }
+  const writes = []
+  const listeners = new Set()
+  const form = { getSnapshot: () => snapshot, subscribe: listener => {
+    listeners.add(listener)
+    return () => listeners.delete(listener)
+  }, mutate: async (ops, revision) => {
+    writes.push({ ops, revision })
+    const value = { ...snapshot.value }
+    for (const op of ops) value[op.path[0]] = op.value
+    snapshot = { ...snapshot, revision: revision + 1, value }
+    for (const listener of listeners) listener()
+    return true
+  } }
+  const call = hostCalls({ overview: { ok: true, version: 'test', runtime: 'dsh',
+    budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 }, counts: {},
+    store: { readable: true, schema: 2 } } })
+  const statusModes = []
+  const control = async method => {
+    if (method !== 'status') return { ok: true, value: { ok: true } }
+    const evaluationBudgetMode = snapshot.value.evaluationBudgetMode === 'unlimited' ? 'unlimited' : 'limited'
+    statusModes.push(evaluationBudgetMode)
+    return { ok: true, value: { ok: true, effective: {}, settings: { paidBudget: {
+      evaluationBudgetMode, state: evaluationBudgetMode === 'unlimited' ? 'unlimited' : 'running',
+      remainingTokens: evaluationBudgetMode === 'unlimited' ? null : 50_000,
+      remainingCalls: evaluationBudgetMode === 'unlimited' ? null : 2,
+    } } } }
+  }
+  let phase = 0
+  await renderPanel(registration, { locale: 'en', initialTab: 'budget', call, control, form }, 24,
+    ({ nodes }) => {
+      const token = nodes.find(node => node.type?.uiName === 'Input'
+        && node.props?.['aria-label'] === mod.__test.en.evalTokens)
+      const mode = nodes.find(node => typeof node.type === 'function'
+        && node.props?.testId === 'evaluation-budget-mode')
+      const save = nodes.find(node => node.type?.uiName === 'Button'
+        && [mod.__test.en.save, mod.__test.en.saving].includes(labelOf(node)))
+      if (!mode || !save || (phase === 0 && !token)) return false
+      if (phase === 0) {
+        token.props.onChange({ target: { value: '60000' } })
+        phase = 1
+        return false
+      }
+      if (phase === 1) {
+        assert.equal(save.props.disabled, false)
+        save.props.onClick()
+        phase = 2
+        return false
+      }
+      if (phase === 2) {
+        const saved = nodes.some(node => node.props?.className === 'mse-ok'
+          && labelOf(node) === mod.__test.en.saved)
+        if (snapshot.value.evaluationTokensPerDay !== 60_000 || !saved) return false
+        mode.props.onChange('unlimited')
+        phase = 3
+        return false
+      }
+      if (phase === 3) {
+        const rendered = JSON.stringify(nodes)
+        assert.ok(rendered.includes(mod.__test.en.unsaved), 'the new draft is marked unsaved')
+        assert.ok(rendered.includes(`Unsaved: ${mod.__test.en.evalModeUnlimited} (current: ${mod.__test.en.evalModeLimited})`),
+          'the pending mode remains visible against the currently applied mode')
+        assert.equal(nodes.some(node => node.props?.className === 'mse-ok'
+          && labelOf(node) === mod.__test.en.saved), false,
+          'success from the previous save is hidden while this draft is dirty')
+        assert.equal(save.props.disabled, false)
+        const discard = nodes.find(node => node.type?.uiName === 'Button'
+          && labelOf(node) === mod.__test.en.discard)
+        assert.ok(discard && !discard.props.disabled)
+        discard.props.onClick()
+        phase = 4
+        return false
+      }
+      if (phase === 4) {
+        assert.equal(mode.props.value, 'limited', 'Discard restores the saved mode')
+        assert.equal(save.props.disabled, true, 'Discard leaves no dirty settings behind')
+        assert.equal(JSON.stringify(nodes).includes(mod.__test.en.unsaved), false)
+        mode.props.onChange('unlimited')
+        phase = 5
+        return false
+      }
+      if (phase === 5) {
+        const rendered = JSON.stringify(nodes)
+        assert.ok(rendered.includes(mod.__test.en.unsaved))
+        assert.equal(nodes.some(node => node.props?.className === 'mse-ok'
+          && labelOf(node) === mod.__test.en.saved), false,
+          'the second draft also hides stale success before it is saved')
+        assert.equal(save.props.disabled, false)
+        save.props.onClick()
+        phase = 6
+        return false
+      }
+      if (phase === 6) {
+        const saved = nodes.some(node => node.props?.className === 'mse-ok'
+          && labelOf(node) === mod.__test.en.saved)
+        if (snapshot.value.evaluationBudgetMode !== 'unlimited' || !saved
+          || !statusModes.includes('unlimited')) return false
+        phase = 7
+        return true
+      }
+      return true
+    })
+  assert.equal(phase, 7)
+  assert.deepEqual(writes, [
+    { revision: 1, ops: [{ op: 'set', path: ['evaluationTokensPerDay'], value: 60_000 }] },
+    { revision: 2, ops: [{ op: 'set', path: ['evaluationBudgetMode'], value: 'unlimited' }] },
+  ])
+  assert.equal(snapshot.revision, 3)
+  assert.equal(snapshot.value.evaluationTokensPerDay, 60_000)
+  assert.equal(snapshot.value.evaluationBudgetMode, 'unlimited')
 })
 
 test('the budget usage disclosure reads the paidBudget projection from control status', async () => {
@@ -932,14 +1134,25 @@ test('decision model settings preserve remote drafts across Host and bind legacy
         assert.ok(mod.__test.en.decisionRemoteReady.includes('not been tested'))
         assert.ok(nodes.some(node => node.props?.className === 'mse-decision-key'), 'the key has its own credential controls')
         assert.ok(nodes.some(node => node.props?.className === 'mse-decision-discovery'), 'the read-only model directory controls render')
-        assert.ok(nodes.some(node => node.props?.className === 'mse-budget-presets'), 'budget presets use their own layout')
+        assert.ok(nodes.some(node => node.props?.className === 'mse-budget-picker'), 'budget slider uses its own layout')
+        const budgetSlider = nodes.find(node => node.type === 'input' && node.props?.type === 'range'
+          && node.props?.className === 'mse-budget-slider')
+        assert.ok(budgetSlider, 'budget tier uses a native, accessible range input')
+        assert.equal(budgetSlider.props['aria-label'], mod.__test.zh.evalTier)
+        assert.equal(budgetSlider.props.step, 'any', 'custom token values can position the thumb between stops')
+        assert.equal(typeof budgetSlider.props.onPointerUp, 'function', 'clicking an unchanged custom stop can select its preset')
+        assert.equal(budgetSlider.props.value, 0, 'the thumb follows the custom token value without selecting a preset')
+        assert.ok(budgetSlider.props['aria-valuetext'].includes(mod.__test.zh.evalTierCustom))
         const budgetInputs = nodes.filter(node => node.type?.uiName === 'Input'
           && node.props?.className === 'mse-budget-value')
         assert.equal(budgetInputs.length, 2)
         assert.match(SOURCE, /\.mse-decision-input\{display:flex;width:100%;min-width:0;max-width:100%;box-sizing:border-box\}/u)
         assert.match(SOURCE, /\.mse-decision-source \.mse-picker-wide\{width:100%;max-width:100%\}/u)
-        assert.match(SOURCE, /\.mse-budget-presets\{display:grid;grid-template-columns:repeat\(auto-fit/u)
-        assert.match(SOURCE, /\.mse-budget-row \.mse-row-side\{width:156px;flex:none\}/u)
+        assert.match(SOURCE, /\.mse-budget-slider::-webkit-slider-thumb\{width:16px;height:16px/u)
+        assert.match(SOURCE, /\.mse-budget-slider\{display:block;width:calc\(100% - 18px\);height:36px/u)
+        assert.match(SOURCE, /\.mse-budget-ticks\{position:relative;height:21px;margin:2px 17px 0/u)
+        assert.match(SOURCE, /\.mse-budget-tick\.is-active\{color:var\(--dsw-alias-state-business-primary\)/u)
+        assert.match(SOURCE, /\.mse-budget-values\{display:grid;grid-template-columns:repeat\(2,minmax\(0,1fr\)\)/u)
         phase = 4
         return true
       }
@@ -1056,13 +1269,25 @@ test('Discard clears a key-only remote draft without saving credentials or start
 
 test('Discard stays disabled and cannot clear a draft while the settings save is pending', async () => {
   const { registration } = loadClient()
-  const snapshot = { status: 'ready', writable: true, mode: 'host', revision: 90, value: { ...READY_VALUES } }
+  let snapshot = { status: 'ready', writable: true, mode: 'host', revision: 90, value: { ...READY_VALUES } }
+  const listeners = new Set()
+  const writes = []
   let resolveMutate
   let mutateCalls = 0
-  const form = { getSnapshot: () => snapshot, subscribe: () => () => {},
-    mutate: async () => {
+  const form = { getSnapshot: () => snapshot, subscribe: listener => {
+    listeners.add(listener)
+    return () => listeners.delete(listener)
+  }, mutate: async (ops, revision) => {
       mutateCalls += 1
-      return new Promise(resolve => { resolveMutate = () => resolve(true) })
+      writes.push({ ops, revision })
+      return new Promise(resolve => { resolveMutate = () => {
+        if (revision !== snapshot.revision) { resolve(false); return }
+        const value = { ...snapshot.value }
+        for (const op of ops) value[op.path[0]] = op.value
+        snapshot = { ...snapshot, revision: revision + 1, value }
+        for (const listener of listeners) listener()
+        resolve(true)
+      } })
     } }
   const call = async method => ({ ok: true, value: method === 'overview'
     ? { ok: true, version: 'test', runtime: 'dsh', budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 },
@@ -1118,6 +1343,278 @@ test('Discard stays disabled and cannot clear a draft while the settings save is
       return true
     })
   assert.equal(phase, 5)
+  assert.equal(snapshot.revision, 91)
+  assert.equal(snapshot.value.maxContextBytes, 1024)
+  assert.deepEqual(writes, [{ revision: 90, ops: [{ op: 'set', path: ['maxContextBytes'], value: 1024 }] }])
+})
+
+test('budget slider preserves custom values until a tier gesture and saves through the current revision', async () => {
+  const { registration, module: mod } = loadClient()
+  const customValues = { ...READY_VALUES, evaluationTokensPerDay: 30_000, evaluationCallsPerDay: 3 }
+  const snapshot = { status: 'ready', writable: true, mode: 'host', revision: 42, value: customValues }
+  const writes = []
+  let resolveMutate
+  const form = { getSnapshot: () => snapshot, subscribe: () => () => {},
+    mutate: async (ops, revision) => {
+      writes.push({ ops, revision })
+      return new Promise(resolve => { resolveMutate = resolve })
+    } }
+  const call = hostCalls({ overview: { ok: true, version: 'test', runtime: 'dsh',
+    budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 }, counts: {},
+    store: { readable: true, schema: 2 } } })
+  let phase = 0
+  await renderPanel(registration, { locale: 'zh', initialTab: 'budget', call, control: undefined, form }, 24,
+    ({ nodes }) => {
+      const slider = nodes.find(node => node.type === 'input' && node.props?.type === 'range'
+        && node.props?.className === 'mse-budget-slider')
+      const tokens = nodes.find(node => node.type?.uiName === 'Input'
+        && node.props?.['aria-label'] === mod.__test.zh.evalTokens)
+      const tasks = nodes.find(node => node.type?.uiName === 'Input'
+        && node.props?.['aria-label'] === mod.__test.zh.evalCalls)
+      const ticks = nodes.filter(node => node.props?.className?.startsWith('mse-budget-tick'))
+      const status = nodes.find(node => node.props?.className === 'mse-budget-status')
+      const button = label => nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === label)
+      const save = button(mod.__test.zh.save) ?? button(mod.__test.zh.saving)
+      const discard = button(mod.__test.zh.discard)
+      if (!slider || !tokens || !tasks || !save || !discard) return false
+      if (phase === 0) {
+        assert.ok(Math.abs(slider.props.value - (4 / 3)) < 1e-9)
+        assert.equal(tokens.props.value, '30000')
+        assert.equal(tasks.props.value, '3')
+        assert.equal(ticks.filter(node => node.props.className.includes('is-active')).length, 0)
+        assert.ok(status.children[0].includes(mod.__test.zh.evalTierCustom))
+        slider.props.onKeyDown({ key: 'ArrowLeft', preventDefault() {} })
+        phase = 1
+        return false
+      }
+      if (phase === 1) {
+        assert.equal(tokens.props.value, '20000')
+        assert.equal(tasks.props.value, '2')
+        slider.props.onKeyDown({ key: 'ArrowRight', preventDefault() {} })
+        phase = 2
+        return false
+      }
+      if (phase === 2) {
+        assert.equal(tokens.props.value, '50000')
+        assert.equal(tasks.props.value, '5')
+        assert.equal((status.children[0].match(/50K/gu) ?? []).length, 1)
+        assert.equal((slider.props['aria-valuetext'].match(/50K/gu) ?? []).length, 1)
+        slider.props.onKeyDown({ key: 'Home', preventDefault() {} })
+        phase = 3
+        return false
+      }
+      if (phase === 3) {
+        assert.equal(tokens.props.value, '0')
+        assert.equal(tasks.props.value, '0')
+        slider.props.onKeyDown({ key: 'End', preventDefault() {} })
+        phase = 4
+        return false
+      }
+      if (phase === 4) {
+        assert.equal(tokens.props.value, '200000')
+        assert.equal(tasks.props.value, '20')
+        discard.props.onClick()
+        phase = 5
+        return false
+      }
+      if (phase === 5) {
+        assert.equal(tokens.props.value, '30000')
+        assert.equal(tasks.props.value, '3')
+        assert.ok(Math.abs(slider.props.value - (4 / 3)) < 1e-9)
+        assert.equal(ticks.filter(node => node.props.className.includes('is-active')).length, 0)
+        slider.props.onChange({ currentTarget: { value: '3' } })
+        phase = 6
+        return false
+      }
+      if (phase === 6) {
+        assert.equal(tokens.props.value, '100000')
+        assert.equal(tasks.props.value, '10')
+        assert.equal(ticks.filter(node => node.props.className.includes('is-active')).length, 1)
+        assert.equal(save.props.disabled, false)
+        save.props.onClick()
+        phase = 7
+        return false
+      }
+      if (phase === 7) {
+        assert.equal(slider.props.disabled, true, 'save in progress locks the slider')
+        assert.equal(tokens.props.disabled, true)
+        assert.equal(tasks.props.disabled, true)
+        assert.equal(save.props.disabled, true)
+        assert.equal(discard.props.disabled, true)
+        assert.equal(writes.length, 1)
+        assert.equal(writes[0].revision, 42)
+        assert.deepEqual(writes[0].ops.map(op => [op.path[0], op.value]), [
+          ['evaluationTokensPerDay', 100_000], ['evaluationCallsPerDay', 10],
+        ])
+        phase = 8
+        return true
+      }
+      return true
+    })
+  assert.equal(phase, 8)
+  resolveMutate(true)
+  await new Promise(resolve => setImmediate(resolve))
+})
+
+test('budget slider and numeric fields are locked in a read-only settings form', async () => {
+  const { registration, module: mod } = loadClient()
+  const snapshot = { status: 'ready', writable: false, mode: 'host', revision: 43,
+    value: { ...READY_VALUES, evaluationTokensPerDay: 30_000, evaluationCallsPerDay: 3 } }
+  let mutateCalls = 0
+  const form = { getSnapshot: () => snapshot, subscribe: () => () => {},
+    mutate: async () => { mutateCalls += 1; return true } }
+  const call = hostCalls({ overview: { ok: true, version: 'test', runtime: 'dsh',
+    budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 }, counts: {},
+    store: { readable: true, schema: 2 } } })
+  const tree = await renderPanel(registration, { locale: 'en', initialTab: 'budget', call, control: undefined, form }, 20)
+  const nodes = elementsOf(tree)
+  const slider = nodes.find(node => node.type === 'input' && node.props?.type === 'range'
+    && node.props?.className === 'mse-budget-slider')
+  const inputs = nodes.filter(node => node.type?.uiName === 'Input'
+    && node.props?.className === 'mse-budget-value')
+  assert.ok(slider)
+  assert.equal(slider.props.disabled, true)
+  assert.equal(inputs.length, 2)
+  assert.ok(inputs.every(node => node.props.disabled))
+  slider.props.onChange({ currentTarget: { value: '4' } })
+  slider.props.onKeyDown({ key: 'End', preventDefault() {} })
+  assert.equal(mutateCalls, 0)
+})
+
+test('non-preset budget pairs stay exact on render and when an unrelated setting is saved', async () => {
+  const { registration, module: mod } = loadClient()
+  const call = hostCalls({ overview: { ok: true, version: 'test', runtime: 'dsh',
+    budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 }, counts: {},
+    store: { readable: true, schema: 2 } } })
+  for (const [tokensValue, tasksValue] of [[50_000, 2], [250_000, 11]]) {
+    const snapshot = { status: 'ready', writable: true, mode: 'host', revision: 44,
+      value: { ...READY_VALUES, evaluationTokensPerDay: tokensValue, evaluationCallsPerDay: tasksValue } }
+    const form = { getSnapshot: () => snapshot, subscribe: () => () => {}, mutate: async () => true }
+    const tree = await renderPanel(registration, { locale: 'en', initialTab: 'budget', call, control: undefined, form }, 20)
+    const nodes = elementsOf(tree)
+    const slider = nodes.find(node => node.type === 'input' && node.props?.className === 'mse-budget-slider')
+    const token = nodes.find(node => node.type?.uiName === 'Input'
+      && node.props?.['aria-label'] === mod.__test.en.evalTokens)
+    const tasks = nodes.find(node => node.type?.uiName === 'Input'
+      && node.props?.['aria-label'] === mod.__test.en.evalCalls)
+    const status = nodes.find(node => node.props?.className === 'mse-budget-status')
+    const activeTicks = nodes.filter(node => node.props?.className?.includes('mse-budget-tick is-active'))
+    assert.equal(slider.props.value, tokensValue === 50_000 ? 2 : 4)
+    assert.equal(token.props.value, String(tokensValue))
+    assert.equal(tasks.props.value, String(tasksValue))
+    assert.equal(activeTicks.length, 0)
+    assert.ok(status.children[0].includes(mod.__test.en.evalTierCustom))
+  }
+
+  const exerciseCustomSteps = async (tokensValue, tasksValue, steps) => {
+    const snapshot = { status: 'ready', writable: true, mode: 'host', revision: 44,
+      value: { ...READY_VALUES, evaluationTokensPerDay: tokensValue, evaluationCallsPerDay: tasksValue } }
+    const form = { getSnapshot: () => snapshot, subscribe: () => () => {}, mutate: async () => true }
+    let stepIndex = 0
+    await renderPanel(registration, { locale: 'en', initialTab: 'budget', call, control: undefined, form }, 24,
+      ({ nodes }) => {
+        const slider = nodes.find(node => node.type === 'input' && node.props?.className === 'mse-budget-slider')
+        const token = nodes.find(node => node.type?.uiName === 'Input'
+          && node.props?.['aria-label'] === mod.__test.en.evalTokens)
+        const tasks = nodes.find(node => node.type?.uiName === 'Input'
+          && node.props?.['aria-label'] === mod.__test.en.evalCalls)
+        const discard = nodes.find(node => node.type?.uiName === 'Button'
+          && labelOf(node) === mod.__test.en.discard)
+        if (!slider || !token || !tasks || !discard) return false
+        const expected = stepIndex === 0 ? [tokensValue, tasksValue] : steps[stepIndex - 1].expected
+        assert.equal(Number(token.props.value), expected[0])
+        assert.equal(Number(tasks.props.value), expected[1])
+        if (stepIndex === steps.length) return true
+        const step = steps[stepIndex]
+        if (step.key !== undefined) slider.props.onKeyDown({ key: step.key, preventDefault() {} })
+        else if (step.pointer === true) {
+          slider.props.onPointerDown({ button: 0 })
+          slider.props.onPointerUp({ button: 0, currentTarget: { value: String(slider.props.value) } })
+        }
+        else discard.props.onClick()
+        stepIndex += 1
+        return false
+      })
+    assert.equal(stepIndex, steps.length)
+  }
+  await exerciseCustomSteps(30_000, 3, [
+    { key: 'ArrowLeft', expected: [20_000, 2] },
+    { key: 'ArrowRight', expected: [50_000, 5] },
+  ])
+  await exerciseCustomSteps(50_000, 2, [
+    { pointer: true, expected: [50_000, 5] },
+    { discard: true, expected: [50_000, 2] },
+    { key: 'ArrowLeft', expected: [20_000, 2] },
+    { discard: true, expected: [50_000, 2] },
+    { key: 'ArrowRight', expected: [100_000, 10] },
+  ])
+  await exerciseCustomSteps(250_000, 11, [
+    { key: 'ArrowLeft', expected: [200_000, 20] },
+    { discard: true, expected: [250_000, 11] },
+    { key: 'ArrowRight', expected: [250_000, 11] },
+  ])
+
+  let snapshot = { status: 'ready', writable: true, mode: 'host', revision: 45,
+    value: { ...READY_VALUES, evaluationTokensPerDay: 50_000, evaluationCallsPerDay: 2 } }
+  const writes = []
+  const listeners = new Set()
+  const form = { getSnapshot: () => snapshot, subscribe: listener => {
+    listeners.add(listener)
+    return () => listeners.delete(listener)
+  }, mutate: async (ops, revision) => {
+    writes.push({ ops, revision })
+    if (revision !== snapshot.revision) return false
+    const value = { ...snapshot.value }
+    for (const op of ops) value[op.path[0]] = op.value
+    snapshot = { ...snapshot, revision: revision + 1, value }
+    for (const listener of listeners) listener()
+    return true
+  } }
+  let phase = 0
+  await renderPanel(registration, { locale: 'en', initialTab: 'budget', call, control: undefined, form }, 20,
+    ({ nodes }) => {
+      const token = nodes.find(node => node.type?.uiName === 'Input'
+        && node.props?.['aria-label'] === mod.__test.en.evalTokens)
+      const tasks = nodes.find(node => node.type?.uiName === 'Input'
+        && node.props?.['aria-label'] === mod.__test.en.evalCalls)
+      const toggle = nodes.find(node => node.type?.uiName === 'Switch'
+        && node.props?.label === mod.__test.en.autoValidate)
+      const save = nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === mod.__test.en.save)
+      if (!token || !tasks || !toggle || !save) return false
+      if (phase === 0) {
+        assert.equal(token.props.value, '50000')
+        assert.equal(tasks.props.value, '2')
+        toggle.props.onChange(true)
+        phase = 1
+        return false
+      }
+      if (phase === 1) {
+        assert.equal(token.props.value, '50000')
+        assert.equal(tasks.props.value, '2')
+        assert.equal(save.props.disabled, false)
+        save.props.onClick()
+        phase = 2
+        return false
+      }
+      const saved = nodes.some(node => node.props?.className === 'mse-ok'
+        && labelOf(node) === mod.__test.en.saved)
+      if (!saved) return false
+      assert.equal(token.props.value, '50000')
+      assert.equal(tasks.props.value, '2')
+      assert.equal(nodes.filter(node => node.props?.className?.includes('mse-budget-tick is-active')).length, 0)
+      assert.equal(writes.length, 1)
+      assert.equal(writes[0].revision, 45)
+      assert.deepEqual(writes[0].ops, [{ op: 'set', path: ['autoValidationEnabled'], value: true }])
+      assert.equal(snapshot.value.evaluationTokensPerDay, 50_000)
+      assert.equal(snapshot.value.evaluationCallsPerDay, 2)
+      phase = 3
+      return true
+    })
+  assert.equal(phase, 3)
+  assert.equal(snapshot.revision, 46)
+  assert.equal(snapshot.value.autoValidationEnabled, true)
+  assert.equal(snapshot.value.evaluationTokensPerDay, 50_000)
+  assert.equal(snapshot.value.evaluationCallsPerDay, 2)
 })
 
 test('general Save stores a pending remote key before the config CAS and clears it only after the key is stored', async () => {
@@ -1679,8 +2176,19 @@ test('a settings save rejects a changed revision, preserves a stable draft revis
   const { registration } = loadClient()
   let snapshot = { status: 'ready', writable: true, revision: 19, value: { ...READY_VALUES } }
   const writes = []
-  const form = { getSnapshot: () => snapshot, subscribe: () => () => {},
-    mutate: (ops, revision) => { writes.push({ ops, revision }); return true } }
+  const listeners = new Set()
+  const form = { getSnapshot: () => snapshot, subscribe: listener => {
+    listeners.add(listener)
+    return () => listeners.delete(listener)
+  }, mutate: (ops, revision) => {
+    writes.push({ ops, revision })
+    if (revision !== snapshot.revision || snapshot.writable !== true) return false
+    const value = { ...snapshot.value }
+    for (const op of ops) value[op.path[0]] = op.value
+    snapshot = { ...snapshot, revision: revision + 1, value }
+    for (const listener of listeners) listener()
+    return true
+  } }
   const call = async method => ({ ok: true, value: method === 'overview'
     ? { ok: true, version: 'test', runtime: 'dsh', budget: { turnBytes: 768, sessionBytes: 1536, maxLessons: 2 },
       counts: {}, store: { readable: true, schema: 2 } }
@@ -1717,6 +2225,7 @@ test('a settings save rejects a changed revision, preserves a stable draft revis
       const input = nodes.find(node => node.type?.uiName === 'Input' && node.props?.['aria-label'] === ZH_DICT.contextBytes)
       if (picker === undefined || input === undefined) return false
       picker.props.onChange('session-bbbbcccc-2222')
+      assert.equal(input.props.value, '768', 'the permission check begins from the saved Host value')
       input.props.onChange({ target: { value: '1280' } })
       phase = 1
       return false
@@ -1735,6 +2244,13 @@ test('a settings save rejects a changed revision, preserves a stable draft revis
   assert.equal(phase, 3)
   assert.equal(writes.length, 1)
   assert.equal(writes[0].revision, 21, 'a current draft writes using the revision it was seeded with')
+  assert.deepEqual(writes[0].ops, [
+    { op: 'set', path: ['verificationSessionId'], value: 'session-bbbbcccc-2222' },
+    { op: 'set', path: ['maxContextBytes'], value: 1280 },
+  ])
+  assert.equal(snapshot.revision, 22)
+  assert.equal(snapshot.value.verificationSessionId, 'session-bbbbcccc-2222')
+  assert.equal(snapshot.value.maxContextBytes, 1280)
   assert.ok(JSON.stringify(stableTree).includes(ZH_DICT.saved))
 
   writes.length = 0
@@ -1743,7 +2259,8 @@ test('a settings save rejects a changed revision, preserves a stable draft revis
     if (phase === 0) {
       const input = nodes.find(node => node.type?.uiName === 'Input' && node.props?.['aria-label'] === ZH_DICT.contextBytes)
       if (input === undefined) return false
-      input.props.onChange({ target: { value: '1280' } })
+      assert.equal(input.props.value, '1280', 'the committed value is the baseline for the next draft')
+      input.props.onChange({ target: { value: '1344' } })
       phase = 1
       return false
     }
@@ -1757,6 +2274,7 @@ test('a settings save rejects a changed revision, preserves a stable draft revis
   })
   assert.equal(phase, 2)
   assert.equal(writes.length, 0, 'permission revoked at save time results in zero writes')
+  assert.equal(snapshot.value.maxContextBytes, 1280, 'permission revocation leaves the committed Host value unchanged')
 })
 
 test('a Host mutate refusal is never presented as a successful settings save', async () => {

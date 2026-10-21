@@ -347,7 +347,7 @@ const guardedPartialBinding = input => {
   if (!names.some(name => Object.hasOwn(input, name))) return true
   return guardedBound(input)
 }
-if (process.argv.includes('--help')) {  process.stdout.write('MSE trusted-host JSON CLI\nSend one JSON object on stdin: {"config":{"stateRoot":"/absolute/private/state","adapterId":"generic"},"op":"status","input":{}}\nOperations: '
+if (process.argv.includes('--help')) {  process.stdout.write('MSE trusted-host JSON CLI\nSend one JSON object on stdin: {"config":{"stateRoot":"/absolute/private/state","adapterId":"generic","evaluationBudgetMode":"limited"},"op":"status","input":{}}\nEvaluation budget mode: limited (default) or unlimited; numeric daily caps remain stored and are used again when limited is selected.\nOperations: '
     + [...operations].join(', ') + '\nDo not expose evidence, migration or evaluation operations directly as model tools.\n')
   process.exit(0)
 }

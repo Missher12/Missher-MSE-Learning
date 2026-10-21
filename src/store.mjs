@@ -3,7 +3,7 @@ import { constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, open
   readFileSync, writeFileSync, renameSync, unlinkSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 
-const MAX_BYTES = 2 * 1024 * 1024
+export const MAX_STORE_BYTES = 2 * 1024 * 1024
 export class LearningError extends Error {
   constructor(code) { super(code); this.code = code }
 }
@@ -13,7 +13,7 @@ function regular(path) {
   const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
   try {
     const stat = fstatSync(fd)
-    check(stat.isFile() && stat.size <= MAX_BYTES, 'invalid_store')
+    check(stat.isFile() && stat.size <= MAX_STORE_BYTES, 'invalid_store')
     return readFileSync(fd, 'utf8')
   } finally { closeSync(fd) }
 }
@@ -125,7 +125,7 @@ export class LessonStore {
       const result = fn(state)
       state.revision += 1
       const body = JSON.stringify(state)
-      check(Buffer.byteLength(body) <= MAX_BYTES, 'capacity')
+      check(Buffer.byteLength(body) <= MAX_STORE_BYTES, 'capacity')
       atomicWrite(this.path, body)
       return result
     } finally {

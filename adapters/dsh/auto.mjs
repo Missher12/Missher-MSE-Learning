@@ -478,8 +478,8 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
           const planHash = String(lesson.id).replace(/[^a-zA-Z0-9]/gu, '').slice(0, 24) || 'candidate'
           const outcome = await withinSlot({ track: 'decision', planHash, generation: ++decisionJobGeneration },
             runContext => decisionRunner(lesson, runContext))
-          if (outcome?.ok !== true && ['evaluation_budget', 'evaluation_budget_calls', 'review_budget',
-            'review_budget_calls', 'review_budget_tokens', 'review_budget_disabled'].includes(outcome?.code)) {
+          if (outcome?.ok !== true && ['evaluation_budget', 'evaluation_budget_calls', 'spend_ledger_full',
+            'review_budget', 'review_budget_calls', 'review_budget_tokens', 'review_budget_disabled'].includes(outcome?.code)) {
             // A plan without an admitted decision is executable work: never register it just because
             // the later review has a separate reservation. The failed decision stays in the durable
             // decision ledger as a budget wait and this candidate is reconsidered on a later pass.
@@ -616,7 +616,8 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
     const cancelled = CANCELLED_CODES.includes(code)
     const yielded = YIELD_CODES.includes(code)
     const unknown = UNKNOWN_FACT_CODES.includes(code)
-    const waitingBudget = ['evaluation_budget', 'evaluation_budget_calls', 'review_budget', 'review_budget_calls',
+    const waitingBudget = ['evaluation_budget', 'evaluation_budget_calls', 'spend_ledger_full',
+      'review_budget', 'review_budget_calls',
       'review_budget_tokens', 'review_budget_disabled'].includes(code)
     const transient = TRANSIENT_CODES.includes(code)
     const attempts = plan.attempts + 1
@@ -803,7 +804,7 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
         await drainPending()
         // A budget-window refusal happened before the next physical request. Keep this same open
         // ticket so the plan can resume its completed checkpoints when the rolling allowance frees.
-        if (!['evaluation_budget', 'evaluation_budget_calls', 'review_budget'].includes(code)) {
+        if (!['evaluation_budget', 'evaluation_budget_calls', 'spend_ledger_full', 'review_budget'].includes(code)) {
           engine.evaluationCancel({ ticket: reservation.ticket, spent: spend.known > 0 ? spend.known : undefined })
         }
       } catch { record('review_cancel_failed', plan.lessonId) }
@@ -954,7 +955,7 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
       const code = error?.code ?? 'review_judge_failed'
       try {
         await drainPending()
-        if (!['evaluation_budget', 'evaluation_budget_calls', 'review_budget'].includes(code)) {
+        if (!['evaluation_budget', 'evaluation_budget_calls', 'spend_ledger_full', 'review_budget'].includes(code)) {
           engine.evaluationCancel({ ticket: prepared.ticket, spent: spend.known > 0 ? spend.known : undefined })
         }
       } catch { record('objective_cancel_failed', plan.lessonId) }
@@ -1016,6 +1017,22 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
       if (!waiting.includes(plan.reason)) continue
       engine.autoPlanUpdate({ queueKey: plan.queueKey, planHash: plan.planHash, stage: 'queued',
         attempts: 0, nextAttemptAt: 0, reason: null })
+      armed += 1
+    }
+    return armed
+  }
+
+  /** Wake only real rolling-budget/storage waits after the budget mode changes. Unknown results,
+   * cancelled work and provider failures retain their own isolation and backoff. */
+  const rearmBudgetWaiters = () => {
+    const waiting = ['review_budget', 'evaluation_budget', 'evaluation_budget_calls', 'review_budget_calls',
+      'review_budget_tokens', 'review_budget_disabled', 'spend_ledger_full']
+    let armed = 0
+    for (const plan of engine.autoPlans()) {
+      if (plan.stage !== 'queued' || !waiting.includes(plan.reason)) continue
+      engine.autoPlanUpdate({ queueKey: plan.queueKey, planHash: plan.planHash, stage: 'queued',
+        attempts: plan.attempts, nextAttemptAt: 0, reason: null,
+        ticket: typeof plan.ticket === 'string' ? plan.ticket : null })
       armed += 1
     }
     return armed
@@ -1212,7 +1229,7 @@ export function createAutoValidation({ engine, context, objectiveContext = () =>
     return { ok: true, intervalMs }
   }
 
-  return { scan, enqueue, rearm, start, abort, status, drain: drainPending,
+  return { scan, enqueue, rearm, rearmBudgetWaiters, start, abort, status, drain: drainPending,
     dispose: async () => {
       disposed = true
       if (timer !== null) { cancelTimer(timer); timer = null }

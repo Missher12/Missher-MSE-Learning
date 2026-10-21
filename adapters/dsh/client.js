@@ -280,6 +280,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       reflection_budget: '复盘额度已用完或仍在 30 分钟冷却期内',
       abstained: '模型判断信息不足，没有产出经验',
       evaluation_budget: '评测预算不足',
+      spend_ledger_full: '评测账本容量已满，等待旧记录释放',
       evaluation_job_open: '已有评测票据未结算',
       evaluation_calls_exhausted: '当日评测次数已用完',
       evaluation_tokens_exhausted: '当日评测 token 余量不足',
@@ -362,7 +363,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     turnBudgetHint: '只计经验文本，单位为 UTF-8 字节。',
     sessionBudgetHint: '在同一会话中限制经验占用。',
     evalBudgetTitle: '模型评测额度',
-    evalBudgetHint: '仅限制经验评审与客观评测，不含正常聊天或自动复盘（每日最多 3 次、每次 384 tokens）。按滚动 24 小时计算；已用、预留与实测分开显示，未知费用不按 0 计。',
+    evalBudgetHint: '按额度在滚动 24 小时额度内处理；持续处理不设总额度，可随时暂停。自动复盘另有节奏：24 小时最多 3 次，间隔至少 30 分钟。',
     decisionBackend: '模型来源', decisionModel: '决策模型', decisionModelField: '模型名称',
     decisionBackendHost: '跟随来源会话', decisionBackendOpenAI: 'OpenAI 兼容',
     decisionBackendJev: 'Jev', decisionBackendLaya: 'Laya HTTP', decisionEndpoint: 'API 地址',
@@ -498,7 +499,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     autoReflect: '自动复盘',
     autoValidation: '自动验证',
     autoValidate: '自动审查候选经验',
-    autoValidationHint: '自动审查候选经验，符合条件后限量试用；只有客观验证通过，才记为已验证。受评测额度限制。',
+    autoValidationHint: '自动审查候选经验，符合条件后按限额模式执行或在不限额模式持续处理；只有客观验证通过，才记为已验证。关闭此开关可暂停自动验证。',
     verificationCoverage: '经验验证',
     verificationCoverageHint: 'MSE 验证候选经验，确认有效后再正式启用。',
     verificationDetails: '验证详情',
@@ -514,16 +515,23 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     contextBytesHint: '单轮注入上限，单位：字节',
     contextBytesHintFull: '合法范围 {min}–{max} 字节，默认 {def}。会话累计 1536 字节、单轮最多 2 条经验由核心固定，不能在此调整；调整只影响下一次实际注入，不会退还或清零已经用掉的会话额度。',
     advanced: '高级：模型评测预算',
-    advancedHint: '档位只约束自动经验评审/客观评测；不含正常聊天，也不改变自动复盘（每日最多 3 次、384 输出 tokens）。登记方法的确定性回归不使用模型、不消耗这里的额度。额度按滚动 24 小时计算；预留与实测分开展示，未知费用会阻止自动重放。',
+    advancedHint: '按额度会限制滚动 24 小时内的评审和评测；持续处理不设总额度。自动复盘独立限为每 24 小时 3 次、间隔至少 30 分钟。',
+    evalMode: '评测预算模式', evalModeLimited: '按额度', evalModeUnlimited: '持续处理（不限额）',
+    evalModeHint: '模式切换不会修改保存的每日 token 和任务数；切回按额度时会恢复这些数值。',
+    evalUnlimitedTitle: '不限额模式',
+    evalUnlimitedHint: '保存后可持续处理可验证经验；需单独开启自动验证，可随时关闭或暂停学习。',
+    evalRemaining: '剩余总额', evalTasksRequests: '任务 / API 请求', evalLedgerCapacity: '账本容量',
+    evalAppliedMode: '当前生效模式', evalModePending: '待保存：{mode}（当前：{current}）',
     evalTokens: '每日评测 token 上限',
-    evalCalls: '每日评测次数上限',
-    evalTier: '评测预算档位（滚动 24 小时）', evalTierConservative: '保守 · 20K / 2',
-    evalTierStandard: '标准 · 50K / 5', evalTierEnhanced: '增强 · 100K / 10',
-    evalTierHigh: '高强度 · 200K / 20', evalTierCustom: '自定义', evalTierPaused: '暂停 · 0 / 0',
-    evalTierStatus: '当前：{tier}',
+    evalCalls: '每日评测任务数上限',
+    evalTier: '评测预算档位（滚动 24 小时）', evalTierConservative: '保守',
+    evalTierStandard: '标准', evalTierEnhanced: '增强',
+    evalTierHigh: '高强度', evalTierCustom: '自定义', evalTierPaused: '暂停',
+    evalTierTitle: '预算档位', evalTierStatus: '当前：{tier} · {tokens} tokens · {tasks} 任务/天',
+    evalTierSliderValue: '{tier}；每日 {tokens} tokens、{tasks} 项任务',
     evalMeasured: '已测 token', evalUnknown: '费用未知任务', evalNext: '下一次额度恢复',
-    evalBudgetState: { ready: '可用', running: '运行中', waiting_budget: '额度不足，等待恢复',
-      cost_unknown: '费用未知，自动推进已隔离', unavailable: '状态不可读' },
+    evalBudgetState: { ready: '可用', running: '运行中', unlimited: '不限额，可用', waiting_budget: '额度不足，等待恢复',
+      spend_ledger_full: '账本容量已满，等待记录释放', cost_unknown: '费用未知，原任务已隔离', unavailable: '状态不可读' },
     // ---- the verification session a historical candidate borrows its route from ----
     verifySession: '历史候选验证会话',
     verifySessionHint: '选择历史经验验证时使用的会话和模型，经验仍归原项目。',
@@ -682,7 +690,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       lesson_scope_ambiguous: 'That lesson id resolves in more than one scope; the owner is not guessed',
       history_unavailable: 'Generation history unreadable', library_counts_unavailable: 'Counts unreadable',
       session_ledger_unavailable: 'Session byte ledger unreadable', diagnose_unavailable: 'The dry run is unavailable',
-      remote_failed: 'Remote call failed', empty_result: 'The Host returned an empty result' },
+      remote_failed: 'Remote call failed', empty_result: 'The Host returned an empty result',
+      spend_ledger_full: 'The evaluation receipt ledger is full; waiting for old records to expire' },
     previewStale: 'This preview is stale: the session or turn changed. Preview again before starting.',
     verifyStale: 'This preview is stale: the session, lesson version or cases changed. Preview again before starting.',
     verifyBoundaryTitle: 'What this verification does and does not show',
@@ -886,15 +895,24 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     contextBytesHint: 'Per-turn injection cap, in bytes',
     contextBytesHintFull: 'Valid range {min}–{max} bytes, default {def}. The 1536-byte session cap and the 2-lessons-per-turn cap are fixed by the core and cannot be changed here; an edit applies to the next injection and never refunds or clears budget a session already spent.',
     advanced: 'Advanced: model evaluation budget',
-    advancedHint: 'These tiers cover automatic experience review and objective evaluation only. They exclude normal chat and do not change automatic reflection (up to 3 per day, 384 output tokens). Registered-algorithm regressions use no model and no budget. The window rolls over 24 hours; reserved and measured usage stay distinct, and unknown cost prevents automatic replay.',
-    evalTokens: 'Daily evaluation token cap', evalCalls: 'Daily evaluation call cap',
-    evalTier: 'Evaluation budget tier (rolling 24 h)', evalTierConservative: 'Conservative · 20K / 2',
-    evalTierStandard: 'Standard · 50K / 5', evalTierEnhanced: 'Enhanced · 100K / 10',
-    evalTierHigh: 'High · 200K / 20', evalTierCustom: 'Custom', evalTierPaused: 'Paused · 0 / 0',
-    evalTierStatus: 'Current: {tier}',
+    advancedHint: 'Limited mode caps review and evaluation in a rolling 24-hour window; Continuous mode has no total allowance. Automatic reflection keeps its separate limit of 3 per 24 hours with a 30-minute interval.',
+    evalMode: 'Evaluation budget mode', evalModeLimited: 'Limited', evalModeUnlimited: 'Continuous (unlimited)',
+    evalModeHint: 'Switching modes keeps the saved daily token and task values. Returning to Limited restores those values.',
+    evalUnlimitedTitle: 'Unlimited mode',
+    evalUnlimitedHint: 'After saving, continuous processing can evaluate experience; automatic validation must be enabled separately and can be switched off or paused at any time.',
+    evalRemaining: 'Remaining allowance', evalTasksRequests: 'Tasks / API requests',
+    evalLedgerCapacity: 'Receipt capacity', evalAppliedMode: 'Mode in effect',
+    evalModePending: 'Unsaved: {mode} (current: {current})',
+    evalTokens: 'Daily evaluation token cap', evalCalls: 'Daily evaluation task cap',
+    evalTier: 'Evaluation budget tier (rolling 24 h)', evalTierConservative: 'Conservative',
+    evalTierStandard: 'Standard', evalTierEnhanced: 'Enhanced',
+    evalTierHigh: 'High', evalTierCustom: 'Custom', evalTierPaused: 'Paused',
+    evalTierTitle: 'Budget tier', evalTierStatus: 'Current: {tier} · {tokens} tokens · {tasks} tasks/day',
+    evalTierSliderValue: '{tier}; {tokens} tokens and {tasks} tasks per day',
     evalMeasured: 'Measured tokens', evalUnknown: 'Tasks with unknown cost', evalNext: 'Next allowance recovery',
-    evalBudgetState: { ready: 'Available', running: 'Running', waiting_budget: 'Waiting for allowance',
-      cost_unknown: 'Unknown cost; automatic progress isolated', unavailable: 'Status unavailable' },
+    evalBudgetState: { ready: 'Available', running: 'Running', unlimited: 'Unlimited and available',
+      waiting_budget: 'Waiting for allowance', spend_ledger_full: 'Receipt capacity full; waiting for records to expire',
+      cost_unknown: 'Unknown cost; original task isolated', unavailable: 'Status unavailable' },
     // ---- the verification session a historical candidate borrows its route from ----
     verifySession: 'Verification session for historical candidates',
     verifySessionHint: 'The session and model used to verify historical lessons; the lesson still belongs to its original project.',
@@ -1082,12 +1100,32 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-textarea{display:block;width:100%;min-height:80px;resize:vertical;font:inherit;font-size:13px;line-height:22px;color:inherit;background:var(--dsw-alias-bg-layer-1);border:0.5px solid var(--dsw-alias-border-l2);border-radius:8px;padding:6px 10px;overflow-wrap:anywhere}
 .mse-details .mse-cases{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;min-height:120px;white-space:pre-wrap}
 .mse-details .mse-actions{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap;padding-top:12px}
-.mse-details .mse-budget-presets{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,128px),1fr));gap:8px;width:100%;padding:8px 0 0;justify-content:initial}
-.mse-details .mse-budget-presets>*{width:100%;min-width:0}
-.mse-details .mse-budget-preset{width:100%;min-width:0;height:auto;min-height:36px;padding-block:8px;white-space:normal;overflow-wrap:anywhere}
-.mse-details .mse-budget-row .mse-row-side{width:156px;flex:none}
-.mse-details .mse-budget-value{width:100%;max-width:156px}
-.mse-details .mse-budget-row .mse-row-side .mse-budget-value>*{width:100%;max-width:100%}
+.mse-details .mse-budget-picker{width:100%;min-width:0;box-sizing:border-box;padding:10px;background:transparent;border:1px solid var(--dsw-alias-border-l2);border-radius:10px}
+.mse-details .mse-budget-head{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 12px;min-width:0}
+.mse-details .mse-budget-title{flex:0 0 auto;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}
+.mse-details .mse-budget-status{flex:1 1 180px;min-width:0;text-align:right;font-size:12px;line-height:18px;color:var(--dsw-alias-label-primary);overflow-wrap:anywhere}
+.mse-details .mse-budget-slider{display:block;width:calc(100% - 18px);height:36px;box-sizing:border-box;margin:4px 9px 0;padding:0;border:0;appearance:none;-webkit-appearance:none;background:transparent;cursor:pointer;touch-action:pan-y}
+.mse-details .mse-budget-slider::-webkit-slider-runnable-track{height:4px;border:0;border-radius:999px;background:var(--dsw-alias-border-l2)}
+.mse-details .mse-budget-slider::-moz-range-track{height:4px;border:0;border-radius:999px;background:var(--dsw-alias-border-l2)}
+.mse-details .mse-budget-slider::-webkit-slider-thumb{width:16px;height:16px;box-sizing:border-box;margin-top:-6px;appearance:none;-webkit-appearance:none;border:2px solid var(--dsw-alias-state-business-primary);border-radius:50%;background:var(--dsw-alias-bg-layer-1);box-shadow:0 0 0 3px var(--dsw-alias-interactive-bg-hover)}
+.mse-details .mse-budget-slider::-moz-range-thumb{width:16px;height:16px;box-sizing:border-box;border:2px solid var(--dsw-alias-state-business-primary);border-radius:50%;background:var(--dsw-alias-bg-layer-1);box-shadow:0 0 0 3px var(--dsw-alias-interactive-bg-hover)}
+.mse-details .mse-budget-slider:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:5px;border-radius:999px}
+.mse-details .mse-budget-slider:disabled{opacity:.55;cursor:not-allowed}
+.mse-details .mse-budget-ticks{position:relative;height:21px;margin:2px 17px 0;min-width:0;color:var(--dsw-alias-label-tertiary);font-size:10px;line-height:16px}
+.mse-details .mse-budget-tick{position:absolute;top:0;white-space:nowrap;transform:translateX(-50%)}
+.mse-details .mse-budget-tick:before{position:absolute;top:-5px;left:50%;width:1px;height:4px;content:'';background:var(--dsw-alias-border-l2)}
+.mse-details .mse-budget-tick:nth-child(1){left:0}
+.mse-details .mse-budget-tick:nth-child(2){left:25%}
+.mse-details .mse-budget-tick:nth-child(3){left:50%}
+.mse-details .mse-budget-tick:nth-child(4){left:75%}
+.mse-details .mse-budget-tick:nth-child(5){left:100%}
+.mse-details .mse-budget-tick.is-active{color:var(--dsw-alias-state-business-primary);font-weight:600}
+.mse-details .mse-budget-tick.is-active:before{background:var(--dsw-alias-state-business-primary)}
+.mse-details .mse-budget-values{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px;min-width:0}
+.mse-details .mse-budget-field{display:grid;gap:5px;min-width:0;color:var(--dsw-alias-label-secondary);font-size:11px;line-height:16px}
+.mse-details .mse-budget-field>span{overflow-wrap:anywhere}
+.mse-details .mse-budget-value{display:flex;width:100%;min-width:0;max-width:100%;box-sizing:border-box}
+.mse-details .mse-budget-field .mse-budget-value>*{width:100%;min-width:0;max-width:100%;box-sizing:border-box}
 .mse-details .mse-error{color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:20px;overflow-wrap:anywhere}
 .mse-details .mse-notice{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px;min-height:20px;overflow-wrap:anywhere}
 .mse-details .mse-ok{color:var(--dsw-alias-state-business-primary);font-size:12px;line-height:20px}
@@ -1111,8 +1149,6 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-scope select{width:100%;max-width:100%}
 .mse-details .mse-num{width:74px}
 .mse-details .mse-row-side{gap:5px}
-.mse-details .mse-budget-row{align-items:flex-start}
-.mse-details .mse-budget-row .mse-row-side{width:min(156px,46%)}
 }
 `
 
@@ -1597,6 +1633,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     // preset is available as an explicit action and only takes effect after the operator saves it.
     evaluationTokensPerDay: String(value?.evaluationTokensPerDay ?? 0),
     evaluationCallsPerDay: String(value?.evaluationCallsPerDay ?? 2),
+    evaluationBudgetMode: value?.evaluationBudgetMode === 'unlimited' ? 'unlimited' : 'limited',
     decisionBackend: ['host', 'openai_compatible', 'jev', 'laya'].includes(value?.decisionBackend) ? value.decisionBackend : 'host',
     decisionModel: typeof value?.decisionModel === 'string' ? value.decisionModel : '',
     decisionEndpoint: typeof value?.decisionEndpoint === 'string' ? value.decisionEndpoint : '',
@@ -1647,6 +1684,10 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const calls = number(draft.evaluationCallsPerDay, 0, EVAL_CALLS_MAX, 'evaluationCallsPerDay')
     if (calls !== null && calls !== value?.evaluationCallsPerDay) {
       ops.push({ op: 'set', path: ['evaluationCallsPerDay'], value: calls })
+    }
+    if (!['limited', 'unlimited'].includes(draft.evaluationBudgetMode)) problems.push('evaluationBudgetMode invalid')
+    else if (draft.evaluationBudgetMode !== (value?.evaluationBudgetMode === 'unlimited' ? 'unlimited' : 'limited')) {
+      ops.push({ op: 'set', path: ['evaluationBudgetMode'], value: draft.evaluationBudgetMode })
     }
     if (!['host', 'openai_compatible', 'jev', 'laya'].includes(draft.decisionBackend)) problems.push('decisionBackend invalid')
     else if (draft.decisionBackend !== (value?.decisionBackend ?? 'host')) {
@@ -1792,6 +1833,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const decisionCredentialBusy = React.useRef(false)
     const formSaveBusy = React.useRef(false)
     const settingsReloadBusy = React.useRef(false)
+    const budgetSliderPointerActive = React.useRef(false)
     const draftEditGeneration = React.useRef(0)
     const decisionClientId = React.useRef(null)
     if (decisionClientId.current === null) decisionClientId.current = makeRequestId()
@@ -2586,7 +2628,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       setSaveState(null)
     }
     const saveRow = (() => {
-      const feedback = saveState === null ? null
+      // A prior success only describes the accepted snapshot; a newer draft must read as unsaved.
+      const feedback = saveState === null || (saveState.kind === 'saved' && dirtyNow) ? null
         : saveState.kind === 'saving' ? h('span', { key: 'f', className: 'mse-hint' }, dict.saving)
           : saveState.kind === 'reloading' ? h('span', { key: 'f', className: 'mse-hint' }, dict.settingsReloading)
           : saveState.kind === 'saved' ? h('span', { key: 'f', className: 'mse-ok' },
@@ -2663,8 +2706,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           h(Switch, { checked: draft.values.reflectionEnabled, disabled: !writable, label: dict.autoReflect,
             onChange: next => edit({ reflectionEnabled: next }) })),
         row('autoValidation', dict.autoValidation, dict.autoValidationHint,
-          h(Switch, { checked: draft.values.autoValidationEnabled, disabled: !writable, label: dict.autoValidate,
-            onChange: next => edit({ autoValidationEnabled: next }) })),
+          h(Switch, { checked: draft.values.autoValidationEnabled, disabled: !writable,
+            label: dict.autoValidate, onChange: next => edit({ autoValidationEnabled: next }) })),
         row('verifySession', dict.verifySession,
           verify.tone === 'err' ? h('span', { key: 's', className: 'mse-error' }, verify.text) : verify.text,
           h(Picker, { key: 'p', label: dict.verifySession, value: draft.values.verificationSessionId,
@@ -3105,7 +3148,66 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const draftTier = draft === null ? null : budgetTiers.find(tier =>
       Number(draft.values.evaluationTokensPerDay) === tier.tokens
       && Number(draft.values.evaluationCallsPerDay) === tier.calls) ?? null
+    const draftTierIndex = draftTier === null ? -1 : budgetTiers.indexOf(draftTier)
+    const rawBudgetTokens = draft?.values?.evaluationTokensPerDay
+    const budgetTokensCurrent = rawBudgetTokens === undefined || String(rawBudgetTokens).trim() === ''
+      ? Number.NaN : Number(rawBudgetTokens)
+    let lowerBudgetTierIndex = null
+    let higherBudgetTierIndex = null
+    if (Number.isFinite(budgetTokensCurrent)) {
+      budgetTiers.forEach((tier, index) => {
+        if (tier.tokens < budgetTokensCurrent) lowerBudgetTierIndex = index
+        else if (higherBudgetTierIndex === null && tier.tokens > budgetTokensCurrent) higherBudgetTierIndex = index
+      })
+    }
+    const budgetRangeValue = (() => {
+      if (!Number.isFinite(budgetTokensCurrent)) return 2.5
+      if (budgetTokensCurrent <= budgetTiers[0].tokens) return 0
+      const lastIndex = budgetTiers.length - 1
+      if (budgetTokensCurrent >= budgetTiers[lastIndex].tokens) return lastIndex
+      for (let upperIndex = 1; upperIndex < budgetTiers.length; upperIndex += 1) {
+        const upper = budgetTiers[upperIndex]
+        if (budgetTokensCurrent <= upper.tokens) {
+          const lower = budgetTiers[upperIndex - 1]
+          return upperIndex - 1 + (budgetTokensCurrent - lower.tokens) / (upper.tokens - lower.tokens)
+        }
+      }
+      return 2.5
+    })()
+    const budgetStatusValues = draft === null ? { tier: dict.evalTierCustom, tokens: '', tasks: '' } : {
+      tier: draftTier?.label ?? dict.evalTierCustom,
+      tokens: draftTier === null ? String(draft.values.evaluationTokensPerDay ?? '')
+        : draftTier.tokens === 0 ? '0' : `${draftTier.tokens / 1000}K`,
+      tasks: String(draft.values.evaluationCallsPerDay ?? ''),
+    }
+    const budgetControlsDisabled = !writable || draftIsStale || saveState?.kind === 'saving'
+      || saveState?.kind === 'reloading' || formSaveBusy.current || settingsReloadBusy.current
+      || decisionKeyBusy || decisionCredentialBusy.current
+    const selectBudgetTier = index => {
+      if (draft === null) return
+      const tier = budgetTiers[Math.max(0, Math.min(budgetTiers.length - 1, index))]
+      const tokens = String(tier.tokens)
+      const calls = String(tier.calls)
+      if (String(draft.values.evaluationTokensPerDay ?? '') === tokens
+        && String(draft.values.evaluationCallsPerDay ?? '') === calls) return
+      edit({ evaluationTokensPerDay: tokens, evaluationCallsPerDay: calls })
+    }
     const paidBudget = settings?.paidBudget ?? null
+    const selectedBudgetMode = draft?.values?.evaluationBudgetMode === 'unlimited' ? 'unlimited' : 'limited'
+    const appliedBudgetMode = paidBudget?.evaluationBudgetMode
+    const budgetModePending = ['limited', 'unlimited'].includes(appliedBudgetMode)
+      && appliedBudgetMode !== selectedBudgetMode
+    const selectedBudgetModeLabel = selectedBudgetMode === 'unlimited' ? dict.evalModeUnlimited : dict.evalModeLimited
+    const appliedBudgetModeLabel = appliedBudgetMode === 'unlimited' ? dict.evalModeUnlimited
+      : appliedBudgetMode === 'limited' ? dict.evalModeLimited : dict.notReported
+    const budgetModeDisplay = budgetModePending
+      ? fill(dict.evalModePending, { mode: selectedBudgetModeLabel, current: appliedBudgetModeLabel })
+      : appliedBudgetModeLabel
+    const remainingBudgetDisplay = budgetModePending
+      ? fill(dict.evalModePending, { mode: selectedBudgetModeLabel, current: appliedBudgetModeLabel })
+      : selectedBudgetMode === 'unlimited' ? dict.evalModeUnlimited
+        : Number.isSafeInteger(paidBudget?.remainingTokens) && Number.isSafeInteger(paidBudget?.remainingCalls)
+          ? `${paidBudget.remainingTokens} tokens · ${paidBudget.remainingCalls} ${dict.unitCalls}` : dict.notReported
     const latestDecision = settings?.decisions?.latest?.[0] ?? null
     const latestDecisionResult = latestDecision?.finalResult ?? latestDecision?.result ?? latestDecision?.primaryResult ?? null
     const latestDecisionAction = latestDecisionResult?.action
@@ -3135,20 +3237,109 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       sectionTitle('e', dict.evalBudgetTitle),
       h('p', { key: 'ed', className: 'mse-hint' }, dict.evalBudgetHint),
       draft === null ? h('p', { key: 'l', className: 'mse-note' }, dict.loading) : h('div', { key: 'rows' }, [
-        h('p', { key: 'tier-label', className: 'mse-hint' }, fill(dict.evalTierStatus,
-          { tier: draftTier?.label ?? dict.evalTierCustom })),
-        h('div', { key: 'tiers', className: 'mse-budget-presets', 'aria-label': dict.evalTier }, budgetTiers.map(tier =>
-          h(Button, { key: tier.id, className: 'mse-budget-preset', variant: draftTier?.id === tier.id ? 'primary' : 'outline', size: 'sm',
-            disabled: !writable, onClick: () => edit({ evaluationTokensPerDay: String(tier.tokens),
-              evaluationCallsPerDay: String(tier.calls) }) }, tier.label))),
-        row('tokens', dict.evalTokens, null,
-          h(Input, { type: 'number', min: 0, max: EVAL_TOKENS_MAX, step: 1000, disabled: !writable,
-            className: 'mse-budget-value', 'aria-label': dict.evalTokens, value: draft.values.evaluationTokensPerDay,
-            onChange: event => edit({ evaluationTokensPerDay: event.target.value }) }), { className: 'mse-budget-row' }),
-        row('calls', dict.evalCalls, null,
-          h(Input, { type: 'number', min: 0, max: EVAL_CALLS_MAX, step: 1, disabled: !writable,
-            className: 'mse-budget-value', 'aria-label': dict.evalCalls, value: draft.values.evaluationCallsPerDay,
-            onChange: event => edit({ evaluationCallsPerDay: event.target.value }) }), { className: 'mse-budget-row' }),
+        row('evaluation-budget-mode', dict.evalMode, dict.evalModeHint,
+          h(Picker, { label: dict.evalMode, value: draft.values.evaluationBudgetMode,
+            options: [
+              { id: 'limited', label: dict.evalModeLimited },
+              { id: 'unlimited', label: dict.evalModeUnlimited },
+            ], onChange: evaluationBudgetMode => edit({ evaluationBudgetMode }),
+            disabled: budgetControlsDisabled, testId: 'evaluation-budget-mode', className: 'mse-picker-wide' }),
+          { stacked: true }),
+        draft.values.evaluationBudgetMode === 'unlimited'
+          ? h('div', { key: 'unlimited-status', className: 'mse-callout', role: 'status' }, [
+            h('p', { key: 'hint', className: 'mse-hint' }, dict.evalUnlimitedHint),
+            definition('unlimited-budget-status', [
+              [dict.evalAppliedMode, budgetModeDisplay],
+              [dict.evalBudgetTitle, dict.evalBudgetState[paidBudget?.state] ?? dict.notReported],
+              [dict.evalRemaining, remainingBudgetDisplay],
+              [dict.evalTokensUsed, Number.isSafeInteger(paidBudget?.tokensReserved)
+                ? String(paidBudget.tokensReserved) : dict.notReported],
+              [dict.evalMeasured, Number.isSafeInteger(paidBudget?.tokensKnown)
+                ? String(paidBudget.tokensKnown) : dict.notReported],
+              [dict.evalTasksRequests, Number.isSafeInteger(paidBudget?.callsUsed)
+                && Number.isSafeInteger(paidBudget?.requestsUsed)
+                ? `${paidBudget.callsUsed} / ${paidBudget.requestsUsed}` : dict.notReported],
+              [dict.evalUnknown, Number.isSafeInteger(paidBudget?.tasksUnknown)
+                ? String(paidBudget.tasksUnknown) : dict.notReported],
+              paidBudget?.state === 'spend_ledger_full' && Number.isSafeInteger(paidBudget?.ledgerRows)
+                && Number.isSafeInteger(paidBudget?.ledgerCapacity)
+                && Number.isSafeInteger(paidBudget?.ledgerBytes)
+                && Number.isSafeInteger(paidBudget?.ledgerByteCapacity)
+                ? [dict.evalLedgerCapacity,
+                  `${paidBudget.ledgerRows} / ${paidBudget.ledgerCapacity} · ${formatBytes(paidBudget.ledgerBytes)} / ${formatBytes(paidBudget.ledgerByteCapacity)}`]
+                : null,
+            ]),
+          ])
+          : h('div', { key: 'limited-controls', className: 'mse-budget-limited' }, [
+        h('div', { key: 'picker', className: 'mse-budget-picker' }, [
+          h('div', { key: 'head', className: 'mse-budget-head' }, [
+            h('span', { key: 'title', className: 'mse-budget-title' }, dict.evalTierTitle),
+            h('span', { key: 'status', className: 'mse-budget-status', 'aria-live': 'polite' },
+              fill(dict.evalTierStatus, budgetStatusValues)),
+          ]),
+          h('input', { key: 'slider', className: 'mse-budget-slider', type: 'range', min: 0, max: 4, step: 'any',
+            value: budgetRangeValue, disabled: budgetControlsDisabled, 'aria-label': dict.evalTier,
+            'aria-valuetext': fill(dict.evalTierSliderValue, budgetStatusValues),
+            onChange: event => {
+              if (budgetControlsDisabled) return
+              const rawValue = Number(event.currentTarget?.value ?? event.target?.value ?? budgetRangeValue)
+              if (Number.isFinite(rawValue)) selectBudgetTier(Math.round(rawValue))
+            },
+            onPointerDown: event => {
+              budgetSliderPointerActive.current = !budgetControlsDisabled
+                && (event.button === undefined || event.button === 0)
+            },
+            onPointerCancel: () => { budgetSliderPointerActive.current = false },
+            onPointerUp: event => {
+              const pointerActive = budgetSliderPointerActive.current
+              budgetSliderPointerActive.current = false
+              if (!pointerActive || budgetControlsDisabled
+                || (event.button !== undefined && event.button !== 0)) return
+              const rawValue = Number(event.currentTarget?.value ?? event.target?.value ?? budgetRangeValue)
+              if (Number.isFinite(rawValue)) selectBudgetTier(Math.round(rawValue))
+            },
+            onKeyDown: event => {
+              if (budgetControlsDisabled) return
+              let index = null
+              if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') {
+                index = lowerBudgetTierIndex
+                event.preventDefault?.()
+                if (index !== null) selectBudgetTier(index)
+                return
+              } else if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
+                index = higherBudgetTierIndex
+                event.preventDefault?.()
+                if (index !== null) selectBudgetTier(index)
+                return
+              } else if (event.key === 'Home') index = 0
+              else if (event.key === 'End') index = budgetTiers.length - 1
+              if (index === null) return
+              event.preventDefault?.()
+              selectBudgetTier(index)
+            } }),
+          h('div', { key: 'ticks', className: 'mse-budget-ticks', 'aria-hidden': 'true' },
+            budgetTiers.map((tier, index) => h('span', { key: tier.id,
+              className: `mse-budget-tick${draftTierIndex === index ? ' is-active' : ''}` },
+            ['0', '20K', '50K', '100K', '200K'][index]))),
+        ]),
+        h('div', { key: 'values', className: 'mse-budget-values' }, [
+          h('label', { key: 'tokens', className: 'mse-budget-field' }, [
+            h('span', { key: 'label' }, dict.evalTokens),
+            h(Input, { type: 'number', min: 0, max: EVAL_TOKENS_MAX, step: 1000, disabled: budgetControlsDisabled,
+              className: 'mse-budget-value', 'aria-label': dict.evalTokens, value: draft.values.evaluationTokensPerDay,
+              onChange: event => { if (!budgetControlsDisabled) edit({ evaluationTokensPerDay: event.target.value }) } }),
+          ]),
+          h('label', { key: 'calls', className: 'mse-budget-field' }, [
+            h('span', { key: 'label' }, dict.evalCalls),
+            h(Input, { type: 'number', min: 0, max: EVAL_CALLS_MAX, step: 1, disabled: budgetControlsDisabled,
+              className: 'mse-budget-value', 'aria-label': dict.evalCalls, value: draft.values.evaluationCallsPerDay,
+              onChange: event => { if (!budgetControlsDisabled) edit({ evaluationCallsPerDay: event.target.value }) } }),
+          ]),
+        ]),
+          ]),
+        row('autoValidation', dict.autoValidation, dict.autoValidationHint,
+          h(Switch, { checked: draft.values.autoValidationEnabled, disabled: budgetControlsDisabled,
+            label: dict.autoValidate, onChange: next => edit({ autoValidationEnabled: next }) })),
         h('div', { key: 'decision-settings', className: 'mse-decision-settings' }, [
           sectionTitle('decision-title', dict.decisionModel),
           h('div', { key: 'decision-source', className: 'mse-decision-source' }, [
@@ -3243,8 +3434,12 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           // A counter the current read-only projection does not forward is reported as
           // unreported. Printing 0 here would tell the operator a day's budget is untouched
           // when nobody actually looked.
-          [dict.evalTokensLimit, String(settings?.budget?.evaluationTokensPerDay ?? dict.unknown)],
-          [dict.evalCallsLimit, `${settings?.budget?.evaluationCallsPerDay ?? dict.unknown} ${dict.unitCalls}`],
+          [dict.evalTokensLimit, paidBudget?.evaluationBudgetMode === 'unlimited' ? dict.evalModeUnlimited
+            : String(settings?.budget?.evaluationTokensPerDay ?? dict.unknown)],
+          [dict.evalCallsLimit, paidBudget?.evaluationBudgetMode === 'unlimited' ? dict.evalModeUnlimited
+            : `${settings?.budget?.evaluationCallsPerDay ?? dict.unknown} ${dict.unitCalls}`],
+          [dict.evalAppliedMode, budgetModeDisplay],
+          [dict.evalRemaining, remainingBudgetDisplay],
           [dict.evalTokensUsed, Number.isSafeInteger(paidBudget?.tokensReserved)
             ? String(paidBudget.tokensReserved) : dict.notReported],
           [dict.evalMeasured, Number.isSafeInteger(paidBudget?.tokensKnown)

@@ -33,6 +33,13 @@ function fixture(t, { tokens = 20_000, calls = 5 } = {}) {
   return { engine, context, input, stateRoot, getNow: () => now, setNow: value => { now = value } }
 }
 
+function completeDecision(f, request, tokens = 300) {
+  assert.equal(f.engine.decisionStarted({ ticket: request.ticket, requestHash: request.requestHash }).ok, true)
+  return f.engine.decisionComplete({ ticket: request.ticket, model: request.identity.model,
+    result: { action: 'prioritize_validation', confidence: 0.7, confidenceMeaning: 'advisory', reasons: [], riskCodes: [] },
+    usage: { totalTokens: tokens }, evidenceRevision: f.context.evidenceRevision, version: f.context.version })
+}
+
 function reflectedMergeCandidate(f, instruction, turnId) {
   const prepared = f.engine.reflectionRequest({ projectKey: '/synthetic/decision', sessionId: 'merge-source',
     turnId, outcome: 'supported', taskSummary: '修改 package.json 前先核对 JSON 结构和字段类型',
@@ -86,7 +93,7 @@ function proposeMerge(f, primaryId, targetId) {
   return { context, decisionId: completed.record.key }
 }
 
-function preparedMerge(f, suffix) {
+function preparedMerge(f, suffix, { issueTicket = true } = {}) {
   const primary = reflectedMergeCandidate(f,
     '修改 package.json 前先解析 JSON 结构，再核对 scripts 字段类型并保留无关字段。', `${suffix}-one`)
   f.setNow(f.getNow() + 31 * 60_000)
@@ -98,6 +105,7 @@ function preparedMerge(f, suffix) {
   const source = f.engine.sourcePublish({ sessionId: plan.source.sessionId, projectKey: '/synthetic/decision',
     provider: 'host', model: 'host-model', apiMode: null, baseUrl: null,
     reasoningState: 'unspecified', reasoningValue: null, driver: 'dsh_host_stream' })
+  if (!issueTicket) return { decisionId, plan, source }
   const prepared = f.engine.reflectionRequest({ sessionId: plan.source.sessionId, turnId: `${suffix}-ticket`,
     projectKey: '/synthetic/decision', outcome: 'supported', taskSummary: '按冻结约束生成并核验合并候选',
     resultSummary: `${suffix}: 核验来源绑定和派发状态`,
@@ -919,6 +927,247 @@ test('known settled decisions may be reevaluated after changing the endpoint', t
     provider: 'compatible', endpoint: 'https://two.example/v1' }))
   assert.equal(changedRoute.ok, true)
   assert.equal(changedRoute.duplicate, false)
+})
+
+test('limited remains the default and keeps its existing rolling caps', t => {
+  const f = fixture(t, { tokens: 600, calls: 1 })
+  assert.equal(f.engine.status().evaluationBudgetMode, 'limited')
+  const first = f.engine.decisionRequest(f.input())
+  assert.equal(first.ok, true)
+  assert.equal(completeDecision(f, first).ok, true)
+  const second = f.engine.decisionRequest(f.input({ model: 'host-model-after-cap' }))
+  assert.equal(second.ok, false)
+  assert.equal(second.code, 'evaluation_budget_calls')
+  assert.equal(f.engine.status().evaluationCallsLast24h, 1)
+})
+
+test('unlimited allows more than one million reserved tokens and twenty one-at-a-time decisions', t => {
+  const f = fixture(t, { tokens: 1_000_000, calls: 20 })
+  f.engine.configure({ evaluationBudgetMode: 'unlimited' })
+  for (let index = 0; index < 21; index += 1) {
+    const request = f.engine.decisionRequest({ ...f.input({ model: `unlimited-model-${index}` }),
+      ruleVersion: `unlimited-capacity-${index}`, inputTokens: 50_000, outputTokens: 200 })
+    assert.equal(request.ok, true, `request ${index} is admitted`)
+    assert.equal(f.engine.status().evaluationJobsOpen, 1, 'one paid ticket is live at a time')
+    if (index === 0) {
+      const other = f.engine.record({ projectKey: '/synthetic/decision', source: 'host_proposal', kind: 'method',
+        eventId: 'unlimited-concurrent-candidate',
+        instruction: '并发候选使用独立证据，确认已有票据时拒绝新请求' })
+      const competingContext = f.engine.decisionContext({ lessonId: other.id, projectKey: '/synthetic/decision' })
+      const concurrent = f.engine.decisionRequest({ ...f.input({ model: 'concurrent-model' }),
+        candidateId: competingContext.candidateId, version: competingContext.version,
+        projectHash: competingContext.projectHash, evidenceRevision: competingContext.evidenceRevision,
+        evidence: { ...competingContext },
+        ruleVersion: 'unlimited-concurrent', inputTokens: 50_000, outputTokens: 200 })
+      assert.equal(concurrent.ok, false)
+      assert.equal(concurrent.code, 'evaluation_busy')
+    }
+    assert.equal(completeDecision(f, request, 50_000).ok, true)
+  }
+  const status = f.engine.status()
+  assert.equal(status.evaluationBudgetMode, 'unlimited')
+  assert.equal(status.evaluationTokensPerDay, 1_000_000, 'the old finite setting is retained')
+  assert.equal(status.evaluationCallsPerDay, 20, 'the old finite setting is retained')
+  assert.equal(status.evaluationTokensReserved24h > 1_000_000, true)
+  assert.equal(status.evaluationCallsLast24h, 21)
+  assert.equal(status.evaluationRequestsLast24h, 21)
+
+  const restarted = new LearningEngine({ stateRoot: f.stateRoot, adapterId: 'dsh', evaluationTokensPerDay: 1_000_000,
+    evaluationCallsPerDay: 20, evaluationBudgetMode: 'unlimited', now: f.getNow })
+  assert.equal(restarted.status().evaluationCallsLast24h, 21, 'restart keeps actual counts')
+  assert.equal(restarted.status().evaluationTokensReserved24h, status.evaluationTokensReserved24h)
+})
+
+test('unlimited does not replay an unknown-cost decision after changing routes', t => {
+  const f = fixture(t)
+  f.engine.configure({ evaluationBudgetMode: 'unlimited' })
+  const first = f.engine.decisionRequest(f.input())
+  assert.equal(f.engine.decisionStarted({ ticket: first.ticket, requestHash: first.requestHash }).ok, true)
+  assert.equal(f.engine.decisionFail({ ticket: first.ticket, code: 'provider_failed', usage: null }).ok, true)
+  const switched = f.engine.decisionRequest(f.input({ backend: 'openai_compatible', model: 'other-model',
+    provider: 'compatible', endpoint: 'https://example.test/v1/chat/completions' }))
+  assert.equal(switched.ok, true)
+  assert.equal(switched.duplicate, true)
+  assert.equal(switched.record.state, 'unknown')
+  assert.equal(f.engine.status().evaluationUnknown24h, 1)
+})
+
+test('switching to limited zero allowances blocks a reserved next step and preserves the ticket', t => {
+  const f = fixture(t)
+  f.engine.configure({ evaluationBudgetMode: 'unlimited' })
+  const fallbackRoute = { provider: 'host', model: 'host-model', apiMode: 'host_llm_stream',
+    reasoningEffort: 'unspecified' }
+  const primary = f.engine.decisionRequest({ ...f.input({ backend: 'openai_compatible', model: 'remote-model',
+    provider: 'compatible', endpoint: 'https://example.test/v1', fallbackRoute }), outputTokens: 512 })
+  assert.equal(f.engine.decisionStarted({ ticket: primary.ticket, requestHash: primary.requestHash }).ok, true)
+  assert.equal(f.engine.decisionComplete({ ticket: primary.ticket, model: 'remote-model',
+    result: { action: 'wait', confidence: 0.4, confidenceMeaning: 'advisory', reasons: ['uncertain'], riskCodes: [] },
+    usage: { inputTokens: 80, outputTokens: 20 }, evidenceRevision: f.context.evidenceRevision,
+    version: f.context.version, fallbackPending: true }).needsHostFallback, true)
+  const fallback = f.engine.decisionReserveFallback({ ticket: primary.ticket, inputTokens: 400,
+    outputTokens: 512, requestHash: 'f'.repeat(64), provider: fallbackRoute.provider, model: fallbackRoute.model,
+    apiMode: fallbackRoute.apiMode, reasoningEffort: fallbackRoute.reasoningEffort })
+  assert.equal(fallback.ok, true)
+
+  f.engine.configure({ evaluationBudgetMode: 'limited', evaluationTokensPerDay: 0, evaluationCallsPerDay: 0 })
+  const denied = f.engine.decisionStarted({ ticket: primary.ticket, stepKey: 'decision:host', requestHash: fallback.requestHash })
+  assert.equal(denied.ok, false)
+  assert.equal(denied.code, 'evaluation_budget_calls')
+  assert.equal(f.engine.store.read().jobs.some(row => row.ticket === primary.ticket), true)
+  assert.equal(f.engine.store.read().spends.some(row => row.ticket === primary.ticket), true)
+  assert.equal(f.engine.store.read().jobs.find(row => row.ticket === primary.ticket)
+    .stepReservations.find(row => row.stepKey === 'decision:host').dispatched, false)
+
+  f.engine.configure({ evaluationBudgetMode: 'unlimited' })
+  assert.equal(f.engine.status().evaluationCallsPerDay, 0, 'switching modes retains the zero cap')
+  assert.equal(f.engine.decisionStarted({ ticket: primary.ticket, stepKey: 'decision:host',
+    requestHash: fallback.requestHash }).ok, true)
+  assert.equal(f.engine.decisionComplete({ ticket: primary.ticket, stepKey: 'decision:host', model: 'host-model',
+    result: { action: 'review', confidence: 0.8, confidenceMeaning: 'advisory', reasons: [], riskCodes: [] },
+    usage: { totalTokens: 10 }, evidenceRevision: f.context.evidenceRevision, version: f.context.version }).ok, true)
+  assert.equal(f.engine.status().evaluationRequestsLast24h, 2)
+  assert.equal(f.engine.status().evaluationCallsLast24h, 1)
+})
+
+test('unlimited keeps over 128 spend receipts readable and deduplicates a settled ticket', t => {
+  const f = fixture(t)
+  f.engine.configure({ evaluationBudgetMode: 'unlimited' })
+  let last
+  for (let index = 0; index < 130; index += 1) {
+    last = f.engine.decisionRequest({ ...f.input(), ruleVersion: `receipt-capacity-${index}` })
+    assert.equal(last.ok, true)
+    assert.equal(completeDecision(f, last).ok, true)
+  }
+  const status = f.engine.status()
+  assert.equal(status.evaluationLedgerRows, 130)
+  assert.equal(status.evaluationLedgerFull, false)
+  assert.equal(f.engine.decisionRequest({ ...f.input(), ruleVersion: 'receipt-capacity-129' }).duplicate, true)
+})
+
+test('a checkpoint spends its own reserved bytes after ordinary writes approach the store limit', t => {
+  const f = fixture(t)
+  const decisionFallbackRoute = { provider: 'host', model: 'host-model', apiMode: 'host_llm_stream',
+    reasoningEffort: 'unspecified' }
+  const request = f.engine.decisionRequest(f.input({ backend: 'openai_compatible', model: 'remote-model',
+    provider: 'compatible', endpoint: 'https://example.test/v1', fallbackRoute: decisionFallbackRoute }))
+  assert.equal(f.engine.decisionStarted({ ticket: request.ticket, requestHash: request.requestHash }).ok, true)
+  // Simulate a live ticket created by a prior version, which held this reserve implicitly and has
+  // not yet persisted the per-ticket byte counter.
+  f.engine.store.update(state => {
+    delete state.jobs.find(row => row.ticket === request.ticket).storeReserveRemaining
+  })
+  const started = f.engine.store.read()
+  const job = started.jobs.find(row => row.ticket === request.ticket)
+  const liveReserve = job.storeReserveRemaining ?? 64 * 1024
+  const currentBytes = Buffer.byteLength(JSON.stringify(started), 'utf8')
+  const targetBytes = f.engine.status().evaluationLedgerByteCapacity - 64 * 1024 - liveReserve - 2 * 1024
+  const paddingBytes = targetBytes - currentBytes - Buffer.byteLength('"capacityPadding":', 'utf8') - 2
+  assert.equal(paddingBytes > 0, true)
+  f.engine.transaction(state => {
+    state.events[0].capacityPadding = 'x'.repeat(paddingBytes)
+    return { ok: true }
+  })
+  const paddedState = f.engine.store.read()
+  const paddedJob = paddedState.jobs.find(row => row.ticket === request.ticket)
+  const checkpointCapacityUseBefore = Buffer.byteLength(JSON.stringify(paddedState), 'utf8')
+    + (paddedJob.storeReserveRemaining ?? 64 * 1024)
+  const beforeCheckpoint = paddedJob.storeReserveRemaining
+    ?? 64 * 1024
+  const checkpoint = f.engine.ticketStepComplete({ ticket: request.ticket, stepKey: 'decision',
+    requestHash: request.requestHash, text: 'x'.repeat(8192), truncated: false, tokens: 300 })
+  assert.equal(checkpoint.ok, true)
+  let afterState = f.engine.store.read()
+  let afterCheckpoint = afterState.jobs.find(row => row.ticket === request.ticket).storeReserveRemaining
+  assert.equal(afterCheckpoint < beforeCheckpoint, true, 'the checkpoint consumes the ticket reserve')
+  assert.equal(Buffer.byteLength(JSON.stringify(afterState), 'utf8') + afterCheckpoint <= checkpointCapacityUseBefore,
+    true, 'legacy reserve-field bytes are charged to the same allowance')
+
+  const fallbackCapacityUseBefore = Buffer.byteLength(JSON.stringify(afterState), 'utf8') + afterCheckpoint
+  const fallback = f.engine.decisionFail({ ticket: request.ticket, code: 'provider_model_unreported',
+    usage: { totalTokens: 300 }, allowFallback: true })
+  assert.equal(fallback.needsHostFallback, true)
+  afterState = f.engine.store.read()
+  const afterFallback = afterState.jobs.find(row => row.ticket === request.ticket).storeReserveRemaining
+  assert.equal(afterFallback < afterCheckpoint, true, 'the fallback-pending checkpoint consumes its ticket reserve')
+  assert.equal(Buffer.byteLength(JSON.stringify(afterState), 'utf8') + afterFallback <= fallbackCapacityUseBefore,
+    true, 'fallback progress is charged to the still-live ticket')
+
+  assert.equal(f.engine.decisionFail({ ticket: request.ticket, code: 'decision_invalid_json',
+    usage: { totalTokens: 300 } }).ok, true, 'terminal settlement still commits after the checkpoint')
+  assert.equal(f.engine.store.read().jobs.some(row => row.ticket === request.ticket), false)
+
+  const completionFixture = fixture(t)
+  const fallbackRoute = { provider: 'host', model: 'host-model', apiMode: 'host_llm_stream',
+    reasoningEffort: 'unspecified' }
+  const primary = completionFixture.engine.decisionRequest(completionFixture.input({ backend: 'openai_compatible',
+    model: 'remote-model', provider: 'compatible', endpoint: 'https://example.test/v1', fallbackRoute }))
+  assert.equal(completionFixture.engine.decisionStarted({ ticket: primary.ticket,
+    requestHash: primary.requestHash }).ok, true)
+  const answer = { action: 'wait', confidence: 0.4, confidenceMeaning: 'advisory', reasons: ['uncertain'], riskCodes: [] }
+  const answerHash = completionFixture.engine.store.read().jobs.find(row => row.ticket === primary.ticket)
+    .stepReservations.find(row => row.stepKey === 'decision').requestHash
+  assert.equal(completionFixture.engine.ticketStepComplete({ ticket: primary.ticket, stepKey: 'decision',
+    requestHash: answerHash, text: JSON.stringify(answer), truncated: false, tokens: 100 }).ok, true)
+  const beforeComplete = completionFixture.engine.store.read().jobs.find(row => row.ticket === primary.ticket)
+    .storeReserveRemaining
+  const pending = completionFixture.engine.decisionComplete({ ticket: primary.ticket, model: 'remote-model',
+    result: answer, usage: { inputTokens: 80, outputTokens: 20 }, evidenceRevision: completionFixture.context.evidenceRevision,
+    version: completionFixture.context.version, fallbackPending: true })
+  assert.equal(pending.needsHostFallback, true)
+  const afterComplete = completionFixture.engine.store.read().jobs.find(row => row.ticket === primary.ticket)
+    .storeReserveRemaining
+  assert.equal(afterComplete < beforeComplete, true,
+    'the decisionComplete fallback-pending transition consumes the live ticket reserve')
+})
+
+test('paid admission waits at the actual byte ceiling and controlled merge does not half-write its two receipts', t => {
+  const f = fixture(t)
+  const capacity = f.engine.status().evaluationLedgerByteCapacity
+  const state = f.engine.store.read()
+  const currentBytes = Buffer.byteLength(JSON.stringify(state), 'utf8')
+  const targetBytes = capacity - 64 * 1024 - 64 * 1024 - 2 * 1024 + 64
+  const paddingBytes = targetBytes - currentBytes - Buffer.byteLength('"capacityPadding":', 'utf8') - 2
+  f.engine.store.update(current => { current.events[0].capacityPadding = 'x'.repeat(paddingBytes) })
+  assert.equal(f.engine.status().evaluationLedgerFull, true)
+  const admission = f.engine.decisionRequest(f.input())
+  assert.equal(admission.ok, false)
+  assert.equal(admission.code, 'spend_ledger_full')
+  assert.equal(f.engine.store.read().jobs.length, 0)
+
+  const mergeFixture = fixture(t)
+  const merge = preparedMerge(mergeFixture, 'one-receipt-slot', { issueTicket: false })
+  mergeFixture.engine.configure({ evaluationBudgetMode: 'unlimited' })
+  mergeFixture.engine.store.update(current => {
+    while (current.spends.length < 4095) current.spends.push({ kind: 'evaluation', at: mergeFixture.getNow(), tokens: 1 })
+  })
+  const eventCount = mergeFixture.engine.store.read().events.length
+  const result = mergeFixture.engine.reflectionRequest({ sessionId: merge.plan.source.sessionId,
+    turnId: 'one-receipt-slot-ticket', projectKey: '/synthetic/decision', outcome: 'supported',
+    taskSummary: '按冻结约束生成并核验合并候选', resultSummary: '检查双行原子预留',
+    sourceBinding: true, sourceRevision: merge.source.revision, sourceBindingHash: merge.source.bindingHash,
+    controlGeneration: mergeFixture.engine.controlGeneration(), generation: { decisionId: merge.decisionId,
+      generationKey: merge.plan.generationKey } })
+  assert.equal(result.skipped, 'spend_ledger_full')
+  assert.equal(mergeFixture.engine.store.read().spends.length, 4095, 'neither receipt was appended')
+  assert.equal(mergeFixture.engine.store.read().events.length, eventCount, 'the generation event was not created')
+})
+
+test('a nearly full pre-existing store can commit a small space-releasing repair', t => {
+  const f = fixture(t)
+  const capacity = f.engine.status().evaluationLedgerByteCapacity
+  const initial = f.engine.store.read()
+  const currentBytes = Buffer.byteLength(JSON.stringify(initial), 'utf8')
+  const overhead = Buffer.byteLength('"capacityPadding":', 'utf8') + 3
+  const paddingBytes = capacity - currentBytes - overhead - 1024
+  f.engine.store.update(state => { state.events[0].capacityPadding = 'x'.repeat(paddingBytes) })
+  const before = f.engine.status().evaluationLedgerBytes
+  assert.equal(capacity - before, 1024)
+  f.engine.transaction(state => {
+    const event = state.events.find(row => typeof row.capacityPadding === 'string')
+    event.capacityPadding = event.capacityPadding.slice(0, -512)
+    return { ok: true }
+  })
+  assert.equal(f.engine.status().evaluationLedgerBytes, before - 512)
 })
 
 test('cancellation while resolving a secret never reaches fetch', async () => {

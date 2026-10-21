@@ -779,6 +779,9 @@ class Hooks:
         self.cancel = getattr(self, "cancel", None) or cancel or self._cancel_timer
         self.config.setdefault("evaluationTokensPerDay", _bounded_env("MSE_EVALUATION_TOKENS_PER_DAY", 0, 1000000))
         self.config.setdefault("evaluationCallsPerDay", _bounded_env("MSE_EVALUATION_CALLS_PER_DAY", 2, 8))
+        budget_mode = self.config.get("evaluationBudgetMode", os.environ.get("MSE_EVALUATION_BUDGET_MODE", "limited"))
+        self.config["evaluationBudgetMode"] = budget_mode if isinstance(budget_mode, str) \
+            and budget_mode in {"limited", "unlimited"} else "limited"
         self.config.setdefault("decisionBackend", os.environ.get("HERMES_MSE_DECISION_BACKEND", "host"))
         self.config.setdefault("decisionModel", os.environ.get("HERMES_MSE_DECISION_MODEL", ""))
         self.config.setdefault("decisionEndpoint", os.environ.get("HERMES_MSE_DECISION_ENDPOINT", ""))
