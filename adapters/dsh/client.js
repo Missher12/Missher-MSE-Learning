@@ -230,6 +230,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       core_unavailable: '学习核心未加载（插件可能已停用或加载失败）',
       session_unknown: '该会话不在宿主会话目录中（可能已删除），请重新选择',
       session_required: '需要先选择一个会话',
+      session_id_invalid: '会话标识无效，请重新选择', activity_range_invalid: '日历范围无效',
+      activity_timezone_invalid: '日历时区无效', activity_clock_invalid: '日历时间不可用',
+      activity_scope_invalid: '活动作用域无效', activity_store_unavailable: '学习库不可读',
       session_internal: '该会话是子智能体或内部会话，不支持在此复盘',
       session_query_unavailable: '宿主会话查询服务不可用，无法读取可信回合',
       session_read_failed: '读取会话记录失败',
@@ -445,7 +448,40 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     selected: '已选择',
     // ---- whole-library view and per-row progress (read-only) ----
     libraryTitle: '全库总览（默认视图）',
+    libraryDetailsTitle: '统计与范围详情',
     libraryNote: '全库读数来自本机学习库的只读投影，与所选项目、召回范围和写入范围无关。',
+    activityTitle: '活动日历', activityScope: '会话作用域', activityMetric: '着色指标', activityPalette: '配色', activityRange: '所选范围', activityView: '聚合方式',
+    activityPalettes: { blue: '蓝色', green: '绿色', violet: '紫色' },
+    activityTimezone: '时区', activityTimezoneHint: '按 {zone} 归日；默认使用浏览器时区。',
+    activityMetrics: { validation: '验证结果', created: '经验创建', withdrawn: '撤回', reactivated: '重新激活', all: '全部留存活动' },
+    activityViews: { daily: '每日', weekly: '每周', cumulative: '所选范围已记录' },
+    activityRanges: { 30: '最近 30 天', 90: '最近 90 天', 366: '最近 366 天' },
+    activityTypes: { created: '经验创建', withdrawn: '撤回', reactivated: '重新激活', unknown: '其他留存活动' },
+    activityDecisions: { accepted: '通过', rejected: '拒绝', inconclusive: '无结论', withdrawn: '撤回',
+      trial_withdrawn: '试用撤回', reactivated: '重新激活' },
+    activityBasis: '仅显示当前留存记录；历史覆盖不完整，空白日期不代表零活动。',
+    activityCoverageDetails: '覆盖与完整性详情',
+    activityCoverageExplanation: '日历只投影当前留存的经验与实验记录，不代表完整的历史事件账本。',
+    activityEventLinkUncertain: '关联不确定', activityEventReference: '查看记录 ID', activityEventId: '事件 ID', activityLessonId: '经验 ID',
+    activityRows: '当前作用域留存经验 {lessons} 条，相关实验 {experiments} 条。',
+    activityInvalidTime: '{n} 条记录时间无效或晚于当前时间，已省略。',
+    activityIncompleteRows: '{n} 条经验没有完整事件历史。',
+    activityAtCap: '经验或实验触及保留上限，较早记录可能已被裁剪。',
+    activityOutside: '{n} 条留存事件不在所选日期范围内。',
+    activityAdoptionsMissing: '近期采用未纳入：当前索引无法可靠归属项目作用域。',
+    activityEventsTruncated: '活动明细超过 {n} 条上限，已截断。',
+    activityNoScope: '先选择一个仍可访问的宿主会话；日历不会回退到全库。',
+    activityNoDay: '这一天没有匹配的留存记录，不等于确认没有活动。',
+    activityNoEvents: '所选范围没有可显示的留存活动；这不证明期间没有发生过活动。',
+    activityLoading: '正在读取所选作用域的留存活动…', activityUnavailable: '活动日历不可读',
+    activityRangeRecorded: '所选范围已记录', activityRecent: '近期留存活动', activityRecentEmpty: '所选范围暂无可显示的活动明细。',
+    activityDayCount: '{date}：{count}', activityWeekCount: '{start} 至 {end}：{count}',
+    activityWeekdays: ['一', '二', '三', '四', '五', '六', '日'],
+    activityLegend: ['无匹配记录', '1', '2–3', '4–7', '8+'],
+    feesTitle: '费用与额度（本实例）', feesWindow: '滚动 24 小时；与自然日活动图分开，不换算货币。',
+    feeReflectionTokens: '复盘实耗 Token', feeReflectionUnknown: '复盘未知用量次数',
+    feeEvaluationTokens: '评测已知实耗 Token', feeEvaluationUnknown: '评测未知用量次数',
+    feeReservedTokens: '评测预留 Token', feeTasks: '评测任务数', feeRequests: '评测 API 请求数',
     libraryCorrections: '纠错记录',
     libraryAwaiting: '待评审/待验证',
     libraryTrial: '试用中（未验证）',
@@ -454,6 +490,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     libraryUnreadable: '全库计数不可读',
     libraryPartial: '另有 {n} 条属于本进程未观察到的项目作用域，未计入本次读数。',
     libraryPartialCats: '纠错、方法与试用只统计本进程已扫描的作用域，因此显示为“至少 N”或未知；总数、状态计数与采用数仍来自全库。',
+    libraryScanned: '已扫描经验', libraryUnattributed: '未归属经验',
     atLeast: '至少 {n}',
     owningScope: '所属项目',
     selectedProjectTitle: '所选项目',
@@ -684,6 +721,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     codeNames: { core_unavailable: 'The learning core is not loaded (plugin disabled or failed to load)',
       session_unknown: 'That session is not in the Host directory (it may be gone); pick another',
       session_required: 'Pick a session first', session_directory_unavailable: 'The Host session directory is unavailable',
+      session_id_invalid: 'The session id is invalid; pick a session again', activity_range_invalid: 'The calendar range is invalid',
+      activity_timezone_invalid: 'The calendar time zone is invalid', activity_clock_invalid: 'Calendar time is unavailable',
+      activity_scope_invalid: 'The activity scope is invalid', activity_store_unavailable: 'The learning store is unreadable',
       session_directory_failed: 'Reading the session directory failed', migration_required: 'The store needs migration (schema 1 → 2)',
       store_unavailable: 'The learning store is unreadable', lesson_not_in_scope: 'That lesson is not in this scope',
       lesson_unattributable: 'That lesson is not in any scope this process can read (it may belong to an unlisted or archived project)',
@@ -825,7 +865,40 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     unavailable: 'Unavailable.', selected: 'Selected',
     // ---- whole-library view and per-row progress (read-only) ----
     libraryTitle: 'Whole library (default view)',
+    libraryDetailsTitle: 'Statistics and scope details',
     libraryNote: 'Whole-library counts are a read-only projection of the local store; they are independent of the selected project, of recall scope and of write scope.',
+    activityTitle: 'Activity calendar', activityScope: 'Session scope', activityMetric: 'Color by', activityPalette: 'Palette', activityRange: 'Range', activityView: 'Aggregation',
+    activityPalettes: { blue: 'Blue', green: 'Green', violet: 'Violet' },
+    activityTimezone: 'Time zone', activityTimezoneHint: 'Dates use {zone}; the browser zone is the default.',
+    activityMetrics: { validation: 'Validation results', created: 'Lessons created', withdrawn: 'Withdrawals', reactivated: 'Reactivated', all: 'All retained activity' },
+    activityViews: { daily: 'Daily', weekly: 'Weekly', cumulative: 'Recorded in range' },
+    activityRanges: { 30: 'Last 30 days', 90: 'Last 90 days', 366: 'Last 366 days' },
+    activityTypes: { created: 'Lesson created', withdrawn: 'Withdrawn', reactivated: 'Reactivated', unknown: 'Other retained activity' },
+    activityDecisions: { accepted: 'Accepted', rejected: 'Rejected', inconclusive: 'Inconclusive', withdrawn: 'Withdrawn',
+      trial_withdrawn: 'Trial withdrawn', reactivated: 'Reactivated' },
+    activityBasis: 'Retained records only; historical coverage is incomplete. A blank day does not confirm zero activity.',
+    activityCoverageDetails: 'Coverage and completeness details',
+    activityCoverageExplanation: 'The calendar projects currently retained lesson and experiment records; it is not a complete historical event ledger.',
+    activityEventLinkUncertain: 'Attribution uncertain', activityEventReference: 'Show record IDs', activityEventId: 'Event ID', activityLessonId: 'Lesson ID',
+    activityRows: '{lessons} retained lessons and {experiments} related experiments in this scope.',
+    activityInvalidTime: '{n} records have invalid or future timestamps and were omitted.',
+    activityIncompleteRows: '{n} lessons do not have complete event history.',
+    activityAtCap: 'The lesson or experiment retention limit is reached; older records may have been trimmed.',
+    activityOutside: '{n} retained events are outside the selected dates.',
+    activityAdoptionsMissing: 'Recent adoptions are omitted because the current index cannot be reliably attributed to a project scope.',
+    activityEventsTruncated: 'Activity details exceeded the {n}-event limit and were truncated.',
+    activityNoScope: 'Select an accessible Host session first; the calendar will not fall back to the whole library.',
+    activityNoDay: 'No matching retained record for this day; that does not confirm no activity occurred.',
+    activityNoEvents: 'No retained activity can be shown for this range; this does not prove nothing happened.',
+    activityLoading: 'Reading retained activity for the selected scope…', activityUnavailable: 'Activity calendar unavailable',
+    activityRangeRecorded: 'Recorded in selected range', activityRecent: 'Recent retained activity', activityRecentEmpty: 'No activity details can be shown for this range.',
+    activityDayCount: '{date}: {count}', activityWeekCount: '{start} to {end}: {count}',
+    activityWeekdays: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'],
+    activityLegend: ['No matching record', '1', '2–3', '4–7', '8+'],
+    feesTitle: 'Cost and usage (this instance)', feesWindow: 'Rolling 24 hours; separate from calendar days, with no currency conversion.',
+    feeReflectionTokens: 'Measured reflection tokens', feeReflectionUnknown: 'Reflection attempts with unknown usage',
+    feeEvaluationTokens: 'Measured evaluation tokens', feeEvaluationUnknown: 'Evaluation attempts with unknown usage',
+    feeReservedTokens: 'Evaluation tokens reserved', feeTasks: 'Evaluation tasks', feeRequests: 'Evaluation API requests',
     libraryCorrections: 'Corrections',
     libraryAwaiting: 'Awaiting review/validation',
     libraryTrial: 'On trial (unverified)',
@@ -834,6 +907,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     libraryUnreadable: 'Whole-library counts unreadable',
     libraryPartial: '{n} more records belong to project scopes this process has not observed and are not part of this reading.',
     libraryPartialCats: 'Corrections, methods and trials count only the scopes this process scanned, so they read "at least N" or unknown; the total, the status counts and adoption still cover the whole library.',
+    libraryScanned: 'Scanned lessons', libraryUnattributed: 'Unattributed lessons',
     atLeast: 'at least {n}',
     owningScope: 'Owning project',
     selectedProjectTitle: 'Selected project',
@@ -1038,6 +1112,79 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-num-wide{width:118px}
 .mse-details .mse-section-title{margin:24px 0 2px;font-size:12px;line-height:20px;color:var(--dsw-alias-label-tertiary);font-weight:400;display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0}
 .mse-details .mse-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;padding:16px 0 20px;border-bottom:0.5px solid var(--dsw-alias-border-l2)}
+.mse-details .mse-activity-section{width:100%;min-width:0;margin:18px 0 8px}
+.mse-details .mse-activity-controls{display:flex;align-items:flex-end;gap:10px 14px;flex-wrap:wrap;min-width:0;padding:10px 0 4px}
+.mse-details .mse-activity-control{display:flex;align-items:center;gap:6px;min-width:0;max-width:100%}
+.mse-details .mse-activity-label{font-size:11px;line-height:18px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
+.mse-details .mse-activity-calendar{--mse-activity-month-row-height:18px;--mse-activity-track-gap:3px;--mse-activity-scroll-top-inset:1px;--mse-activity-day-offset:calc(var(--mse-activity-scroll-top-inset) + var(--mse-activity-month-row-height) + var(--mse-activity-track-gap));display:grid;grid-template-columns:20px minmax(0,1fr);gap:4px 6px;min-width:0;margin:12px 0 4px}
+.mse-details .mse-activity-months{grid-column:2;display:grid;grid-auto-flow:column;gap:3px;width:max-content;max-width:100%;min-width:0;min-height:var(--mse-activity-month-row-height);overflow-x:auto;color:var(--dsw-alias-label-tertiary);font-size:10px;line-height:16px}
+.mse-details .mse-activity-months span{white-space:nowrap;overflow:visible}
+.mse-details .mse-activity-weekdays{grid-column:1;grid-row:2;display:grid;grid-template-rows:repeat(7,12px);gap:3px;padding-top:var(--mse-activity-day-offset);color:var(--dsw-alias-label-tertiary);font-size:9px;line-height:12px;text-align:center}
+.mse-details .mse-activity-scroll{grid-column:2;grid-row:2;max-width:100%;overflow-x:auto;overscroll-behavior-x:contain;padding:var(--mse-activity-scroll-top-inset) 0 5px}
+.mse-details .mse-activity-grid{display:grid;grid-auto-flow:column;gap:3px;width:max-content}
+.mse-details .mse-activity-day,.mse-details .mse-activity-blank{display:block;width:12px;height:12px;min-width:12px;min-height:12px;padding:0;border:0.5px solid var(--dsw-alias-border-l2);border-radius:3px;background:var(--dsw-alias-bg-layer-1)}
+.mse-details button.mse-activity-day{cursor:pointer}
+.mse-details .mse-activity-day[data-level="1"],.mse-details .mse-activity-week[data-level="1"]{background:rgba(37,99,235,.20)}
+.mse-details .mse-activity-day[data-level="2"],.mse-details .mse-activity-week[data-level="2"]{background:rgba(37,99,235,.36)}
+.mse-details .mse-activity-day[data-level="3"],.mse-details .mse-activity-week[data-level="3"]{background:rgba(37,99,235,.55)}
+.mse-details .mse-activity-day[data-level="4"],.mse-details .mse-activity-week[data-level="4"]{background:rgba(37,99,235,.78)}
+.mse-details .mse-activity-day[data-selected="true"]{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
+.mse-details .mse-activity-day:focus-visible,.mse-details .mse-activity-week:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
+.mse-details .mse-activity-week-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:6px;min-width:0;margin:10px 0}
+.mse-details .mse-activity-week{display:flex;align-items:center;justify-content:space-between;gap:6px;min-width:0;padding:8px 9px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:7px;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);font:inherit;font-size:11px;text-align:left;overflow-wrap:anywhere}
+.mse-details .mse-activity-week strong{font-size:14px;font-variant-numeric:tabular-nums}
+.mse-details .mse-activity-cumulative{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:14px 0;border-bottom:0.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-secondary)}
+.mse-details .mse-activity-cumulative strong{font-size:24px;line-height:32px;font-weight:500;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary)}
+.mse-details .mse-activity-legend{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:4px 0 12px;color:var(--dsw-alias-label-tertiary);font-size:10px}
+.mse-details .mse-activity-legend-item{display:inline-flex;align-items:center;gap:4px}
+.mse-details .mse-activity-legend .mse-activity-day{flex:none}
+.mse-details .mse-activity-subtitle{margin:14px 0 6px;font-size:12px;line-height:20px;font-weight:500;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}
+.mse-details .mse-activity-events{display:flex;flex-direction:column;gap:5px;margin:0;padding:0;list-style:none;min-width:0}
+.mse-details .mse-activity-events li{display:grid;grid-template-columns:minmax(0,1fr) minmax(95px,auto);gap:2px 10px;align-items:baseline;min-width:0;padding:6px 0;border-bottom:0.5px solid var(--dsw-alias-border-l2);font-size:11px;line-height:17px}
+.mse-details .mse-activity-events time{color:var(--dsw-alias-label-tertiary);text-align:right;white-space:nowrap}
+.mse-details .mse-activity-events code{grid-column:1/-1;min-width:0;color:var(--dsw-alias-label-tertiary);font-size:10px;overflow-wrap:anywhere}
+.mse-details .mse-activity-coverage{margin-top:10px}
+.mse-details .mse-activity-coverage p+p{margin-top:5px}
+.mse-details .mse-overview-facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:12px 0 8px;min-width:0}
+.mse-details .mse-overview-fact{min-width:0;padding:0 10px;border-left:0.5px solid var(--dsw-alias-border-l2)}
+.mse-details .mse-overview-fact:first-child{padding-left:0;border-left:0}
+.mse-details .mse-overview-fact .mse-metric-label{font-size:11px;line-height:17px}
+.mse-details .mse-overview-fact .mse-metric-value b{font-size:23px;line-height:30px}
+.mse-details .mse-overview-notice{margin:3px 0;color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mse-details .mse-activity-toolbar{display:flex;align-items:center;justify-content:space-between;gap:8px 14px;flex-wrap:wrap;min-width:0}
+.mse-details .mse-activity-heading{display:flex;align-items:center;gap:7px;min-width:0;flex:1 1 300px}
+.mse-details .mse-activity-heading .mse-activity-title{flex:none;margin:0;color:var(--dsw-alias-label-primary);font-size:14px;font-weight:500}
+.mse-details .mse-activity-heading .mse-picker{min-width:0;max-width:100%}
+.mse-details .mse-activity-palette{display:flex;align-items:center;gap:4px;min-width:0}
+.mse-details .mse-activity-color-bars{display:inline-flex;align-items:stretch;gap:2px;height:11px;flex:none}
+.mse-details .mse-activity-color-bars i{width:3px;border-radius:1px;background:var(--mse-activity-accent,var(--dsw-alias-state-business-primary));opacity:.45}
+.mse-details .mse-activity-color-bars i:nth-child(2){opacity:.7}
+.mse-details .mse-activity-color-bars i:nth-child(3){opacity:1}
+.mse-details .mse-activity-section[data-palette="blue"]{--mse-activity-accent:color-mix(in srgb,var(--dsw-alias-state-business-primary) 18%,#4e7bd3 82%)}
+.mse-details .mse-activity-section[data-palette="green"]{--mse-activity-accent:color-mix(in srgb,var(--dsw-alias-state-business-primary) 18%,#368362 82%)}
+.mse-details .mse-activity-section[data-palette="violet"]{--mse-activity-accent:color-mix(in srgb,var(--dsw-alias-state-business-primary) 18%,#7959b9 82%)}
+.mse-details .mse-activity-scroll{width:100%;min-width:0}
+.mse-details .mse-activity-track{display:grid;grid-template-columns:repeat(var(--mse-activity-columns),12px);grid-template-rows:var(--mse-activity-month-row-height) auto;gap:var(--mse-activity-track-gap);width:max-content}
+.mse-details .mse-activity-months{grid-column:1/-1;grid-row:1;display:grid;grid-template-columns:repeat(var(--mse-activity-columns),12px);column-gap:3px;overflow:visible;width:max-content;max-width:none;min-width:0}
+.mse-details .mse-activity-grid{grid-column:1/-1;grid-row:2;gap:3px;width:max-content}
+.mse-details .mse-activity-section .mse-activity-day[data-level="1"],.mse-details .mse-activity-section .mse-activity-week[data-level="1"]{background:color-mix(in srgb,var(--mse-activity-accent) 18%,var(--dsw-alias-bg-layer-1))}
+.mse-details .mse-activity-section .mse-activity-day[data-level="2"],.mse-details .mse-activity-section .mse-activity-week[data-level="2"]{background:color-mix(in srgb,var(--mse-activity-accent) 36%,var(--dsw-alias-bg-layer-1))}
+.mse-details .mse-activity-section .mse-activity-day[data-level="3"],.mse-details .mse-activity-section .mse-activity-week[data-level="3"]{background:color-mix(in srgb,var(--mse-activity-accent) 58%,var(--dsw-alias-bg-layer-1))}
+.mse-details .mse-activity-section .mse-activity-day[data-level="4"],.mse-details .mse-activity-section .mse-activity-week[data-level="4"]{background:color-mix(in srgb,var(--mse-activity-accent) 80%,var(--dsw-alias-bg-layer-1))}
+.mse-details .mse-activity-section .mse-activity-day[data-selected="true"],.mse-details .mse-activity-section .mse-activity-day:focus-visible,.mse-details .mse-activity-section .mse-activity-week:focus-visible{outline-color:var(--mse-activity-accent)}
+.mse-details .mse-activity-event-main{display:flex;align-items:baseline;justify-content:space-between;gap:8px;min-width:0;overflow-wrap:anywhere}
+.mse-details .mse-activity-event-main .mse-activity-event-uncertain{color:var(--dsw-alias-label-tertiary);font-size:10px}
+.mse-details .mse-activity-event-reference{grid-column:1/-1;min-width:0;color:var(--dsw-alias-label-tertiary);font-size:10px}
+.mse-details .mse-activity-event-reference summary{cursor:pointer;width:max-content;max-width:100%}
+.mse-details .mse-activity-event-reference dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:3px 8px;margin:5px 0 0;min-width:0}
+.mse-details .mse-activity-event-reference dd{margin:0;min-width:0;overflow-wrap:anywhere}
+.mse-details .mse-activity-event-reference code{font-size:10px;overflow-wrap:anywhere}
+.mse-details .mse-activity-basis{margin:8px 0;color:var(--dsw-alias-label-secondary);font-size:11px;line-height:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mse-details .mse-fees{margin:12px 0;padding:10px 12px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:8px;min-width:0}
+.mse-details .mse-fees-title{font-size:12px;color:var(--dsw-alias-label-secondary);margin-bottom:3px}
+.mse-details .mse-fees-note{font-size:11px;color:var(--dsw-alias-label-tertiary);margin-bottom:8px}
+.mse-details .mse-fees .mse-metrics{grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;padding:4px 0;border:0}
+.mse-details .mse-fees .mse-metric-value b{font-size:15px;line-height:21px}
 .mse-details .mse-metric-label{font-size:12px;color:var(--dsw-alias-label-secondary);margin-bottom:5px}
 .mse-details .mse-metric-value{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
 .mse-details .mse-metric-value b{font-size:20px;line-height:28px;font-weight:500;font-variant-numeric:tabular-nums}
@@ -1142,6 +1289,15 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 @media(max-width:620px){
 .mse-details .mse-row{gap:12px}
 .mse-details .mse-metrics{gap:8px}
+.mse-details .mse-overview-facts{grid-template-columns:repeat(2,minmax(0,1fr));row-gap:12px}
+.mse-details .mse-overview-fact:nth-child(3){padding-left:0;border-left:0}
+.mse-details .mse-activity-toolbar{align-items:flex-start}
+.mse-details .mse-activity-heading{flex:1 1 100%;flex-wrap:wrap}
+.mse-details .mse-activity-toolbar>[role="tablist"]{max-width:100%}
+.mse-details .mse-activity-controls{align-items:flex-start;gap:8px}
+.mse-details .mse-activity-control{flex:1 1 145px;justify-content:space-between}
+.mse-details .mse-activity-control .mse-picker{max-width:calc(100% - 62px)}
+.mse-details .mse-activity-events li{grid-template-columns:minmax(0,1fr) minmax(84px,auto)}
 .mse-details .mse-definition{grid-template-columns:minmax(70px,auto) minmax(0,1fr);gap:8px 12px}
 .mse-details .mse-toolbar{flex-wrap:wrap}
 .mse-details .mse-toolbar .mse-search{flex-basis:100%}
@@ -1245,6 +1401,228 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       { key: 'methodsUnvalidated', label: dict.methodsUnvalidated, value: value('methodsUnvalidated') },
       { key: 'methodsValidated', label: dict.methodsValidated, value: value('methodsValidated') },
     ]
+  }
+
+  const ACTIVITY_METRICS = ['validation', 'created', 'withdrawn', 'reactivated', 'all']
+  const activityValue = value => Number.isSafeInteger(value) && value > 0 ? String(value) : '—'
+  const activityLevel = value => !Number.isSafeInteger(value) || value < 1 ? 0
+    : value === 1 ? 1 : value <= 3 ? 2 : value <= 7 ? 3 : 4
+  /** Build the heatmap columns from the Host's explicit local date keys, never browser-local dates. */
+  const activityCalendarColumns = (daily, locale = 'en') => {
+    if (!Array.isArray(daily) || daily.length === 0) return []
+    const rows = daily.filter(row => typeof row?.date === 'string' && /^\d{4}-\d{2}-\d{2}$/u.test(row.date))
+    if (rows.length === 0) return []
+    const firstMs = Date.parse(`${rows[0].date}T00:00:00Z`)
+    const lastMs = Date.parse(`${rows[rows.length - 1].date}T00:00:00Z`)
+    if (!Number.isFinite(firstMs) || !Number.isFinite(lastMs) || lastMs < firstMs) return []
+    const first = new Date(firstMs)
+    first.setUTCDate(first.getUTCDate() - ((first.getUTCDay() + 6) % 7))
+    const columns = Array.from({ length: Math.floor((lastMs - first.getTime()) / 604_800_000) + 1 },
+      () => ({ cells: Array(7).fill(null), month: '' }))
+    let priorMonth = ''
+    for (const row of rows) {
+      const at = Date.parse(`${row.date}T00:00:00Z`)
+      const date = new Date(at)
+      const column = Math.floor((at - first.getTime()) / 604_800_000)
+      const weekday = (date.getUTCDay() + 6) % 7
+      columns[column].cells[weekday] = row
+      const month = row.date.slice(0, 7)
+      if (month !== priorMonth) {
+        if (columns[column].month === '') columns[column].month = new Intl.DateTimeFormat(
+          locale === 'en' ? 'en-US' : 'zh-CN', { month: 'short', timeZone: 'UTC' }).format(date)
+        priorMonth = month
+      }
+    }
+    return columns
+  }
+  const activityEventLabel = (dict, event) => event?.type === 'validation'
+    ? `${dict.activityMetrics.validation} · ${dict.activityDecisions[event.decision] ?? dict.unknown}`
+    : event?.type === 'withdrawn' && event.decision === 'trial_withdrawn'
+      ? dict.activityDecisions.trial_withdrawn
+      : dict.activityTypes[event?.type] ?? dict.activityTypes.unknown
+
+  function ActivitySection({ dict, locale, activity, loading, sessionId, setSessionId, scopeOptions, days, setDays, timeZone, setTimeZone,
+    metric, setMetric, palette, setPalette, view, setView, selection, setSelection, selectionKey }) {
+    const rangeOptions = [30, 90, 366].map(value => ({ id: String(value), label: dict.activityRanges[value] }))
+    const metricOptions = ACTIVITY_METRICS.map(value => ({ id: value, label: dict.activityMetrics[value] }))
+    const viewOptions = ['daily', 'weekly', 'cumulative'].map(value => ({ id: value, label: dict.activityViews[value] }))
+    const paletteOptions = Object.entries(dict.activityPalettes).map(([id, label]) => ({ id, label }))
+    const timezoneValues = [...new Set([timeZone, 'Asia/Shanghai', 'UTC', 'America/Los_Angeles', 'America/New_York',
+      'Europe/London', 'Asia/Tokyo', 'Asia/Singapore'])]
+    const timezoneOptions = timezoneValues.map(value => ({ id: value, label: value }))
+    const daily = Array.isArray(activity?.daily) ? activity.daily : []
+    const weekly = Array.isArray(activity?.weekly) ? activity.weekly : []
+    const events = Array.isArray(activity?.events) ? activity.events : []
+    const columns = activityCalendarColumns(daily, locale)
+    const selectionValid = selection?.key === selectionKey && daily.some(row => row.date === selection.date)
+    const selectedDate = selectionValid ? selection.date : activity?.recent?.[0]?.day ?? activity?.range?.end ?? ''
+    const selectedDay = daily.find(row => row.date === selectedDate) ?? null
+    const dayEvents = events.filter(event => event.day === selectedDate).slice(0, 12)
+    const valueFor = row => row?.counts === undefined ? null : row.counts[metric]
+    const dateLabel = value => {
+      if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) return dict.notRecorded
+      const date = new Date(`${value}T00:00:00Z`)
+      if (!Number.isFinite(date.getTime())) return dict.notRecorded
+      return new Intl.DateTimeFormat(locale === 'en' ? 'en-US' : 'zh-CN', {
+        year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' }).format(date)
+    }
+    const eventTime = event => {
+      if (!Number.isSafeInteger(event?.at)) return dict.notRecorded
+      const date = new Date(event.at)
+      if (!Number.isFinite(date.getTime())) return dict.notRecorded
+      try { return date.toLocaleString(locale === 'en' ? 'en-US' : 'zh-CN', {
+        timeZone: activity?.range?.timeZone ?? timeZone, month: 'short', day: 'numeric', hour: '2-digit',
+        minute: '2-digit', hour12: false }) } catch { return dict.notRecorded }
+    }
+    const pickDate = date => setSelection({ key: selectionKey, date })
+    const controls = h('div', { key: 'controls', className: 'mse-activity-controls' }, [
+      h('div', { key: 'scope', className: 'mse-activity-control mse-activity-scope' }, [
+        h('span', { key: 'l', className: 'mse-activity-label' }, dict.activityScope),
+        h(Picker, { key: 'p', label: dict.activityScope, value: sessionId, options: scopeOptions,
+          className: 'mse-picker-scope', onChange: setSessionId }),
+      ]),
+      h('div', { key: 'range', className: 'mse-activity-control' }, [
+        h('span', { key: 'l', className: 'mse-activity-label' }, dict.activityRange),
+        h(Picker, { key: 'p', label: dict.activityRange, value: String(days), options: rangeOptions,
+          className: 'mse-picker-filter', onChange: value => setDays(Number(value)) }),
+      ]),
+      h('div', { key: 'zone', className: 'mse-activity-control' }, [
+        h('span', { key: 'l', className: 'mse-activity-label' }, dict.activityTimezone),
+        h(Picker, { key: 'p', label: dict.activityTimezone, value: timeZone, options: timezoneOptions,
+          className: 'mse-picker-filter', onChange: setTimeZone }),
+      ]),
+    ])
+    const coverage = activity?.coverage ?? null
+    const coverageValue = value => Number.isSafeInteger(value) && value >= 0 ? value : dict.unknown
+    const coverageLines = coverage === null ? [] : [
+      fill(dict.activityRows, { lessons: coverageValue(coverage.lessonRows), experiments: coverageValue(coverage.experimentRows) }),
+      fill(dict.activityInvalidTime, { n: coverageValue(coverage.invalidTimestamps) }),
+      fill(dict.activityIncompleteRows, { n: coverageValue(coverage.rowsWithIncompleteEventHistory) }),
+      coverage.lessonRowsAtCapacity === true || coverage.possibleExperimentTruncation === true
+        ? dict.activityAtCap : null,
+      fill(dict.activityOutside, { n: coverageValue(coverage.eventsOutsideSelectedRange) }),
+      coverage.eventsTruncated === true ? fill(dict.activityEventsTruncated, { n: coverage.eventLimit }) : null,
+      Array.isArray(coverage.unavailableSources) && coverage.unavailableSources.some(row => row.source === 'adoptions')
+        ? dict.activityAdoptionsMissing : null,
+    ].filter(Boolean)
+    const calendarCells = columns.flatMap((column, weekIndex) => column.cells.map((row, dayIndex) => {
+      if (row === null) return h('span', { key: `blank-${weekIndex}-${dayIndex}`, className: 'mse-activity-blank',
+        style: { gridColumn: weekIndex + 1, gridRow: dayIndex + 1 } })
+      const count = valueFor(row)
+      const day = dateLabel(row.date)
+      const label = fill(dict.activityDayCount, { date: day,
+        count: Number.isSafeInteger(count) && count > 0 ? count : dict.activityNoDay })
+      return h('button', { key: row.date, type: 'button', className: 'mse-activity-day',
+        'data-level': activityLevel(count), 'data-selected': row.date === selectedDate,
+        style: { gridColumn: weekIndex + 1, gridRow: dayIndex + 1 }, title: label, 'aria-label': label,
+        onClick: () => pickDate(row.date) })
+    }))
+    const heatmap = view === 'daily'
+      ? h('div', { key: 'daily', className: 'mse-activity-calendar', role: 'group', 'aria-label': dict.activityTitle }, [
+        h('div', { key: 'days', className: 'mse-activity-weekdays' }, dict.activityWeekdays.map((label, index) =>
+          h('span', { key: `d-${index}` }, label))),
+        h('div', { key: 'scroll', className: 'mse-activity-scroll' },
+          h('div', { key: 'track', className: 'mse-activity-track', style: {
+            '--mse-activity-columns': String(columns.length),
+          } }, [
+            h('div', { key: 'months', className: 'mse-activity-months' },
+              columns.map((column, index) => h('span', { key: `m-${index}`, style: { gridColumn: index + 1 } }, column.month))),
+            h('div', { key: 'cells', className: 'mse-activity-grid', style: {
+              gridTemplateColumns: `repeat(${columns.length}, 12px)`, gridTemplateRows: 'repeat(7, 12px)',
+            } }, calendarCells),
+          ])),
+      ])
+      : view === 'weekly'
+        ? h('div', { key: 'weekly', className: 'mse-activity-week-grid' }, weekly.map(row => {
+          const count = valueFor(row)
+          const label = fill(dict.activityWeekCount, { start: dateLabel(row.start), end: dateLabel(row.end),
+            count: Number.isSafeInteger(count) && count > 0 ? count : dict.activityNoDay })
+          return h('button', { key: row.weekStart ?? row.start, type: 'button', className: 'mse-activity-week',
+            'data-level': activityLevel(count), title: label, 'aria-label': label,
+            onClick: () => pickDate(row.end) }, [
+            h('span', { key: 'd' }, `${dateLabel(row.start)} – ${dateLabel(row.end)}`),
+            h('strong', { key: 'c' }, activityValue(count)),
+          ])
+        }))
+        : h('div', { key: 'cumulative', className: 'mse-activity-cumulative' }, [
+          h('span', { key: 'l' }, dict.activityRangeRecorded),
+          h('strong', { key: 'n' }, activityValue(activity?.totals?.[metric])),
+          h('span', { key: 'm' }, dict.activityMetrics[metric]),
+        ])
+    const coverageList = h('div', { key: 'activity-coverage', className: 'mse-activity-coverage' },
+      disclosure('activity-coverage-details', dict.activityCoverageDetails, [
+      h('p', { key: 'basis', className: 'mse-hint' }, dict.activityCoverageExplanation),
+      ...coverageLines.map((line, index) => h('p', { key: `c-${index}` }, line)),
+    ]))
+    const recent = events.slice(0, 8)
+    const eventList = (items, prefix) => h('ul', { className: 'mse-activity-events' }, items.map((event, index) =>
+      h('li', { key: `${prefix}-${event?.id ?? index}` }, [
+        h('div', { key: 'main', className: 'mse-activity-event-main' }, [
+          h('span', { key: 'type' }, activityEventLabel(dict, event)),
+          event?.attribution === 'uncertain'
+            ? h('span', { key: 'uncertain', className: 'mse-activity-event-uncertain' }, dict.activityEventLinkUncertain)
+            : null,
+        ]),
+        h('time', { key: 'at', dateTime: Number.isFinite(new Date(event?.at).getTime())
+          ? new Date(event.at).toISOString() : undefined }, eventTime(event)),
+        h('details', { key: 'ref', className: 'mse-activity-event-reference' }, [
+          h('summary', { key: 's' }, dict.activityEventReference),
+          h('dl', { key: 'ids' }, [
+            h('dt', { key: 'event-label' }, dict.activityEventId),
+            h('dd', { key: 'event-id' }, h('code', null, typeof event?.id === 'string' ? event.id : dict.notRecorded)),
+            h('dt', { key: 'lesson-label' }, dict.activityLessonId),
+            h('dd', { key: 'lesson-id' }, h('code', null,
+              typeof event?.lessonId === 'string' ? event.lessonId : dict.notRecorded)),
+          ]),
+        ]),
+      ])))
+    return h('section', { key: 'activity', className: 'mse-activity-section', 'data-mse-activity': 'calendar',
+      'data-palette': palette }, [
+      h('div', { key: 'toolbar', className: 'mse-activity-toolbar' }, [
+        h('div', { key: 'heading', className: 'mse-activity-heading' }, [
+          h('h2', { key: 'title', className: 'mse-activity-title' }, dict.activityTitle),
+          h(Picker, { key: 'metric', label: dict.activityMetric, value: metric, options: metricOptions,
+            className: 'mse-picker-filter', onChange: setMetric }),
+          h('div', { key: 'palette', className: 'mse-activity-palette' }, [
+            h('span', { key: 'bars', className: 'mse-activity-color-bars', 'data-palette': palette, 'aria-hidden': true },
+              [0, 1, 2].map(index => h('i', { key: index }))),
+            h(Picker, { key: 'picker', label: dict.activityPalette, value: palette, options: paletteOptions,
+              className: 'mse-picker-filter', onChange: setPalette }),
+          ]),
+        ]),
+        h(SegmentedTabs, { key: 'view', label: dict.activityView, value: view, onChange: setView,
+          items: viewOptions.map(option => ({ value: option.id, id: `mse-activity-${option.id}`,
+            panelId: `mse-activity-${option.id}-panel`, label: option.label })) }),
+      ]),
+      controls,
+      h('p', { key: 'hint', className: 'mse-hint' }, fill(dict.activityTimezoneHint, { zone: timeZone })),
+      loading && activity === null ? h('p', { key: 'loading', className: 'mse-note' }, dict.activityLoading)
+        : activity?.ok !== true
+        ? h('p', { key: 'error', className: activity?.code === 'session_required' ? 'mse-note' : 'mse-error' },
+          activity?.code === 'session_required' ? dict.activityNoScope
+            : `${dict.activityUnavailable}：${codeLabel(dict, activity?.code ?? 'activity_unavailable')}`)
+        : [
+          h('p', { key: 'range', className: 'mse-hint' },
+            `${dateLabel(activity.range?.start)} – ${dateLabel(activity.range?.end)} · ${activity.scope?.label ?? dict.scopeUnknown}`),
+          h('p', { key: 'basis', className: 'mse-activity-basis' }, dict.activityBasis),
+          h('div', { key: 'calendar-panel', id: `mse-activity-${view}-panel`, role: 'tabpanel',
+            'aria-labelledby': `mse-activity-${view}` }, heatmap),
+          h('div', { key: 'legend', className: 'mse-activity-legend' }, [0, 1, 2, 3, 4].map(level =>
+            h('span', { key: `l-${level}`, className: 'mse-activity-legend-item' }, [
+              h('i', { key: 's', className: 'mse-activity-day', 'data-level': level }),
+              h('span', { key: 't' }, dict.activityLegend[level]),
+            ]))),
+          h('h3', { key: 'day-title', className: 'mse-activity-subtitle' },
+            `${dateLabel(selectedDate)} · ${dict.activityMetrics[metric]} ${activityValue(valueFor(selectedDay))}`),
+          events.some(event => event.day === selectedDate)
+            ? eventList(dayEvents, 'day') : h('p', { key: 'empty-day', className: 'mse-hint' }, dict.activityNoDay),
+          h('h3', { key: 'recent-title', className: 'mse-activity-subtitle' }, dict.activityRecent),
+          recent.length > 0 ? eventList(recent, 'recent')
+            : h('p', { key: 'recent-empty', className: 'mse-hint' }, dict.activityRecentEmpty),
+          events.length === 0 ? h('p', { key: 'no-data', className: 'mse-hint' }, dict.activityNoEvents) : null,
+          coverageList,
+        ],
+    ])
   }
 
   /** The 经验 guide rows: one label + count per project the Host could attribute records to. */
@@ -1800,6 +2178,17 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const [compactTabs, setCompactTabs] = React.useState(false)
     const tabsHost = React.useRef(null)
     const [sessionId, setSessionId] = React.useState('')
+    const [activityDays, setActivityDays] = React.useState(90)
+    const [activityTimeZone, setActivityTimeZone] = React.useState(() => {
+      try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai' }
+      catch { return 'Asia/Shanghai' }
+    })
+    const [activityMetric, setActivityMetric] = React.useState('validation')
+    const [activityPalette, setActivityPalette] = React.useState('blue')
+    const [activityView, setActivityView] = React.useState('daily')
+    const [activitySelection, setActivitySelection] = React.useState(null)
+    const [activitySlot, setActivitySlot] = React.useState(null)
+    const [activityLoadingKey, setActivityLoadingKey] = React.useState(null)
     const [auto, setAuto] = React.useState(false)
     const [reloadToken, setReloadToken] = React.useState(0)
     const [listQuery, setListQuery] = React.useState({ query: '', kind: '', status: '', page: 1, pageSize: 20 })
@@ -1843,6 +2232,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     // edit and show the stale-draft warning about the write it just made.
     const ownWrite = React.useRef(null)
     const generation = React.useRef(0)
+    const activityContextRef = React.useRef(null)
+    const activitySeq = React.useRef(0)
+    const activityRequestRef = React.useRef(null)
     // The scope generation covers "another scope"; these cover "another request of the same
     // resource in the same scope", so the newest query or click always wins.
     const listSeq = React.useRef(0)
@@ -1851,6 +2243,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const controlSeq = React.useRef(0)
     const jobSeq = React.useRef(0)
     const scopeKey = sessionId === '' ? 'default' : sessionId
+    const activityKey = JSON.stringify([sessionId, activityDays, activityTimeZone])
+    activityContextRef.current = { sessionId, days: activityDays, timeZone: activityTimeZone, key: activityKey }
     const snapshot = useFormSnapshot(form)
 
     const accepted = snapshot !== null && snapshot.status === 'ready' ? snapshot.value : undefined
@@ -1955,6 +2349,11 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     React.useEffect(() => {
       generation.current += 1
       const mine = generation.current
+      const requestKey = JSON.stringify([sessionId, activityDays, activityTimeZone])
+      const activityMine = activitySeq.current + 1
+      activitySeq.current = activityMine
+      activityRequestRef.current = { key: requestKey, seq: activityMine }
+      setActivityLoadingKey(requestKey)
       setShell(current => ({ ...current, status: 'loading' }))
       // Leaving a scope drops everything that belonged to it.
       setDetail(null)
@@ -1974,14 +2373,22 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           const [overview, sessions] = await Promise.all([
             // The scope rides along so 常规 can show the whole library AND the selected project's
             // own counts in one read; the Host still resolves the id itself and never trusts it.
-            callRemote(call, 'overview', sessionId === '' ? {} : { sessionId }),
+            callRemote(call, 'overview', { sessionId, activityDays, timeZone: activityTimeZone }),
             callRemote(call, 'sessions', {}),
           ])
           if (generation.current !== mine) return
           setShell({ status: 'ready', overview, sessions, error: null })
+          if (activitySeq.current === activityMine && activityContextRef.current?.key === requestKey) {
+            setActivitySlot({ key: requestKey, payload: overview.activity ?? null })
+            setActivityLoadingKey(current => current === requestKey ? null : current)
+          }
         } catch (error) {
           if (generation.current !== mine) return
           setShell(current => ({ ...current, status: 'error', error: failureText(dictRef.current, error) }))
+          if (activitySeq.current === activityMine && activityContextRef.current?.key === requestKey) {
+            setActivitySlot({ key: requestKey, payload: { ok: false, code: failureCode(error) } })
+            setActivityLoadingKey(current => current === requestKey ? null : current)
+          }
         }
       })()
       if (control !== undefined && control !== null) {
@@ -1998,8 +2405,48 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           }
         })()
       }
-      return () => { if (generation.current === mine) generation.current += 1 }
+      return () => {
+        if (generation.current === mine) generation.current += 1
+        if (activitySeq.current === activityMine) {
+          activitySeq.current += 1
+          if (activityRequestRef.current?.seq === activityMine) activityRequestRef.current = null
+        }
+      }
     }, [call, control, sessionId, reloadToken])
+
+    // Date and time-zone changes refresh only the calendar. They do not reset the selected scope,
+    // recall, lessons, settings, or an in-flight review job.
+    React.useEffect(() => {
+      const context = activityContextRef.current
+      if (context === null || context === undefined) return undefined
+      const { sessionId: requestedSession, days, timeZone, key } = context
+      const currentRequest = activityRequestRef.current
+      if (currentRequest?.key === key && currentRequest.seq === activitySeq.current) return undefined
+      const mine = activitySeq.current + 1
+      activitySeq.current = mine
+      activityRequestRef.current = { key, seq: mine }
+      setActivityLoadingKey(key)
+      void (async () => {
+        try {
+          const overview = await callRemote(call, 'overview', {
+            sessionId: requestedSession, activityDays: days, timeZone,
+          })
+          if (activitySeq.current !== mine || activityContextRef.current?.key !== key) return
+          setActivitySlot({ key, payload: overview.activity ?? null })
+          setActivityLoadingKey(current => current === key ? null : current)
+        } catch (error) {
+          if (activitySeq.current !== mine || activityContextRef.current?.key !== key) return
+          setActivitySlot({ key, payload: { ok: false, code: failureCode(error) } })
+          setActivityLoadingKey(current => current === key ? null : current)
+        }
+      })()
+      return () => {
+        if (activitySeq.current === mine) {
+          activitySeq.current += 1
+          if (activityRequestRef.current?.seq === mine) activityRequestRef.current = null
+        }
+      }
+    }, [call, activityDays, activityTimeZone])
 
     // Recall and the session byte ledger follow the selection, not the tab, so the budget view
     // reads the same answer instead of refetching it and losing it.
@@ -2572,6 +3019,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     }
 
     const overview = shell.overview
+    const currentActivity = activitySlot?.key === activityKey ? activitySlot.payload : null
     const store = storeState(dict, overview?.store)
     // The whole-library reading is the page's DEFAULT answer; `libraryKnown` is false when the
     // Host could not read it, and the page then states the code instead of zeros.
@@ -2746,10 +3194,29 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
             : emptyState('e', codeLabel(dict, overview.code ?? 'unavailable')),
         ])
       }
+      const fees = overview.fees?.scope === 'instance' && overview.fees?.window === 'rolling24h'
+        ? overview.fees.values ?? null : null
+      const libraryRows = libraryMetrics(dict, overview)
+      const summaryKeys = new Set(['total', 'awaiting', 'trial', 'validated'])
+      const librarySummary = libraryRows.filter(item => summaryKeys.has(item.key))
+      const libraryDetails = libraryRows.filter(item => !summaryKeys.has(item.key))
+      const feeMetric = (key, label, unit) => metric(label,
+        Number.isSafeInteger(fees?.[key]) && fees[key] >= 0 ? String(fees[key]) : dict.unknown, unit)
+      const feeBlock = h('section', { key: 'fees', className: 'mse-fees' }, [
+        h('h3', { key: 't', className: 'mse-fees-title' }, dict.feesTitle),
+        h('p', { key: 'n', className: 'mse-fees-note' }, dict.feesWindow),
+        fees === null ? h('p', { key: 'u', className: 'mse-note' }, dict.unknown)
+          : h('div', { key: 'm', className: 'mse-metrics' }, [
+            feeMetric('reflectionTokensLast24h', dict.feeReflectionTokens, 'tokens'),
+            feeMetric('reflectionTokensUnknown24h', dict.feeReflectionUnknown),
+            feeMetric('evaluationTokensKnown24h', dict.feeEvaluationTokens, 'tokens'),
+            feeMetric('evaluationUnknown24h', dict.feeEvaluationUnknown),
+            feeMetric('evaluationTokensReserved24h', dict.feeReservedTokens, 'tokens'),
+            feeMetric('evaluationTasksLast24h', dict.feeTasks),
+            feeMetric('evaluationRequestsLast24h', dict.feeRequests),
+          ]),
+      ])
       return h('div', { key: 'overview', className: 'mse-pane' }, [
-        // The three runtime controls are the first thing on the page, exactly as the confirmed
-        // design has them. They were computed but never mounted once — this is that omission.
-        settingsRows,
         // The WHOLE LIBRARY is the default reading: the instance scope is empty in daily use, so
         // reporting only it showed 0/0/0 while the real library sat unread one click away.
         h('h2', { key: 'lh', className: 'mse-section-title' }, [
@@ -2757,40 +3224,57 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           h(Button, { key: 'go', variant: 'ghost', size: 'sm', onClick: () => setTab('lessons') }, dict.goLessons),
         ]),
         libraryKnown
-          ? h('div', { key: 'lm', className: 'mse-metrics mse-library' },
-            libraryMetrics(dict, overview).map(item => metric(item.label, item.value, dict.unitItems)))
+          ? h('div', { key: 'lm', className: 'mse-overview-facts mse-library' },
+            librarySummary.map(item => h('div', { key: item.key, className: 'mse-overview-fact' },
+              metric(item.label, item.value, dict.unitItems))))
           : h('p', { key: 'lu', className: 'mse-note' },
             `${dict.libraryUnreadable}：${codeLabel(dict, library?.code ?? 'store_unavailable')}`),
-        // A partial read is stated where the numbers are, not buried: the categories above are
-        // lower bounds and the count nobody could attribute is named with its number.
         libraryPartial
-          ? h('div', { key: 'lp', className: 'mse-callout' }, [
-            h('p', { key: 'n' }, fill(dict.libraryPartial,
-              { n: Number.isFinite(library.unattributed) ? library.unattributed : dict.unknown })),
-            h('p', { key: 'c' }, dict.libraryPartialCats),
-          ])
+          ? h('p', { key: 'lp', className: 'mse-overview-notice' }, fill(dict.libraryPartial,
+            { n: Number.isFinite(library.unattributed) ? library.unattributed : dict.unknown }))
           : null,
-        // A scope the directory could not name is a LIMIT on the reading, not a silent subtraction.
-        overview.libraryScan?.code
-          ? h('p', { key: 'ls', className: 'mse-hint' },
-            `${dict.scopeScanLimited}：${codeLabel(dict, overview.libraryScan.code)}`)
-          : null,
-        h('p', { key: 'ln', className: 'mse-hint' }, dict.libraryNote),
-        // The selected project's OWN counts, shown beside the library reading whenever a scope is
-        // chosen — never instead of it, and never as a silent substitute for the library.
-        h('h2', { key: 'sh', className: 'mse-section-title' }, [h('span', { key: 't' }, dict.selectedProjectTitle)]),
-        selectedScope === null
-          ? h('p', { key: 'sn', className: 'mse-note' },
-            `${dict.selectedProjectNone}${overview.scopeReason ? `（${codeLabel(dict, overview.scopeReason)}）` : ''}`)
-          : h('div', { key: 'sp', className: 'mse-project-block' }, [
-            h('p', { key: 'l', className: 'mse-hint' }, scopeLine(dict, selectedScope)),
-            h('div', { key: 'm', className: 'mse-metrics' },
-              scopeNumbers(dict, selectedScope).map(item => metric(item.label, item.value, dict.unitItems))),
-            h('p', { key: 'b', className: 'mse-hint' }, dict.selectedProjectBoth),
-          ]),
-        overview.countsError !== null && overview.countsError !== undefined
-          ? h('p', { key: 'ce', className: 'mse-note' }, `${dict.countsFailed}：${codeLabel(dict, overview.countsError)}`)
-          : null,
+        disclosure('library-statistics', dict.libraryDetailsTitle, [
+          libraryKnown
+            ? h('div', { key: 'extra', className: 'mse-metrics mse-library' },
+              libraryDetails.map(item => metric(item.label, item.value, dict.unitItems)))
+            : h('p', { key: 'lu-detail', className: 'mse-note' },
+              `${dict.libraryUnreadable}：${codeLabel(dict, library?.code ?? 'store_unavailable')}`),
+          libraryPartial ? h('div', { key: 'coverage', className: 'mse-library-coverage' }, [
+            h('p', { key: 'cats', className: 'mse-hint' }, dict.libraryPartialCats),
+            definition('counts', [
+              [dict.libraryScanned, Number.isFinite(library.scanned) ? library.scanned : dict.unknown],
+              [dict.libraryUnattributed, Number.isFinite(library.unattributed) ? library.unattributed : dict.unknown],
+            ]),
+          ]) : null,
+          overview.libraryScan?.code
+            ? h('p', { key: 'ls', className: 'mse-hint' },
+              `${dict.scopeScanLimited}：${codeLabel(dict, overview.libraryScan.code)}`)
+            : null,
+          h('p', { key: 'ln', className: 'mse-hint' }, dict.libraryNote),
+          h('h2', { key: 'sh', className: 'mse-section-title' }, [h('span', { key: 't' }, dict.selectedProjectTitle)]),
+          selectedScope === null
+            ? h('p', { key: 'sn', className: 'mse-note' },
+              `${dict.selectedProjectNone}${overview.scopeReason ? `（${codeLabel(dict, overview.scopeReason)}）` : ''}`)
+            : h('div', { key: 'sp', className: 'mse-project-block' }, [
+              h('p', { key: 'l', className: 'mse-hint' }, scopeLine(dict, selectedScope)),
+              h('div', { key: 'm', className: 'mse-metrics' },
+                scopeNumbers(dict, selectedScope).map(item => metric(item.label, item.value, dict.unitItems))),
+              h('p', { key: 'b', className: 'mse-hint' }, dict.selectedProjectBoth),
+            ]),
+          overview.countsError !== null && overview.countsError !== undefined
+            ? h('p', { key: 'ce', className: 'mse-note' }, `${dict.countsFailed}：${codeLabel(dict, overview.countsError)}`)
+            : null,
+          feeBlock,
+        ]),
+        ActivitySection({ dict, locale, activity: currentActivity,
+          loading: shell.status === 'loading' || shell.status === 'idle' || activityLoadingKey === activityKey, sessionId, setSessionId,
+          scopeOptions: options, days: activityDays, setDays: setActivityDays,
+          timeZone: activityTimeZone, setTimeZone: setActivityTimeZone, metric: activityMetric,
+          palette: activityPalette, setPalette: setActivityPalette,
+          setMetric: setActivityMetric, view: activityView, setView: setActivityView,
+          selection: activitySelection, setSelection: setActivitySelection, selectionKey: activityKey }),
+        // Settings remain fully functional below the read-only activity and cost summary.
+        settingsRows,
         disclosure('versions', dict.detailsMore, [
           definition('d', [
             [dict.version, `${overview.version ?? settings?.pluginVersion ?? '—'}`],
@@ -3887,7 +4371,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     __test: { NS, SETTINGS_ID, BUNDLE, REMOTE, CONTROL, TABS, PAGE_SIZES, zh, en, reasonLabel, settleLabel,
       codeLabel, kindLabel, formatBytes, formatTime, storeState, statusLabelOf, environmentLabel, normalizeQuery,
       scopeLine, sessionOptions, sessionShortId, callRemote, controlCall, failureCode, failureText,
-      libraryMetrics, scopeNumbers, scopeGuideRows, observedSessions, planStageLabel, reviewLabel, trialLabel,
+      libraryMetrics, scopeNumbers, scopeGuideRows, ACTIVITY_METRICS, activityValue, activityLevel,
+      activityCalendarColumns, activityEventLabel, ActivitySection, observedSessions, planStageLabel, reviewLabel, trialLabel,
       verificationSession,
       notPromotedReason, lessonProgress, progressLine,
       diffOps, defaultDraft, fill, canWriteSettings, settingsTabNavigation,

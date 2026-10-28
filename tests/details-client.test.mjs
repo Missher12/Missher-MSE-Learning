@@ -7,12 +7,14 @@ import { TYPERT } from '../adapters/dsh/typert.mjs'
 const SOURCE = readFileSync(new URL('../adapters/dsh/client.js', import.meta.url), 'utf8')
 
 /** Evaluate the browser bundle the way the web shell does, then hand back its module. */
-function loadClient() {
+function loadClient(timers = {}) {
   let registration
   const window = { __ModuleLoader__: { load: value => { registration = value } } }
   const document = { createElement: () => ({ dataset: {}, remove: () => {} }), head: { append: () => {} } }
+  const startInterval = timers.setInterval ?? setInterval
+  const stopInterval = timers.clearInterval ?? clearInterval
   // eslint-disable-next-line no-new-func -- the bundle is a browser script by contract.
-  new Function('window', 'document', 'setInterval', 'clearInterval', SOURCE)(window, document, setInterval, clearInterval)
+  new Function('window', 'document', 'setInterval', 'clearInterval', SOURCE)(window, document, startInterval, stopInterval)
   assert.ok(registration, 'the bundle registers itself with the module loader')
   const react = { createElement: (type, props, ...children) => ({ type, props, children }),
     useState: initial => [initial, () => {}], useEffect: () => {}, useRef: value => ({ current: value }),
@@ -377,6 +379,13 @@ async function renderPanel(registration, props, passes = 8, interact = undefined
   const mod = registration.factory(spec => spec === 'react' ? react
     : spec === '@deepseek-ai/dsh-client-ui-primitives' ? primitives : undefined)
   const Component = mod.__test.MsePanel
+  const expandManualPanel = node => {
+    if (Array.isArray(node)) return node.map(expandManualPanel)
+    if (node === null || typeof node !== 'object') return node
+    if (node.type === mod.__test.ManualPanel) return expandManualPanel(node.type(node.props))
+    if (Array.isArray(node.children)) node.children = node.children.map(expandManualPanel)
+    return node
+  }
   let tree = null
   // A pending interaction keeps the loop running while the page is still loading, so the user
   // action is delivered on the FIRST settled data render — the state the browser would be in.
@@ -387,7 +396,7 @@ async function renderPanel(registration, props, passes = 8, interact = undefined
     effectSlot = 0
     pendingEffects = []
     dirty = false
-    tree = Component(props)
+    tree = expandManualPanel(Component(props))
     const hasPendingEffects = pendingEffects.length > 0
     runEffects()
     if (hasPendingEffects && effectWaitMs > 0) await new Promise(resolve => setTimeout(resolve, effectWaitMs))
@@ -396,7 +405,7 @@ async function renderPanel(registration, props, passes = 8, interact = undefined
     await new Promise(resolve => setImmediate(resolve))
     if (!acted) {
       // The callback returns true once it has driven the control; false means "not rendered yet".
-      acted = (await interact({ tree, nodes: elementsOf(tree) })) === true
+      acted = (await interact({ tree, nodes: elementsOf(tree), module: mod })) === true
       continue
     }
     if (!dirty) break
@@ -407,7 +416,7 @@ async function renderPanel(registration, props, passes = 8, interact = undefined
   effectSlot = 0
   pendingEffects = []
   dirty = false
-  tree = Component(props)
+  tree = expandManualPanel(Component(props))
   runEffects()
   return tree
 }
@@ -1023,7 +1032,8 @@ test('both dictionaries carry the whole-library and progress keys, with their ow
   const { zh, en } = mod.__test
   assert.deepEqual(Object.keys(zh).sort(), Object.keys(en).sort(), 'the key sets stay identical')
   const keys = ['libraryTitle', 'libraryNote', 'libraryCorrections', 'libraryAwaiting', 'libraryTrial',
-    'libraryValidated', 'libraryAdopted', 'libraryUnreadable', 'libraryPartial', 'selectedProjectTitle',
+    'libraryValidated', 'libraryAdopted', 'libraryUnreadable', 'libraryPartial', 'libraryDetailsTitle',
+    'libraryScanned', 'libraryUnattributed', 'selectedProjectTitle',
     'selectedProjectNone', 'selectedProjectBoth', 'scopeCountsNote', 'scopeGuideTitle', 'scopeGuideNote',
     'scopeGuideMore', 'completeLibrary', 'progressStage', 'progressLast', 'progressNext', 'progressModel',
     'progressBudget', 'progressReason', 'progressAttempts', 'noPlan', 'promoted', 'reasonNotRecorded',
@@ -1031,7 +1041,9 @@ test('both dictionaries carry the whole-library and progress keys, with their ow
     'runsObservedMeaning', 'autoQueue', 'autoReason', 'scopeScanLimited', 'libraryPartialCats', 'atLeast',
     'owningScope', 'verifySession', 'verifySessionHint', 'verifySessionNone', 'verifySessionNoneShort',
     'verifySessionNoneHint', 'verifySessionReady', 'verifySessionMissing', 'verifySessionMissingShort',
-    'verifySessionUnknown', 'verifySessionUnverified']
+    'verifySessionUnknown', 'verifySessionUnverified', 'activityPalette', 'activityPalettes',
+    'activityCoverageDetails', 'activityCoverageExplanation', 'activityEventLinkUncertain',
+    'activityEventReference', 'activityEventId', 'activityLessonId']
   for (const key of keys) {
     assert.ok(Object.hasOwn(zh, key) && Object.hasOwn(en, key), `both dictionaries carry ${key}`)
     assert.notEqual(zh[key], en[key], `${key} is translated, not copied`)
@@ -1050,6 +1062,89 @@ test('both dictionaries carry the whole-library and progress keys, with their ow
   assert.ok(zh.runsObserved.includes('{n}') && zh.runsObserved.includes('会话'))
   assert.ok(zh.runsObserved.includes('不是回合数'))
   assert.ok(en.runsObserved.includes('{n}') && en.runsObserved.includes('not turns'))
+})
+
+test('activity calendar aligns explicit dates across months and keeps absent activity unknown', () => {
+  const { module: mod } = loadClient()
+  const { activityCalendarColumns, activityLevel, activityValue, ACTIVITY_METRICS, ActivitySection, zh } = mod.__test
+  const columns = activityCalendarColumns([
+    { date: '2023-12-31', counts: { validation: 1 } },
+    { date: '2024-01-01', counts: { validation: null } },
+    { date: '2024-01-02', counts: { validation: 2 } },
+    { date: '2024-02-29', counts: { validation: null } },
+  ], 'en')
+  assert.equal(columns[0].cells[6].date, '2023-12-31', 'Sunday is aligned to the final row')
+  assert.equal(columns[1].cells[0].date, '2024-01-01', 'Monday begins a new week column')
+  assert.equal(columns[1].cells[1].date, '2024-01-02')
+  assert.equal(columns[0].month, 'Dec')
+  assert.equal(columns[1].month, 'Jan')
+  assert.ok(columns.some(column => column.month === 'Feb' && column.cells.some(row => row?.date === '2024-02-29')),
+    'the leap day is shown in its month column')
+  assert.deepEqual(ACTIVITY_METRICS, ['validation', 'created', 'withdrawn', 'reactivated', 'all'])
+  assert.equal(activityLevel(null), 0)
+  assert.equal(activityLevel(0), 0)
+  assert.equal(activityValue(null), '—')
+  assert.equal(activityValue(0), '—', 'an absent retained record is never rendered as a zero')
+
+  const section = ActivitySection({ dict: zh, locale: 'zh', loading: false, sessionId: '', setSessionId() {},
+    scopeOptions: [], days: 30, setDays() {},
+    timeZone: 'Asia/Shanghai', setTimeZone() {}, metric: 'validation', setMetric() {}, palette: 'blue', setPalette() {},
+    view: 'daily', setView() {},
+    selection: null, setSelection() {}, selectionKey: 'scope-a', activity: {
+      ok: true, basis: 'retained_records', complete: false, range: { start: '2024-01-01', end: '2024-01-01',
+        timeZone: 'Asia/Shanghai' }, daily: [{ date: '2024-01-01', counts: { validation: null, created: null,
+        withdrawn: null, reactivated: null, all: null } }], weekly: [], totals: { validation: null }, events: [], recent: [],
+      coverage: { lessonRows: 0, experimentRows: 0, invalidTimestamps: 0, rowsWithIncompleteEventHistory: 0,
+        lessonRowsAtCapacity: false, possibleExperimentTruncation: false, eventsOutsideSelectedRange: 0,
+        eventsTruncated: false, unavailableSources: [] },
+    } })
+  const nodes = elementsOf(section)
+  assert.ok(nodes.some(node => node.props?.className === 'mse-activity-calendar'))
+  const viewTabs = nodes.find(node => node.type?.uiName === 'SegmentedTabs' && node.props?.label === zh.activityView)
+  assert.equal(viewTabs?.props?.items?.map(item => item.value).join(','), 'daily,weekly,cumulative',
+  'the Host segmented tabs expose daily, weekly and cumulative views')
+  const viewPanel = nodes.find(node => node.props?.role === 'tabpanel')
+  assert.equal(viewPanel?.props?.id, viewTabs?.props?.items?.[0]?.panelId,
+    'the selected view tab points to its calendar panel')
+  const scroll = nodes.find(node => node.props?.className === 'mse-activity-scroll')
+  assert.equal(scroll?.children?.[0]?.props?.className, 'mse-activity-track',
+    'month headings and heatmap cells share one horizontal scroll track')
+  assert.ok(nodes.some(node => node.type === 'h3' && node.children?.join('').includes('—')),
+    'the selected day summary remains unknown when its category is absent')
+  assert.ok(JSON.stringify(section).includes(zh.activityBasis))
+  assert.equal(JSON.stringify(section).includes('complete=false'), false,
+    'the ordinary activity line uses plain language without exposing an implementation flag')
+  assert.ok(JSON.stringify(section).includes(zh.activityNoEvents))
+})
+
+test('activity events show readable status and local time while record IDs stay collapsed', () => {
+  const { module: mod } = loadClient()
+  const { ActivitySection, zh } = mod.__test
+  const event = { id: 'event-record-123', lessonId: 'lesson-record-456', type: 'validation', decision: 'accepted',
+    at: Date.UTC(2024, 0, 1, 6, 5), day: '2024-01-01' }
+  const section = ActivitySection({ dict: zh, locale: 'zh', loading: false, sessionId: 'session-alpha', setSessionId() {},
+    scopeOptions: [], days: 30, setDays() {}, timeZone: 'America/New_York', setTimeZone() {},
+    metric: 'validation', setMetric() {}, palette: 'green', setPalette() {}, view: 'daily', setView() {},
+    selection: null, setSelection() {}, selectionKey: 'session-alpha', activity: {
+      ok: true, range: { start: '2024-01-01', end: '2024-01-01', timeZone: 'America/New_York' },
+      scope: { label: 'Alpha project' },
+      daily: [{ date: '2024-01-01', counts: { validation: 1, created: null, withdrawn: null, reactivated: null, all: 1 } }],
+      weekly: [], totals: { validation: 1 }, events: [event], recent: [event],
+      coverage: { lessonRows: 1, experimentRows: 1, invalidTimestamps: 0, rowsWithIncompleteEventHistory: 0,
+        lessonRowsAtCapacity: false, possibleExperimentTruncation: false, eventsOutsideSelectedRange: 0,
+        eventsTruncated: false, unavailableSources: [] },
+    } })
+  const nodes = elementsOf(section)
+  assert.equal(section.props['data-palette'], 'green')
+  assert.ok(JSON.stringify(section).includes(zh.activityDecisions.accepted), 'the event shows its decision in words')
+  const time = nodes.find(node => node.type === 'time')
+  assert.ok(typeof time?.children?.[0] === 'string' && time.children[0] !== '—',
+    'the event displays a time converted in the selected time zone')
+  const references = nodes.filter(node => node.props?.className === 'mse-activity-event-reference')
+  assert.ok(references.length > 0 && references.every(node => node.props.open !== true),
+    'event and lesson identifiers are held under closed details disclosures')
+  assert.ok(nodes.some(node => node.type === 'code' && node.children?.includes(event.id)))
+  assert.ok(nodes.some(node => node.type === 'code' && node.children?.includes(event.lessonId)))
 })
 
 /** The fake Host the render tests drive: one dispatcher, no fabricated payloads. */
@@ -2633,7 +2728,11 @@ test('常规 shows the whole library by default and the selected project beside 
     form: RENDER_FORM }, 10)
   const flat = JSON.stringify(tree)
   assert.ok(flat.includes('全库总览（默认视图）'), 'the whole library is the default view')
-  assert.deepEqual(boldValues(tree), ['23', '4', '19', '7', '2', '11', '9'], 'the library numbers are rendered')
+  assert.deepEqual(boldValues(tree), ['23', '7', '2', '11', '4', '19', '9'],
+    'the compact four-fact summary is followed by the remaining library facts in the disclosure')
+  const factGrid = elementsOf(tree).find(node => typeof node.props?.className === 'string'
+    && node.props.className.split(/\s+/u).includes('mse-overview-facts'))
+  assert.equal(factGrid?.children?.[0]?.length, 4, 'the visible summary has exactly four facts')
   assert.ok(flat.includes('未选择项目'), 'the page states that no project is selected')
   assert.ok(flat.includes('全库读数来自本机学习库的只读投影'), 'and what the library reading means')
   // A real zero is a restart, never "an empty library", and it is labelled as such.
@@ -2648,19 +2747,50 @@ test('常规 shows the whole library by default and the selected project beside 
   const scopedTree = await renderPanel(registration, { locale: 'zh', call: hostCalls({ overview: scoped }),
     control: undefined, form: RENDER_FORM }, 10)
   const values = boldValues(scopedTree)
-  assert.deepEqual(values.slice(0, 7), ['23', '4', '19', '7', '2', '11', '9'], 'the library reading stays')
+  assert.deepEqual(values.slice(0, 7), ['23', '7', '2', '11', '4', '19', '9'], 'the library reading stays')
   assert.deepEqual(values.slice(7), ['3', '2', '1', '0'], 'the project counts are shown beside it')
   const scopedFlat = JSON.stringify(scopedTree)
   assert.ok(scopedFlat.includes('所选项目') && scopedFlat.includes('alpha'), 'the project block is labelled')
   assert.ok(scopedFlat.includes('全库读数与所选项目计数同时显示'), 'and the page says both are shown')
+  const textContent = node => {
+    if (typeof node === 'string' || typeof node === 'number') return String(node)
+    if (Array.isArray(node)) return node.map(textContent).join('')
+    if (node === null || typeof node !== 'object') return ''
+    return textContent(node.children ?? [])
+  }
+  const libraryDisclosure = elementsOf(scopedTree).find(node => node.type === 'details'
+    && textContent(node.children?.find(child => child?.type === 'summary')) === ZH_DICT.libraryDetailsTitle)
+  assert.ok(libraryDisclosure, 'the actual statistics disclosure is located by its nested summary title')
+  const disclosureMetricValue = label => {
+    const metric = elementsOf(libraryDisclosure).find(node => {
+      const children = (node.children ?? []).flat(Infinity)
+      return children.some(child => child?.props?.className === 'mse-metric-label'
+        && textContent(child) === label)
+        && children.some(child => child?.props?.className === 'mse-metric-value')
+    })
+    const value = metric?.children?.flat(Infinity).find(child => child?.props?.className === 'mse-metric-value')
+    return value?.children?.flat(Infinity).find(child => child?.type === 'b')?.children?.join('')
+  }
+  assert.equal(disclosureMetricValue(ZH_DICT.libraryCorrections), '4')
+  assert.equal(disclosureMetricValue(ZH_DICT.methods), '19')
+  assert.equal(disclosureMetricValue(ZH_DICT.libraryAdopted), '9')
+  assert.ok(textContent(libraryDisclosure).includes(ZH_DICT.selectedProjectTitle)
+    && textContent(libraryDisclosure).includes('alpha'),
+  'the selected-project content is inside the same disclosure')
+  assert.equal(disclosureMetricValue(ZH_DICT.scopeLessons), '3')
+  const feeBlock = elementsOf(libraryDisclosure).find(node => node.type === 'section'
+    && node.props?.className === 'mse-fees')
+  assert.ok(feeBlock && textContent(feeBlock).includes(ZH_DICT.feesTitle)
+    && textContent(feeBlock).includes(ZH_DICT.feesWindow),
+  'the fees block and its window are inside the same disclosure')
 
   // A PARTIAL read is stated where the numbers are: lower bounds plus a visible notice naming the
   // records nobody could attribute — the r0 P2 defect was a silent 5/6 next to a whole-store 23.
   const partialOverview = { ...base, library: { ...PARTIAL_LIBRARY } }
   const partialTree = await renderPanel(registration, { locale: 'zh', call: hostCalls({ overview: partialOverview }),
     control: undefined, form: RENDER_FORM }, 10)
-  assert.deepEqual(boldValues(partialTree), ['23', '至少 5', '至少 6', '9', '—', '0', '0'],
-    'the scanned categories are lower bounds and the whole-store numbers stay exact')
+  assert.deepEqual(boldValues(partialTree), ['23', '9', '—', '0', '至少 5', '至少 6', '0'],
+    'the four summary facts stay compact and bounded category counts remain in the disclosure')
   const partialFlat = JSON.stringify(partialTree)
   assert.ok(partialFlat.includes('另有 12 条属于本进程未观察到的项目作用域'),
     'the unattributable records are stated with their number')
@@ -2688,6 +2818,287 @@ test('常规 shows the whole library by default and the selected project beside 
   // An unread counter is `未知` — never "no history in this process".
   assert.ok(broken.includes('未知'), 'the counter renders as unknown')
   assert.equal(broken.includes(ZH_DICT.noRuns), false, 'an unread counter is not reported as "no runs yet"')
+})
+
+test('activity reads carry the selected session and stale scope responses cannot repaint the calendar', async () => {
+  const { module: mod, registration } = loadClient()
+  const requests = []
+  let releaseAlpha
+  let rejectGamma
+  const emptyCoverage = { lessonRows: 0, experimentRows: 0, invalidTimestamps: 0,
+    rowsWithIncompleteEventHistory: 0, lessonRowsAtCapacity: false, possibleExperimentTruncation: false,
+    eventsOutsideSelectedRange: 0, eventsTruncated: false, unavailableSources: [] }
+  const activityFor = label => ({ ok: true, basis: 'retained_records', complete: false,
+    scope: { kind: 'project', sessionId: label.toLowerCase(), label, scopeHash: 'a'.repeat(12) },
+    range: { start: '2026-10-25', end: '2026-10-25', days: 1, timeZone: 'UTC' },
+    daily: [{ date: '2026-10-25', counts: { validation: null, created: null, withdrawn: null,
+      reactivated: null, all: null } }], weekly: [], totals: { validation: null, created: null,
+      withdrawn: null, reactivated: null, all: null }, events: [], recent: [], coverage: emptyCoverage })
+  const overviewFor = activity => ({ ok: true, version: 'test', runtime: 'dsh', store: { readable: false },
+    library: { readable: false, code: 'store_unavailable' }, scope: null, scopeReason: 'no_scope_selected',
+    activity, fees: { scope: 'instance', window: 'rolling24h', values: {} } })
+  const sessions = { ok: true, sessions: [
+    { id: 'session-alpha', title: 'Alpha', label: 'alpha', scope: 'project' },
+    { id: 'session-beta', title: 'Beta', label: 'beta', scope: 'project' },
+    { id: 'session-gamma', title: 'Gamma', label: 'gamma', scope: 'project' },
+    { id: 'session-delta', title: 'Delta', label: 'delta', scope: 'project' },
+  ] }
+  const call = async (method, input) => {
+    if (method === 'overview') {
+      requests.push({ ...input })
+      if (input.sessionId === 'session-alpha') return new Promise(resolve => { releaseAlpha = resolve })
+      if (input.sessionId === 'session-beta') return { ok: true, value: overviewFor(activityFor('Beta Scope')) }
+      if (input.sessionId === 'session-gamma') return new Promise((_resolve, reject) => { rejectGamma = reject })
+      if (input.sessionId === 'session-delta') return { ok: true, value: overviewFor(activityFor('Delta Scope')) }
+      return { ok: true, value: overviewFor({ ok: false, code: 'session_required' }) }
+    }
+    if (method === 'sessions') return { ok: true, value: sessions }
+    if (method === 'recall') return { ok: true, value: { ok: true, memory: 'in-process', recent: [], last: null,
+      settlement: { live: [] }, session: null, scope: null } }
+    return { ok: true, value: { ok: true } }
+  }
+  let phase = 0
+  const interact = async ({ nodes, module: renderedModule }) => {
+    const picker = nodes.find(node => node.type === renderedModule.__test.Picker
+      && node.props?.label === renderedModule.__test.zh.activityScope)
+    if (picker === undefined) return false
+    if (phase === 0) { picker.props.onChange('session-alpha'); phase += 1; return false }
+    if (phase === 1) { picker.props.onChange('session-beta'); phase += 1; return false }
+    if (phase === 2 && typeof releaseAlpha === 'function' && requests.some(row => row.sessionId === 'session-beta')) {
+      releaseAlpha({ ok: true, value: overviewFor(activityFor('Late Alpha Scope')) })
+      await new Promise(resolve => setImmediate(resolve))
+      phase += 1
+      return false
+    }
+    if (phase === 3) {
+      picker.props.onChange('session-gamma'); phase += 1; return false
+    }
+    if (phase === 4 && typeof rejectGamma === 'function' && requests.some(row => row.sessionId === 'session-gamma')) {
+      picker.props.onChange('session-delta'); phase += 1; return false
+    }
+    if (phase === 5 && requests.some(row => row.sessionId === 'session-delta')) {
+      rejectGamma(new Error('late_gamma_failure'))
+      await new Promise(resolve => setImmediate(resolve))
+      phase += 1
+      return true
+    }
+    return false
+  }
+  const tree = await renderPanel(registration, { locale: 'zh', call, control: undefined, form: RENDER_FORM },
+    10, interact)
+  assert.deepEqual(requests.map(row => row.sessionId), ['', 'session-alpha', 'session-beta', 'session-gamma', 'session-delta'])
+  assert.ok(requests.every(row => row.activityDays === 90 && typeof row.timeZone === 'string' && row.timeZone.length > 0),
+    'every calendar read includes a bounded range and an explicit time zone')
+  const flat = JSON.stringify(tree)
+  assert.ok(flat.includes('Delta Scope'), 'the newest accessible scope remains visible')
+  assert.equal(flat.includes('Late Alpha Scope'), false, 'a late result from the prior scope is discarded')
+  assert.equal(flat.includes('late_gamma_failure'), false, 'a late error from a prior scope is discarded')
+})
+
+test('date and time-zone reads are independent and discard stale calendar success and failure', async () => {
+  const { module: mod, registration } = loadClient()
+  const requests = []
+  let recallReads = 0
+  let releaseOldDate
+  let rejectOldTimeZone
+  const activityFor = label => ({ ok: true, basis: 'retained_records', complete: false,
+    scope: { kind: 'project', label, scopeHash: 'a'.repeat(12) },
+    range: { start: '2026-10-01', end: '2026-10-30', days: 30, timeZone: 'UTC' },
+    daily: [{ date: '2026-10-30', counts: { validation: null, created: null, withdrawn: null,
+      reactivated: null, all: null } }], weekly: [], totals: { validation: null }, events: [], recent: [],
+    coverage: { lessonRows: 0, experimentRows: 0, invalidTimestamps: 0, rowsWithIncompleteEventHistory: 0,
+      lessonRowsAtCapacity: false, possibleExperimentTruncation: false, eventsOutsideSelectedRange: 0,
+      eventsTruncated: false, unavailableSources: [] } })
+  const overviewFor = activity => ({ ok: true, version: 'test', runtime: 'dsh', store: { readable: false },
+    library: { readable: false, code: 'store_unavailable' }, scope: null, scopeReason: 'no_scope_selected', activity,
+    fees: { scope: 'instance', window: 'rolling24h', values: {} } })
+  const sessions = { ok: true, sessions: [{ id: 'session-alpha', title: 'Alpha', label: 'alpha', scope: 'project' }] }
+  const initialZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai'
+  const zones = ['America/New_York', 'Europe/London', 'Asia/Tokyo', 'UTC']
+  const firstZone = zones.find(zone => zone !== initialZone)
+  const secondZone = zones.find(zone => zone !== firstZone)
+  const call = async (method, input) => {
+    if (method === 'overview') {
+      requests.push({ ...input })
+      if (input.sessionId === '' || input.sessionId === undefined) {
+        return { ok: true, value: overviewFor({ ok: false, code: 'session_required' }) }
+      }
+      if (input.activityDays === 30 && input.timeZone === initialZone) {
+        return new Promise(resolve => { releaseOldDate = resolve })
+      }
+      if (input.activityDays === 30 && input.timeZone === firstZone) {
+        return { ok: true, value: overviewFor(activityFor(`Current ${firstZone}`)) }
+      }
+      if (input.activityDays === 90 && input.timeZone === firstZone) {
+        return new Promise((_resolve, reject) => { rejectOldTimeZone = reject })
+      }
+      return { ok: true, value: overviewFor(activityFor(`Current ${secondZone}`)) }
+    }
+    if (method === 'sessions') return { ok: true, value: sessions }
+    if (method === 'recall') {
+      recallReads += 1
+      return { ok: true, value: { ok: true, memory: 'in-process', recent: [], last: null,
+        settlement: { live: [] }, session: null, scope: null } }
+    }
+    return { ok: true, value: { ok: true } }
+  }
+  let phase = 0
+  const interact = async ({ nodes, module: renderedModule }) => {
+    const pick = label => nodes.find(node => node.type === renderedModule.__test.Picker && node.props?.label === label)
+    if (phase === 0) {
+      const scope = pick(mod.__test.zh.activityScope)
+      if (scope === undefined) return false
+      scope.props.onChange('session-alpha'); phase += 1; return false
+    }
+    if (phase === 1) {
+      const range = pick(mod.__test.zh.activityRange)
+      if (range === undefined || !requests.some(row => row.sessionId === 'session-alpha')) return false
+      range.props.onChange(30); phase += 1; return false
+    }
+    if (phase === 2) {
+      if (releaseOldDate === undefined) return false
+      const timezone = pick(mod.__test.zh.activityTimezone)
+      timezone.props.onChange(firstZone); phase += 1; return false
+    }
+    if (phase === 3) {
+      if (!requests.some(row => row.activityDays === 30 && row.timeZone === firstZone)) return false
+      releaseOldDate({ ok: true, value: overviewFor(activityFor('Late old date')) })
+      await new Promise(resolve => setImmediate(resolve))
+      const range = pick(mod.__test.zh.activityRange)
+      range.props.onChange(90); phase += 1; return false
+    }
+    if (phase === 4) {
+      if (rejectOldTimeZone === undefined) return false
+      const timezone = pick(mod.__test.zh.activityTimezone)
+      timezone.props.onChange(secondZone); phase += 1; return false
+    }
+    if (phase === 5) {
+      if (!requests.some(row => row.activityDays === 90 && row.timeZone === secondZone)) return false
+      rejectOldTimeZone(new Error('stale_timezone_failure'))
+      await new Promise(resolve => setImmediate(resolve))
+      phase += 1
+      return true
+    }
+    return true
+  }
+  const tree = await renderPanel(registration, { locale: 'zh', call, control: undefined, form: RENDER_FORM }, 18, interact)
+  const flat = JSON.stringify(tree)
+  assert.equal(phase, 6)
+  assert.deepEqual(requests.map(row => [row.sessionId, row.activityDays, row.timeZone]), [
+    ['', 90, initialZone], ['session-alpha', 90, initialZone], ['session-alpha', 30, initialZone],
+    ['session-alpha', 30, firstZone], ['session-alpha', 90, firstZone], ['session-alpha', 90, secondZone],
+  ])
+  assert.equal(recallReads, 2, 'filter-only reads do not clear or reload the session recall slot')
+  assert.ok(flat.includes(`Current ${secondZone}`), 'the latest time-zone result remains visible')
+  assert.equal(flat.includes('Late old date'), false, 'a late success from an old date filter is discarded')
+  assert.equal(flat.includes('stale_timezone_failure'), false, 'a late error from an old time zone is discarded')
+})
+
+test('changing the activity range preserves recall and a running review job', async () => {
+  const intervals = new Map()
+  let nextInterval = 0
+  const timers = {
+    setInterval: (fn, delay) => { const id = ++nextInterval; intervals.set(id, { fn, delay }); return id },
+    clearInterval: id => { intervals.delete(id) },
+  }
+  const { module: mod, registration } = loadClient(timers)
+  const overviewRequests = []
+  let recallReads = 0
+  let jobPolls = 0
+  const activity = { ok: false, code: 'session_required' }
+  const overview = { ok: true, version: 'test', runtime: 'dsh', store: { readable: false },
+    library: { readable: false, code: 'store_unavailable' }, scope: null, scopeReason: 'no_scope_selected', activity,
+    fees: { scope: 'instance', window: 'rolling24h', values: {} } }
+  const sessions = { ok: true, sessions: [{ id: 'session-alpha', title: 'Alpha', label: 'alpha', scope: 'project' }] }
+  const call = async (method, input) => {
+    if (method === 'overview') { overviewRequests.push({ ...input }); return { ok: true, value: overview } }
+    if (method === 'sessions') return { ok: true, value: sessions }
+    if (method === 'recall') {
+      recallReads += 1
+      return { ok: true, value: { ok: true, memory: 'in-process', recent: [], last: null,
+        settlement: { live: [] }, session: null, scope: null } }
+    }
+    return { ok: true, value: { ok: true } }
+  }
+  const runningJob = { id: 'job-running-1', state: 'running', kind: 'review', sessionId: 'session-alpha' }
+  const control = async (method, input) => {
+    if (method === 'status') return { ok: true, value: { ok: true, effective: { learning: true, reasons: [] },
+      settings: { user: {} }, runtime: { jobs: [] } } }
+    if (method === 'turns') return { ok: true, value: { ok: true, turns: [{ turn: 'turn-1', reviewable: true,
+      taskPreview: '完成的任务', reason: 'completed', route: { provider: 'host', model: 'test-model' } }] } }
+    if (method === 'planReview') return { ok: true, value: { ok: true, route: { provider: 'host', model: 'test-model',
+      reasoningEffort: 'standard' }, plan: { allowed: true, allowance: 1, limit: 3, turnId: 'turn-1', outcome: 'completed' },
+      task: { resultPreview: '完成' } } }
+    if (method === 'startReview') return { ok: true, value: { ok: true, job: runningJob } }
+    if (method === 'job') { jobPolls += 1; return { ok: true, value: { ok: true, job: runningJob } } }
+    throw new Error(`unexpected_control_method:${method}`)
+  }
+  const dict = mod.__test.zh
+  let phase = 0
+  let renderedModule
+  const interact = async ({ nodes, module }) => {
+    renderedModule = module
+    const tab = () => nodes.find(node => node.type?.uiName === 'SegmentedTabs'
+      && node.props?.label === dict.settingsTitle)?.props
+    const button = label => nodes.find(node => node.type?.uiName === 'Button' && labelOf(node) === label)
+    if (phase === 0) {
+      const picker = nodes.find(node => node.type === renderedModule.__test.Picker && node.props?.label === dict.activityScope)
+      if (picker === undefined) return false
+      picker.props.onChange('session-alpha'); phase += 1; return false
+    }
+    if (phase === 1) {
+      const tabs = tab()
+      if (tabs === undefined || !overviewRequests.some(row => row.sessionId === 'session-alpha')) return false
+      tabs.onChange('manual'); phase += 1; return false
+    }
+    if (phase === 2) {
+      const load = button(dict.turnsLoad)
+      if (load === undefined) return false
+      load.props.onClick(); phase += 1; return false
+    }
+    if (phase === 3) {
+      const preview = button(dict.turnPreview)
+      if (preview === undefined || !Array.from(controlCalls).includes('turns')) return false
+      preview.props.onClick(); phase += 1; return false
+    }
+    if (phase === 4) {
+      const start = button(dict.turnStart)
+      if (start === undefined || !Array.from(controlCalls).includes('planReview')) return false
+      start.props.onClick(); phase += 1; return false
+    }
+    if (phase === 5) {
+      if (!Array.from(controlCalls).includes('startReview') || intervals.size !== 1) return false
+      const tabs = tab()
+      tabs.onChange('overview'); phase += 1; return false
+    }
+    if (phase === 6) {
+      const range = nodes.find(node => node.type === renderedModule.__test.Picker && node.props?.label === dict.activityRange)
+      if (range === undefined) return false
+      range.props.onChange(30); phase += 1; return false
+    }
+    if (phase === 7) {
+      if (!overviewRequests.some(row => row.sessionId === 'session-alpha' && row.activityDays === 30)) return false
+      assert.equal(intervals.size, 1, 'the running job poll interval survives a date-only activity read')
+      assert.equal(jobPolls, 0, 'the active poll is not replaced by a filter request')
+      assert.equal(recallReads, 2, 'the selected session recall is neither cleared nor re-read')
+      tab().onChange('manual'); phase += 1; return false
+    }
+    if (phase === 8) {
+      const jobRow = nodes.find(node => node.type === renderedModule.__test.JobRow && node.props?.job?.id === runningJob.id)
+      assert.equal(jobRow?.props?.job?.state, 'running', 'the active job remains in the task panel')
+      assert.equal(intervals.size, 1)
+      phase += 1
+      return true
+    }
+    return true
+  }
+  const controlCalls = []
+  const wrappedControl = async (method, input) => { controlCalls.push(method); return control(method, input) }
+  const tree = await renderPanel(registration, { locale: 'zh', call, control: wrappedControl, form: RENDER_FORM }, 24, interact)
+  assert.equal(phase, 9)
+  assert.ok(overviewRequests.some(row => row.activityDays === 30), 'the changed range did request fresh activity')
+  assert.ok(elementsOf(tree).some(node => node.type === renderedModule.__test.JobRow && node.props?.job?.id === runningJob.id),
+    'the returned task view still carries the active job')
 })
 
 test('经验 opens a whole-library row by id alone and the detail names its owner', async () => {

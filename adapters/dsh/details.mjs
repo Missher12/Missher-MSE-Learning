@@ -69,6 +69,8 @@ const TURNS_OBSERVED_MEANING = 'in_process_sessions_since_process_start'
 const AUTO_STAGES = ['queued', 'running', 'done', 'blocked', 'failed', 'interrupted']
 const AUTO_TRACKS = ['objective', 'review']
 const AUTO_EVIDENCE = ['host_check', 'host_pack', 'model_review', 'none']
+const FEE_FIELDS = ['reflectionTokensLast24h', 'reflectionTokensUnknown24h', 'evaluationTokensKnown24h',
+  'evaluationUnknown24h', 'evaluationTokensReserved24h', 'evaluationTasksLast24h', 'evaluationRequestsLast24h']
 const REVIEW_STATES = ['reviewed', 'rejected', 'inconclusive']
 const REVIEW_AGREEMENTS = ['aligned', 'swapped_only', 'neutral_safe', 'disagreed', 'none']
 const REVIEW_BENEFITS = ['unproven', 'none']
@@ -625,9 +627,24 @@ export class MseDetails extends TypertRemoteService {
     const listing = this.libraryScopes(directory)
     const scan = this.readLibrary(engine, core, listing.scopes)
     const libraryCode = storeError ?? (scan.ok === true ? null : scan.code)
-    const wanted = typeof input.sessionId === 'string' && input.sessionId !== '' ? input.sessionId : null
+    const invalidSessionId = typeof input.sessionId === 'string' && input.sessionId.length > 512
+    const wanted = typeof input.sessionId === 'string' && input.sessionId !== '' && !invalidSessionId ? input.sessionId : null
     const resolved = wanted === null ? null : await this.resolveScope(wanted, directory)
     const selected = resolved !== null && resolved.ok === true ? resolved.scope : null
+    let activity
+    if (invalidSessionId) activity = { ok: false, code: 'session_id_invalid' }
+    else if (wanted === null) activity = { ok: false, code: 'session_required' }
+    else if (selected === null) activity = { ok: false, code: resolved?.code ?? 'session_unknown' }
+    else {
+      try {
+        const projected = engine.activity({ ...(selected.projectKey === undefined ? {} : { projectKey: selected.projectKey }),
+          days: input.activityDays, timeZone: input.timeZone })
+        activity = projected?.ok === true ? { ...projected, generatedAt: Date.now(), scope: {
+          kind: selected.kind, sessionId: selected.sessionId, label: selected.label, scopeHash: selected.scopeHash,
+          archived: selected.record?.archived ?? null, running: selected.record?.running ?? null,
+        } } : { ok: false, code: text(projected?.code ?? 'activity_unavailable', 60) }
+      } catch (error) { activity = { ok: false, code: text(error?.code ?? 'activity_unavailable', 60) } }
+    }
     const { auto, autoError } = this.autoOf(core, engine)
     const observed = this.inProcessSessions(core)
     return {
@@ -654,6 +671,12 @@ export class MseDetails extends TypertRemoteService {
       // null + a reason, never the empty instance scope presented as the library.
       scope: selected === null ? null : this.scopeInfo(engine, selected, core),
       scopeReason: selected !== null ? null : (resolved === null ? 'no_scope_selected' : resolved.code),
+      // This is a separate, Host-resolved project read. It carries no project path and never
+      // falls back to the whole-library scan when the browser's session is missing or stale.
+      activity,
+      // Paid-use figures are a rolling 24-hour instance ledger, not daily chart data or project cost.
+      fees: { scope: 'instance', window: 'rolling24h', values: Object.fromEntries(FEE_FIELDS.map(key => [key,
+        Number.isSafeInteger(status?.[key]) && status[key] >= 0 ? status[key] : null])) },
       budget: { turnBytes: int(status?.budgetBytes ?? engine.budget), sessionBytes: int(status?.sessionBudgetBytes ?? 1536),
         maxLessons: int(status?.maxLessons ?? engine.maxLessons) },
       lessonsTotal: int(status?.lessons),

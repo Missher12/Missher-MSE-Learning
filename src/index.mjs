@@ -29,6 +29,7 @@ import { runRegisteredProjectTests } from './project-test-runner.mjs'
 import { packageJsonReplayWitness, verifyPackageJsonArtifact, verifyPackageJsonReplayOutput } from './package-json-checker.mjs'
 import { replayTaskFixture } from './task-profiles.mjs'
 import { decisionIdentity, parseDecision, normalizeDecisionUsage, DECISION_BACKENDS } from './decision.mjs'
+import { projectActivity } from './activity.mjs'
 
 export { LearningError }
 /**
@@ -5121,6 +5122,13 @@ export class LearningEngine {
           authorizationId: repairAuthorization.authorizationId,
           authorizationRef: repairAuthorization.authorizationRef } }) } }
     }
+  /** One state read for the bounded, read-only activity calendar of a single resolved scope. */
+  activity(input = {}) {
+    const state = this.store.read(); validateState(state); check(state.schema === 2, 'migration_required')
+    const scopeHash = scopeFor(input.projectKey, this.adapter, this.instance)
+    return projectActivity(state, { scopeHash, days: input.days ?? 90,
+      timeZone: input.timeZone ?? 'Asia/Shanghai', now: this.now() })
+  }
   status() {
     const state = this.store.read(); validateState(state)
     const ledgerState = state.schema === 2 ? pruneState(structuredClone(state), this.now()) : null

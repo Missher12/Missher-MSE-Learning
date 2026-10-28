@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="260" viewBox="0 0 960 260" role="img" aria-labelledby="title desc">
+<title id="title">MSE · 经验改进</title><desc id="desc">积累可验证的方法；不等于修改模型权重。自动验证会产生模型用量。</desc>
+<rect width="960" height="260" rx="18" fill="#f7f8fc"/>
+<text x="36" y="49" font-family="sans-serif" font-size="25" fill="#17213b">MSE · 经验改进</text>
+<rect x="36" y="87" width="202" height="82" rx="12" fill="#e8e9fc"/>
+<text x="137" y="135" text-anchor="middle" font-family="sans-serif" font-size="21" fill="#253553">记录结果</text>
+<path d="M 243 128 h 15 m -5 -5 l 5 5 -5 5" stroke="#70819c" stroke-width="2" fill="none"/>
+<rect x="264" y="87" width="202" height="82" rx="12" fill="#d9dcfa"/>
+<text x="365" y="135" text-anchor="middle" font-family="sans-serif" font-size="21" fill="#253553">复盘候选</text>
+<path d="M 471 128 h 15 m -5 -5 l 5 5 -5 5" stroke="#70819c" stroke-width="2" fill="none"/>
+<rect x="492" y="87" width="202" height="82" rx="12" fill="#c8d0f5"/>
+<text x="593" y="135" text-anchor="middle" font-family="sans-serif" font-size="21" fill="#253553">验证与试用</text>
+<path d="M 699 128 h 15 m -5 -5 l 5 5 -5 5" stroke="#70819c" stroke-width="2" fill="none"/>
+<rect x="720" y="87" width="202" height="82" rx="12" fill="#b7c5ef"/>
+<text x="821" y="135" text-anchor="middle" font-family="sans-serif" font-size="21" fill="#253553">采用或撤回</text>
+<text x="36" y="215" font-family="sans-serif" font-size="16" fill="#55637a">积累可验证的方法；不等于修改模型权重。自动验证会产生模型用量。</text>
+</svg>

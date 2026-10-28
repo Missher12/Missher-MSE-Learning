@@ -342,6 +342,16 @@ test('reading lessons, recall and diagnose never changes the store bytes or budg
     assert.ok(library.library.scopeLessons >= 2)
     assert.equal(prompted.prompted.reason !== undefined, true)
     assert.ok(Array.isArray(detail.experiments))
+    const originalRead = f.engine.store.read.bind(f.engine.store)
+    let activityReads = 0
+    f.engine.store.read = () => { activityReads += 1; return originalRead() }
+    const activity = f.engine.activity({ projectKey: f.projectKey, days: 1, timeZone: 'UTC' })
+    assert.equal(activity.ok, true)
+    assert.equal(activity.basis, 'retained_records')
+    assert.equal(activity.complete, false)
+    assert.equal(activityReads, 1, 'the calendar reads and validates the state once')
+    assert.equal(activity.daily.length, 1)
+    assert.equal(activity.totals.created, 2)
     const after = { bytes: readFileSync(path, 'utf8'), size: statSync(path).size, mtime: statSync(path).mtimeMs }
     assert.equal(after.bytes, before.bytes, 'reads must not rewrite the learning store')
     assert.equal(after.size, before.size)
@@ -616,6 +626,11 @@ test('overview reports the whole library by default and the project counts separ
     // No scope was named, so the page is told exactly that instead of being handed an empty scope.
     assert.equal(overview.scope, null)
     assert.equal(overview.scopeReason, 'no_scope_selected')
+    assert.equal(overview.activity.ok, false)
+    assert.equal(overview.activity.code, 'session_required', 'a whole-library scope is never substituted for a session')
+    assert.deepEqual(overview.fees.scope, 'instance')
+    assert.equal(overview.fees.window, 'rolling24h')
+    assert.equal(Number.isSafeInteger(overview.fees.values.evaluationTokensReserved24h), true)
     // The scheduler's own status, and the in-process SESSION counter with its stated meaning.
     assert.equal(overview.auto.source, 'mseLearning')
     assert.equal(overview.auto.plans, 1)
@@ -630,19 +645,38 @@ test('overview reports the whole library by default and the project counts separ
     // Naming a Host-observed session adds that project's OWN counts beside the library reading,
     // and one page read lists the Host's sessions exactly once (the listing serves both needs).
     const listings = f.listings()
-    const scoped = await f.details.overview({ sessionId: 's-alpha' })
+    const scoped = await f.details.overview({ sessionId: 's-alpha', activityDays: 60, timeZone: 'UTC' })
     assert.equal(f.listings() - listings, 1)
     assert.equal(scoped.scopeReason, null)
     assert.equal(scoped.scope.kind, 'project')
     assert.equal(scoped.scope.label, 'alpha')
     assert.equal(scoped.scope.counts.scopeLessons, 3)
     assert.equal(scoped.library.total, overview.library.total, 'the library reading does not shrink to the scope')
+    assert.equal(scoped.library.adopted, overview.library.adopted,
+      'date and time-zone parameters do not change the whole-library adoption statistic')
+    assert.equal(scoped.fees.scope, 'instance', 'activity scope does not rewrite the fee scope')
+    assert.equal(scoped.fees.window, 'rolling24h', 'calendar range does not change the fee window')
+    assert.deepEqual(Object.keys(scoped.fees.values).sort(), Object.keys(overview.fees.values).sort(),
+      'fee counters remain available under the same contract when activity is scoped')
+    assert.equal(scoped.activity.ok, true)
+    assert.equal(scoped.activity.range.days, 60)
+    assert.equal(scoped.activity.range.timeZone, 'UTC')
+    assert.equal(scoped.activity.scope.label, 'alpha')
+    const expectedAlphaActivityIds = [...f.alphaIds, f.methodId].sort()
+    assert.equal(scoped.activity.events.every(event => expectedAlphaActivityIds.includes(event.lessonId)), true,
+      'calendar records stay inside the Host-resolved project')
+    assert.deepEqual([...new Set(scoped.activity.events.map(event => event.lessonId))].sort(), expectedAlphaActivityIds,
+      'calendar records cover exactly the three lessons created in the Host-resolved project')
+    assert.equal(scoped.activity.events.some(event => event.type === 'created' && event.lessonId === f.methodId), true,
+      'the legitimate method lesson appears as a created calendar event')
     // A session the Host does not know is a stated reason, never a fabricated scope.
     const unknown = await f.details.overview({ sessionId: 'not-a-session' })
     assert.equal(unknown.ok, true)
     assert.equal(unknown.scope, null)
     assert.equal(unknown.scopeReason, 'session_unknown')
     assert.equal(unknown.library.total, 5)
+    assert.equal(unknown.activity.ok, false)
+    assert.equal(unknown.activity.code, 'session_unknown', 'an inaccessible session does not fall back to the library')
     return undefined
   } finally { f.cleanup() }
 })
