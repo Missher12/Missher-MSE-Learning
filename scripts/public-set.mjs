@@ -13,10 +13,11 @@ import { readdirSync, statSync } from 'node:fs'
 import { join, posix } from 'node:path'
 
 /** Directories whose ENTIRE contents are public. */
-export const PUBLIC_DIRECTORIES = Object.freeze(['src', 'adapters', 'scripts', 'tests', 'docs'])
+export const PUBLIC_DIRECTORIES = Object.freeze(['rebuild', 'src', 'adapters', 'scripts', 'tests', 'docs'])
 /** Named root files that are public. Anything not listed here (and not in a public directory) is not. */
 export const PUBLIC_FILES = Object.freeze([
   'package.json', 'README.md', 'README.en.md', 'LICENSE', 'cordis.patch.yml', 'VALIDATION.md',
+  'PUBLICATION.md',
 ])
 /** Never public, even inside a public directory: build output, caches, binaries, OS metadata. */
 export const PRIVATE_NAMES = Object.freeze(new Set([

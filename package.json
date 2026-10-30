@@ -1,65 +1,44 @@
 {
   "name": "@missher/dsh-mse-learning",
-  "version": "0.13.0",
-  "private": true,
+  "version": "0.15.0-rebuild.24",
+  "description": "MSE learning (rebuilt slim chain): trusted user/tool facts → bounded recall → evidence-bound lessons → daily digest. An upgrade of the mse-learning bundle.",
   "type": "module",
-  "description": "Scoped persistent lessons with bounded context for Agent adapters",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Missher12/Missher-MSE-Learning.git"
-  },
-  "homepage": "https://github.com/Missher12/Missher-MSE-Learning#readme",
-  "bugs": {
-    "url": "https://github.com/Missher12/Missher-MSE-Learning/issues"
-  },
-  "keywords": [
-    "dsh-plugin",
-    "persistent-learning",
-    "memory",
-    "agent"
-  ],
-  "engines": {
-    "node": ">=22.19.0"
-  },
+  "private": true,
+  "main": "./rebuild/root.mjs",
   "exports": {
-    "./core": "./src/index.mjs",
-    ".": "./src/root.mjs",
-    "./harness": "./adapters/harness.mjs",
-    "./checks": "./src/checks.mjs",
-    "./evaluation": "./src/evaluation.mjs",
-    "./task-evidence": "./src/task-evidence.mjs",
-    "./decision": "./src/decision.mjs",
-    "./decision-providers": "./src/decision-providers.mjs",
-    "./guards": "./src/guards.mjs",
-    "./cases": "./src/cases.mjs",
-    "./adapters/dsh": "./adapters/dsh/index.mjs",
-    "./status": "./src/status.mjs",
-    "./recall": "./src/recall.mjs",
-    "./client": "./adapters/dsh/client.js",
-    "./typert": "./adapters/dsh/typert.mjs",
-    "./details": "./adapters/dsh/details.mjs",
-    "./project": "./adapters/dsh/project.mjs"
-  },
-  "bin": {
-    "mse-learn": "./src/cli.mjs"
+    ".": "./rebuild/root.mjs",
+    "./client": "./rebuild/client.js",
+    "./typert": "./rebuild/typert.mjs"
   },
   "files": [
-    "src",
-    "adapters/dsh",
-    "adapters/harness.mjs",
-    "adapters/hermes/__init__.py",
-    "adapters/hermes/bridge.py",
-    "adapters/hermes/guards.py",
-    "adapters/hermes/driver.py",
-    "adapters/hermes/plan.py",
-    "adapters/hermes/plugin.yaml",
-    "README.md",
-    "README.en.md",
-    "docs",
     "LICENSE",
+    "README.en.md",
+    "README.md",
+    "adapters/dsh/usage.mjs",
     "cordis.patch.yml",
-    "VALIDATION.md"
+    "docs/AUTONOMY_0.15.0.md",
+    "rebuild/checker.mjs",
+    "rebuild/client.js",
+    "rebuild/config.mjs",
+    "rebuild/dsh.mjs",
+    "rebuild/engine.mjs",
+    "rebuild/llm.mjs",
+    "rebuild/memory.mjs",
+    "rebuild/remote.mjs",
+    "rebuild/root.mjs",
+    "rebuild/time.mjs",
+    "rebuild/typert.mjs",
+    "src/checks.mjs",
+    "src/failure-evidence.mjs",
+    "src/failure-lessons.mjs",
+    "src/problems.mjs",
+    "src/recall.mjs",
+    "src/store.mjs"
+  ],
+  "keywords": [
+    "dsh-plugin",
+    "mse",
+    "learning"
   ],
   "dsh": {
     "bundle": {
@@ -82,6 +61,18 @@
     "@deepseek-ai/dsh-typert-protocol": "*",
     "@deepseek-ai/schemastery": "*"
   },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Missher12/Missher-MSE-Learning.git"
+  },
+  "homepage": "https://github.com/Missher12/Missher-MSE-Learning#readme",
+  "bugs": {
+    "url": "https://github.com/Missher12/Missher-MSE-Learning/issues"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-llm": {
       "optional": true
@@ -97,10 +88,9 @@
     }
   },
   "scripts": {
-    "test": "node --test --test-concurrency=1 tests/*.test.mjs",
-    "pack:local": "node scripts/pack.mjs",
-    "verify:package": "node scripts/verify-package.mjs",
-    "pack:dsh": "node scripts/pack.mjs --dsh-only"
-  },
-  "main": "./src/root.mjs"
+    "test": "node --test rebuild/rebuild.test.mjs",
+    "pack:local": "node scripts/pack.mjs --dsh-only",
+    "pack:dsh": "node scripts/pack.mjs --dsh-only",
+    "verify:package": "node scripts/verify-package.mjs"
+  }
 }

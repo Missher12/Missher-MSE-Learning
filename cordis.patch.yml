@@ -4,3 +4,4 @@
       config:
         enabled: true
         maxContextBytes: 768
+        dailyHour: 23

@@ -1,115 +1,19 @@
 # MSE Learning
 
-English | [中文](README.md) · [Desktop and downloads](https://github.com/Missher12/Missher-DeepseekHarness-Desktop)
+DSH plugin for global standing corrections, evidence-linked failure lessons and daily consolidation. Current local candidate: **0.15.0-rebuild.24**.
 
-Persists scoped user corrections and method candidates for DSH, recalls relevant lessons within a byte budget, and records adoption and verification established by the trusted host. It does not train model weights or guarantee that a model will never repeat a mistake.
+Ordinary user corrections no longer require a remember keyword. Suspected corrections enter a bounded, source-bound extraction after the turn; concrete reusable rules persist and recall in later related sessions/projects. Negations and project limits are retained; one-off requests, questions and quoted logs are not automatically promoted. The status page shows saved, pending and ignored extraction results. This uses the existing learning model route and switches, not a model call for every message.
 
-Package: `@missher/dsh-mse-learning`, version **0.13.0**. Remote decision settings bring the model name, API endpoint and actual API key into one page, with optional model-directory discovery. Keys use route-scoped Host credential storage. Budget controls wrap at narrow widths, and upgrades preserve saved settings. See the [0.13.0 notes](docs/AUTONOMY_0.13.0.md), [delivery status and checksums](https://github.com/Missher12/Missher-MSE-Learning/blob/main/PUBLICATION.md) and [validation](VALIDATION.md).
+Explicit user corrections persist across sessions and projects, with project constraints retained. Two independent failures can produce a concrete unvalidated lesson. Related turns recall it again; attributed recurrence requests a material revision or retires an ineffective version. Daily consolidation runs while idle after local 23:00, with durable processing boundaries and catch-up.
 
-This release combines the budget slider with Limited and Unlimited modes. Limited uses slider presets or exact numeric values. Unlimited continuously handles eligible work while retaining pause controls, measured usage and protection against duplicate execution. See the [validation record](VALIDATION.md) for evidence at each delivery layer.
+The slim runtime preserves source model routes, a single background slot, bounded calls, durable pause and unknown-cost no-replay. It does not self-award validated status or enable paid evaluation. A successful JSON parsing check proves only that check; assistant success claims and arbitrary exit0 do not verify the full task.
 
-The host-title session pickers from alpha.17 remain. Titles are display-only and do not alter scope, recall identity or budgets. DSH scheduling does not establish equivalent lifecycle integration for every Agent. The historical `dsh-missher-evolution` package is a separate product; this plugin does not read or migrate its data.
+Use Settings → Self-evolution to inspect memory, recurrence, checks, daily summaries and waits. Read-only views do not call models. Background reflection can incur model charges and preserves existing switches.
 
-## Features and cost
+The new memory-v1.json imports legacy lessons-v1.json read-only; retain original state and package/config backups. Historical problems and spending remain in the original file. Old unvalidated candidates are not promoted by migration. Daily quota fields are ignored; the old evaluation/merge/renewal pipeline is outside the new package.
 
-- Capture explicit corrections from host-authenticated user input; recall them by scope, supported applicability conditions and remaining budget.
-- Keep inferred methods as candidates; safety review can admit a limited trial, while objective evidence is required for validation within a declared domain.
-- Since 0.11.0, the shared core can generate a new candidate from two lessons in the same registered verifier domain and conditions; Core rechecks parents, source, budget and controls. Generation does not validate a lesson.
-- Use **Settings → 自我进化 (Self-evolution)** for lessons, recall explanations, pause/resume, manual review, budgets and actual control acknowledgement.
-- Recover acknowledged completion settlements after restart without rerunning models or tools or crediting a result twice.
-- `/mse` shows status, `/mse why` explains recent recall, and `/mse now <task>` provides a read-only preview. They use the host command service instead of ordinary model messages.
+Layout: `rebuild/` holds the whole runtime closure, UI panel and test; `src/` keeps only its direct pure helpers; `adapters/dsh/usage.mjs` parses host usage; `scripts/` cover packing, the publication allowlist and package verification; `PUBLICATION.md`/`VALIDATION.md` carry the current publication and validation records. Superseded code, old docs and images stay in Git history only. See [migration and limits](docs/AUTONOMY_0.15.0.md). Relevant checks use node --test rebuild/rebuild.test.mjs and node scripts/verify-package.mjs. Offline fake-provider evidence is not proof of long-term live-model effectiveness.
 
-Default recall limits are **2 lessons / 768 UTF-8 bytes per turn** and **1536 bytes per session**. Bytes are not tokens. Retrieval makes no model calls. Automatic reflection can make additional calls using the model and reasoning effort of the source turn that triggered reflection: at most 3 per 24 hours, at least 30 minutes apart, and at most 384 output tokens each. It can be disabled separately. Additional model evaluation defaults to `evaluationTokensPerDay=0`; it does not start paid evaluations automatically.
+As of rebuild.23 the settings entry is named "Self-evolution"; only the display name changed, with learning behavior unchanged. rebuild.24 only cleans the public work tree (superseded core, tests, docs and the Hermes adapter leave the tree but stay in Git history), syncs the packing-script assertions and adds the official DSH badge; the 18 runtime modules are byte-identical.
 
-## Automatic review and validation
-
-- **Trial does not mean proven benefit.** Candidate and baseline answer independently on the same route; a separate judge sees anonymous answers and checks both label orders. Safe, applicable advice with known costs can become `reviewed` / `trial`; a neutral-safe tie still has `benefit=unproven`. Injected trial text explicitly identifies its unverified status.
-- **Objective evidence determines validated.** Registered algorithms or the Host-owned `mse-lifecycle-v1` scenario pack supply fixed checks; models supply answers only. Injection, model self-reports and claimed success are not verification. A domain verdict covers its registered request-generation, concurrent-ticket and acceptance-evidence cases, not arbitrary tasks.
-- **Automatic validation is off by default** (`autoValidationEnabled=false`) and the evaluation token budget defaults to **0**. In Limited mode, an explicit zero issues no paid evaluation calls. Unlimited retains the saved finite values without applying them as rolling aggregate caps. Manual and automatic evaluations share accounting and admission checks and reserve before requesting; unknown usage is not zero.
-- **Limited is the default budget mode.** Version 0.13.0 adds an Unlimited mode that removes the shared rolling 24-hour token and logical-task caps. Per-request limits, physical-call counts, one-at-a-time concurrency, unknown-cost isolation, pause/source/version gates, deduplication, promotion gates and bounded receipt storage remain active. Actual token, task, request and unknown-cost counters remain visible; remaining allowance is shown as “Continuous” in Unlimited mode. Switching modes preserves the finite values and does not clear tickets or replay work. Automatic validation remains a separate opt-in and is never enabled by changing the budget mode.
-- **Limited-mode evaluation presets** are pause, 20K/2, 50K/5, 100K/10, 200K/20 and custom. A task is a distinct ticket that dispatched at least one physical request in the rolling 24-hour window; multiple steps in one task count once. Physical provider requests are counted separately. Missing budget fields in legacy settings remain fail-closed at 0/2; a preset takes effect only after explicit selection and save.
-- DSH and Hermes persist per-step request identity, response and usage. Resume reuses completed steps; a dispatched step with unknown cost is never replayed. A fresh Hermes process resumes only after the original source session reports a trusted `pre_api_request` route again; without that proof it waits.
-- New candidates bind their actual source session/turn and route. Historical candidates whose source cannot be recovered require an **explicit verification session**. Its provider/model/reasoning effort supplies the backfill route without changing the original project or silently borrowing the latest session's model.
-- The overview separates recorded lessons, corrections, pending work, trials, validation and adoption. Library-wide reads do not widen recall scope. Original applicability/exclusion text remains; unsupported conditions block recall with a visible reason.
-
-At most **one trial per turn** can use the existing **total 2-lesson/default 768-byte turn budget and 1536-byte session budget**, after corrections and validated methods; it adds no extra context allowance. Trials expire and may be withdrawn after trusted failure/correction evidence. Pause/disable stops later steps; uncertain requests after restart retain interruption facts and conservative charges rather than silently replaying the same request. Reading the overview, lesson details, status or diagnostics neither writes the learning store nor triggers paid work. The same settings page also exposes human-initiated configuration saves, enable/pause controls and manual reflection/validation actions. These are write or scheduling entry points; enabling automatic validation can schedule budgeted background evaluations. See [VALIDATION](VALIDATION.md) for the tested cancellation, recovery and accounting scope and its limits.
-
-## Installation status
-
-Install the exact version listed in [delivery status](https://github.com/Missher12/Missher-MSE-Learning/blob/main/PUBLICATION.md). Source checks, release publication and installation are separate milestones; an existing older installation is not upgraded merely because this repository changes.
-
-## Configure a decision model
-
-1. Open **Settings → 自我进化** and choose the model source. Follow-source mode keeps the source session's model and reasoning effort.
-2. For a remote service, enter its endpoint and model name. Fetch the model directory if the service provides one, or enter the model manually.
-3. Enter the actual API key and save settings. Keys are scoped to the backend and service route; changing the endpoint does not silently reuse an old key. Advanced settings retain the environment-variable reference.
-4. If another window changes the settings, reload the Host values before editing and saving again. Configuration save results and credential status are reported separately.
-
-Discovery sends read-only requests and does not run inference. A model list or saved key does not prove inference compatibility. The tested Host stores credentials in a permission-restricted local file, not an OS keychain or encrypted vault; protect its data directory.
-
-## Start automatic validation
-
-1. Confirm the version and checksum on the project release page before installing.
-2. Turn on **automatic validation**. For historical candidates without a recoverable source, explicitly select a **verification session** with a configured model route. It supplies the provider, model and reasoning effort without changing the lesson's original project.
-3. Choose a budget mode: **Limited** uses your saved token and task allowances; **Unlimited** removes the rolling aggregate caps and can incur continuing costs. After saving, inspect actual control acknowledgement, queue stages and blocking reasons. A recorded candidate does not imply immediate promotion.
-4. Distinguish recorded lessons, trials and validation. Safety review can admit a trial; objective checks are required for validated status within the registered domain. Turning off automatic validation stops later automatic steps. Reflection has its own switch and frequency limits.
-
-Defaults remain **Limited mode, automatic validation off, token allowance 0 and task allowance 2**; legacy settings missing the mode or budget fields use these defaults too. Mode and allowance changes require explicit selection and save. Tasks and physical requests are counted separately. Reading the page does not start models.
-
-## Settings screenshots
-
-The model/key example is retained from 0.12.0; the budget slider example comes from this 0.13.0 acceptance. These are actual isolated Ubuntu community 0.2.1-rc.2 controls with synthetic data. Disconnected reflects offline acceptance. Budget content widths of about 311 and 559 pixels were checked; these images do not establish acceptance on other platforms.
-
-![Model, endpoint and saved API key status](https://raw.githubusercontent.com/Missher12/Missher-MSE-Learning/v0.12.0/docs/images/native-rc2-0.12.0-settings.png)
-
-![Budget mode, slider and precise inputs](https://raw.githubusercontent.com/Missher12/Missher-MSE-Learning/v0.13.0/docs/images/native-rc2-0.13.0-budget.png)
-
-[View the narrow budget layout](https://raw.githubusercontent.com/Missher12/Missher-MSE-Learning/v0.13.0/docs/images/native-rc2-0.13.0-budget-narrow.png)
-
-## Evidence and platform boundaries
-
-| Environment | Evidence and limits |
-| --- | --- |
-| 0.10.0 core and host evidence | Automatic scheduler 11/11; complete single-instance Hermes chain in 61.156 seconds; official npm DSH alpha.5 Loader passed normal, missing-fs, and missing-tools cases. See [Validation](VALIDATION.md) for scope and limits. |
-| Historical alpha.18 Intel Mac candidate | The earlier 303/303 Node, 125/125 offline adapter, 189/189 controlled UI and four real review calls belong only to that historical candidate. They are not current-candidate or daily-install evidence. |
-| Current Ubuntu community rc.2 | Native settings, candidate details, real Host decision/review and objective rejection observed; one recovery reflection created a candidate while preserving prior records. |
-| Unmodified official DSH, other releases and platforms | Capability-based support without an exact-version lock; untested combinations are not claimed as fully verified. |
-| Hermes 0.21.1 | Current adapter/core offline Stage 4c integration passed 21/21, including 20K window recovery, rebuilt driver/pass and trusted source-session route event. This is historical adapter-layer evidence; the current isolated native PluginManager single-instance run is recorded separately above and is not an added count. |
-| Other Agents | A host-independent Node SDK and JSON CLI are available, but a trusted lifecycle adapter is required. This is not automatic support for every Agent or a browser SDK. |
-
-DSH must provide Cordis, LLM, Typert, Schemastery, commands/settings and related services. The complete settings UI also requires the static `@deepseek-ai/dsh-client-ui-primitives` module and matching settings extension points; the tested combination is Missher Desktop. Official packages are host-provided peers, not a bundled replacement host. Report the host version and redacted loading error when interfaces are missing; a version exemption is not a compatibility test.
-
-## Pause, removal and retained data
-
-Turn off enablement in **Settings → 自我进化** and check that persistent control has been acknowledged. A busy lock can leave it unconfirmed; a saved settings document alone is not confirmation. Disable automatic reflection separately to retain recall without starting new reflections; automatic validation has its own switch.
-
-Before uninstalling, let active tasks finish and back up the entire host-resolved `dshHomePath('mse-learning')` directory, normally `mse-learning/` under the DSH data root. Include both `lessons-v1.json` and `sessions/`. Remove the package through Desktop's plugin manager, or from the same CLI / Web profile:
-
-```sh
-dsh plugin --profile web remove @missher/dsh-mse-learning
-```
-
-There is no uninstall data-deletion script; removing the package does not actively erase its learning store. If you want to erase personal data, first stop the relevant host, then manage that directory and its backups yourself. Do not delete the entire DSH data root or another plugin's directory. DSH and Hermes must not share a live writable learning store. A detected legacy `missherEvolutionCore` pauses the new controller.
-
-The historical alpha.15/alpha.16→alpha.17 upgrade stayed on schema 2. Version 0.10.0 continues using optional schema-2 fields; retain a fresh complete backup before a formal upgrade. Schema 1 needs explicit migration. Before downgrading to a package without durable settlement support, drain/retire pending settlements, or restore both the corresponding old package and the complete pre-upgrade backup. See the [durable settlement contract](docs/DURABLE_SETTLEMENT_OUTBOX.md).
-
-## Development and verification
-
-The repository's legacy-store fixtures are synthetic, not personal learning data. Node tests use one worker by default:
-
-```sh
-npm test
-node scripts/pack.mjs --dsh-only
-node scripts/pack-source.mjs
-node scripts/verify-package.mjs
-```
-
-Use a fresh source copy or output directory for each build; packers reject existing candidate artifacts. `MSE_SOURCE_COMMIT` identifies the 40-character commit for an export without `.git`. Isolated host scripts take explicit artifact, Host modules and pnpm paths. UI verification requires `MSE_DSH_SOURCE` and `MSE_PLAYWRIGHT_ANCHOR`, with no maintainer-specific fallback. Optional historical alpha8 comparisons use `MSE_ALPHA4_ENGINE` and `MSE_ALPHA6_ENGINE`.
-
-[Autonomy implementation notes](docs/AUTONOMY_0.10.0.md) · [Adapter protocol](docs/ADAPTER_PROTOCOL.md) · [Durable settlement](docs/DURABLE_SETTLEMENT_OUTBOX.md) · [Detailed behavior, Chinese](docs/BEHAVIOR.zh.md)
-
-Arbitrary free-form Chinese conditions are not reliably understood; unclear conditions conservatively block recall. Unacknowledged work and manual model jobs do not have a cross-crash durability guarantee. Tests, readable settings and growing counters do not establish long-term model improvement. R6's bounded real-provider record is listed in [Validation](VALIDATION.md): only 2/5 Laya semantic cases matched expectations, and the decision labels were sensitive to wording. This does not establish long-term improvement or paid objective two-arm validation. Current screenshots and native interaction evidence come from an isolated Ubuntu community 0.2.1-rc.2 desktop; the old alpha.2 screenshot is historical.
-
-## License and attribution
-
-[MIT](LICENSE), Copyright © 2026 Missher. DSH/Cordis/Schemastery interfaces come from [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness); host-provided packages retain their own licenses. The Hermes adapter targets [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent). The [RRSI research note](docs/RRSI_RESEARCH_2026-09-30.md) records design references; it does not mean RRSI is bundled or that either upstream endorses this plugin.
+[![powered by dsh](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)

@@ -32,6 +32,14 @@
  */
 import { createHash } from 'node:crypto'
 import { check } from './store.mjs'
+import {
+  capsuleValid, appendCapsuleToRow, enforceCapsuleBudget, CAPSULES_PER_PROBLEM,
+  SENSITIVE_PATTERN, AUTHORITY_PATTERN,
+} from './failure-evidence.mjs'
+
+// The screening patterns live in failure-evidence.mjs (the capsule scrubber) and are RE-EXPORTED
+// here so the lesson/summary/capsule boundaries share one source of truth and cannot drift.
+export { SENSITIVE_PATTERN, AUTHORITY_PATTERN }
 
 /** One field under schema-2 `state.problemLoop`; an absent field is the empty read-only view. */
 export const PROBLEM_FORMAT = 1
@@ -117,15 +125,6 @@ export const isAvailabilityClass = failureClass => AVAILABILITY_ONLY.has(failure
 export const REFLECTABLE_KINDS = new Set(['tool_failure', 'task_failure', 'checker_failure'])
 
 /**
- * The same screening the lesson path applies to stored text. `token`, URLs, paths (user AND
- * system roots such as /tmp, /var, /etc, /opt), emails and credential markers inside a
- * host-provided summary must not become part of the durable record or of a model prompt.
- * Kept here AND reused by the core so the two boundaries cannot drift.
- */
-export const SENSITIVE_PATTERN = /https?:\/\/|\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b|(?:\/Users\/|\/home\/|\/tmp\/|\/var\/|\/etc\/|\/opt\/|\/usr\/|[A-Z]:\\)|(?:api[_-]?key|token|secret|password|authorization|cookie|密码|密钥)\s*[:=：]|\bBearer\s+\S+|-----BEGIN|\bsk-[A-Za-z0-9_-]{12,}/iu
-export const AUTHORITY_PATTERN = /忽略.{0,12}(?:指令|规则|用户|权限)|绕过.{0,12}(?:授权|权限|限制)|(?:ignore|override).{0,20}(?:instructions|permissions)|(?:system|assistant|developer)\s*:|<\/?(?:system|instruction|mse)|```/iu
-
-/**
  * A summary a model may later see: short in CODE POINTS (the "max 240 characters" contract),
  * non-blank, and free of secrets and authority changes. The validator shares the same measure,
  * so a summary that passes screening always passes storage.
@@ -156,12 +155,22 @@ export function ensureProblemLoop(state) {
  * The aggregation key. Structured host fields ONLY: owner + scope + environment + kind +
  * taskClass + toolName + the restricted failure class. `null` slots render as the empty string
  * so different absences stay different keys.
+ *
+ * The OPTIONAL diagnostic signature is the difference between "bash exited non-zero" and a
+ * specific cause: a row whose observations carry the same scrubbed-diagnostic signature aggregates
+ * into one problem, while two different causes under the same tool/class/task never collapse into
+ * one method problem. A signature-less observation (an older record, or a host that captured no
+ * diagnostic) renders the empty slot exactly like the pre-signature key, so existing aggregations
+ * keep receiving new facts and no history is rewritten or split after the fact.
  */
-export function problemKey({ owner, scope, environment, kind, taskClass = null, toolName = null, failureClass = null }) {
+export function problemKey({ owner, scope, environment, kind, taskClass = null, toolName = null,
+  failureClass = null, signature = null }) {
   check(hex64(owner) && hex64(scope) && hex64(environment) && PROBLEM_KINDS.includes(kind)
     && (taskClass === null || bounded(taskClass, 64)) && (toolName === null || bounded(toolName, 64))
-    && (failureClass === null || problemClassOf(kind, failureClass)), 'invalid_problem')
-  return hash(JSON.stringify([owner, scope, environment, kind, taskClass ?? '', toolName ?? '', failureClass ?? '']))
+    && (failureClass === null || problemClassOf(kind, failureClass))
+    && (signature === null || hex64(signature)), 'invalid_problem')
+  return hash(JSON.stringify([owner, scope, environment, kind, taskClass ?? '', toolName ?? '',
+    failureClass ?? '', signature ?? '']))
 }
 
 /** The failure vocabulary a kind may carry: corrections carry none, checker verdicts one. */
@@ -272,7 +281,8 @@ function recoveryRepairValid(problemId, authorization) {
 export function problemRowValid(row) {
   return isPlainObject(row)
     && Object.keys(row).every(key => ['id', 'key', 'kind', 'state', 'source', 'scope', 'environment', 'owner',
-      'taskClass', 'toolName', 'failureClass', 'summary', 'evidenceRevision', 'attemptedRevision',
+      'taskClass', 'toolName', 'failureClass', 'signature', 'capsules', 'capsuleDropped', 'summary',
+      'evidenceRevision', 'attemptedRevision',
       'lessonId', 'lessonVersion', 'evidence', 'count', 'firstAt', 'lastAt', 'updatedAt', 'reason',
       'nextAttemptAt', 'ticket', 'origin', 'recoveryRepair'].includes(key))
     // `origin` is written by this build for every NEW row and tolerated as ABSENT for a document
@@ -280,6 +290,13 @@ export function problemRowValid(row) {
     // recover from, and the plan says so instead of borrowing a route).
     && (row.origin === undefined || row.origin === null || problemOriginValid(row.origin))
     && (row.recoveryRepair === undefined || recoveryRepairValid(row.id, row.recoveryRepair))
+    // The optional evidence fields are absent for every row written before capsules existed —
+    // an old document keeps validating, and no reader may initialise them on a read.
+    && (row.signature === undefined || row.signature === null || hex64(row.signature))
+    && (row.capsules === undefined || (Array.isArray(row.capsules)
+      && row.capsules.length <= CAPSULES_PER_PROBLEM && row.capsules.every(capsuleValid)))
+    && (row.capsuleDropped === undefined || (Number.isSafeInteger(row.capsuleDropped)
+      && row.capsuleDropped >= 0 && row.capsuleDropped <= PROBLEM_COUNT_CAP))
     && hex64(row.id) && hex64(row.key) && PROBLEM_KINDS.includes(row.kind) && PROBLEM_STATES.includes(row.state)
     && PROBLEM_SOURCES.includes(row.source) && hex64(row.scope) && hex64(row.environment) && hex64(row.owner)
     && (row.taskClass === null || bounded(row.taskClass, 64)) && (row.toolName === null || bounded(row.toolName, 64))
@@ -334,7 +351,9 @@ function pruneSeenEvents(loop, now) {
  * @param state - working state (must already carry problemLoop from ensureProblemLoop).
  * @param now - engine clock.
  * @param input - validated observation: `{ eventId, kind, source, scope, environment, owner,
- *   taskClass, toolName, failureClass, summary, turnHash, routeId? }`.
+ *   taskClass, toolName, failureClass, summary, turnHash, routeId?, signature?, failure? }`.
+ *   `failure` is an ALREADY-SCREENED capsule (src/failure-evidence.mjs); its `signature` narrows
+ *   the aggregation so two different causes under the same class never collapse into one problem.
  * @returns `{ ok, duplicate?, skipped?, id?, problem?, ready? }` — `ready` is true only when
  *   this problem may consume reflection budget right now.
  */
@@ -343,7 +362,8 @@ export function observeInState(state, now, input) {
   const loop = ensureProblemLoop(state)
   pruneSeenEvents(loop, now)
   const { eventId, kind, source, scope, environment, owner, taskClass, toolName, failureClass, summary, turnHash } = input
-  const id = problemKey({ owner, scope, environment, kind, taskClass, toolName, failureClass })
+  const signature = input.signature ?? null
+  const id = problemKey({ owner, scope, environment, kind, taskClass, toolName, failureClass, signature })
   // The dedupe identity is scoped to the FULL host context, never the bare call id: the same
   // locally-numbered call in another project, session or environment is a different fact, and a
   // replay of THIS context must dedupe against THIS problem only.
@@ -366,12 +386,22 @@ export function observeInState(state, now, input) {
     check(loop.problems.length < PROBLEM_LIMIT, 'problem_ledger_full')
     row = { id, key: id, kind, state: 'observed', source, scope, environment, owner,
       taskClass: taskClass ?? null, toolName: toolName ?? null, failureClass: failureClass ?? null,
+      signature,
       summary, evidenceRevision: 0, attemptedRevision: 0, lessonId: null, lessonVersion: null,
       evidence: [], count: 0, firstAt: now, lastAt: now, updatedAt: now, reason: null,
       nextAttemptAt: 0, ticket: null, origin }
     loop.problems.push(row)
   } else if (origin !== null) {
     row.origin = origin
+  }
+  // The screened capsule rides with THIS observation only: a redelivery returned above as a
+  // duplicate never adds one, and each distinct event contributes at most one. Eviction keeps the
+  // newest capsules and counts what left; problem identity, counts and the ledger never move.
+  if (isPlainObject(input.failure)) {
+    check(capsuleValid(input.failure) && (input.failure.signature ?? null) === signature
+      && input.failure.failureClass === (failureClass ?? ''), 'invalid_problem')
+    appendCapsuleToRow(row, input.failure)
+    enforceCapsuleBudget(loop)
   }
   const entry = { eventId: identity, turnHash, at: now }
   const appended = row.evidence.length >= EVIDENCE_LIMIT
@@ -381,6 +411,13 @@ export function observeInState(state, now, input) {
   row.evidenceRevision += 1
   row.lastAt = now
   row.updatedAt = now
+  // Historical quota waits no longer hold a revision. Keep the original document loadable,
+  // then retire this obsolete state on the next real observation.
+  if (row.state === 'waiting_budget' && (row.reason === null || row.reason === 'reflection_budget')) {
+    row.state = row.evidenceRevision >= INDEPENDENT_THRESHOLD ? 'eligible' : 'observed'
+    row.nextAttemptAt = 0
+    row.reason = 'legacy_reflection_wait_removed'
+  }
   if (row.recoveryRepair?.state === 'authorized') {
     row.recoveryRepair = { ...row.recoveryRepair, state: 'superseded', supersededAt: now }
   }
@@ -388,10 +425,8 @@ export function observeInState(state, now, input) {
   // and state stay untouched — a second reflection over the same problem must not start while the
   // first is still authorised. The settling result decides what the new evidence means.
   if (row.state === 'reflecting') {
-    row.reason = null
     return { ok: true, duplicate: false, id, problem: { ...row }, ready: false }
   }
-  row.reason = null
   row.ticket = null
   // Re-state only when the new evidence actually changes the problem's meaning. The linked
   // candidate (lessonId/version) is HISTORY and is NEVER cleared by a new observation: the old
@@ -401,6 +436,7 @@ export function observeInState(state, now, input) {
   } else if (row.state === 'closed' || row.state === 'abstained' || row.state === 'waiting_evidence'
     || (row.state === 'candidate_created' && row.evidenceRevision > row.attemptedRevision)) {
     row.state = row.evidenceRevision >= INDEPENDENT_THRESHOLD ? 'eligible' : 'observed'
+    row.reason = null
   }
   const ready = reflectionReady(row, now)
   if (ready) row.reason = 'ready_for_reflection'
@@ -457,7 +493,8 @@ export function problemRecoveryRefusal(row, authorization = row.recoveryRepair ?
  * passed is asked again: the daily/cooldown gate re-reads live budget inside the request.
  */
 export function reflectionReady(row, now, authorization = row.recoveryRepair ?? null) {
-  return problemRecoverable(row, authorization) && now >= row.nextAttemptAt
+  const legacyWait = row.state === 'waiting_budget' && (row.reason === null || row.reason === 'reflection_budget')
+  return problemRecoverable(row, authorization) && (legacyWait || now >= row.nextAttemptAt)
 }
 
 /** Bind a reflection ticket to the problem INSIDE the same transaction that issued the ticket. */
@@ -482,8 +519,7 @@ export function beginReflectionInState(row, now, ticket, authorization = row.rec
  * polls on its own bounded timer instead of spinning.
  */
 export function parkProblemInState(row, code, now, until) {
-  row.state = code === 'reflection_budget' ? 'waiting_budget' : row.state
-  row.reason = String(code ?? 'reflection_budget').slice(0, 64)
+  row.reason = String(code ?? 'awaiting_reflection').slice(0, 64)
   const requested = Number.isFinite(until) ? until : now + BUDGET_WAIT_MS
   const safe = requested > now ? requested : now + BUDGET_WAIT_MS
   row.nextAttemptAt = Math.max(row.nextAttemptAt, safe)
@@ -615,7 +651,9 @@ export function problemStatusView(loop, { now, owner, scope, limit = 20, recover
           provider: row.origin.provider, model: row.origin.model,
           reasoningEffort: row.origin.reasoningEffort,
           routeId: row.origin.routeId ?? null, at: row.origin.at },
-      evidence: row.evidence.slice(-EVIDENCE_LIMIT) }
+      evidence: row.evidence.slice(-EVIDENCE_LIMIT),
+      // COUNTS only: the status surface never becomes a prompt, and capsule text stays out of it.
+      capsules: (row.capsules ?? []).length, capsuleDropped: row.capsuleDropped ?? 0 }
   }
   return { ok: true, format: loop.format, total: loop.problems.length, scoped: scoped.length,
     recoverable: scoped.filter(row => problemRecoverable(row, authorizationFor(row))).length,

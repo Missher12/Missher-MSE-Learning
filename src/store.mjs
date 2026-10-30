@@ -60,8 +60,13 @@ export class LessonStore {
       value = { id: key, owner: this.owner, bytes: legacy?.bytes ?? 0, offered: [...(legacy?.offered ?? [])] }
     }
     check(value?.id === key && value.owner === this.owner && Number.isSafeInteger(value.bytes)
-      && value.bytes >= 0 && value.bytes <= 1536 && Array.isArray(value.offered) && value.offered.length <= 32
+      && value.bytes >= 0 && Array.isArray(value.offered) && value.offered.length <= 32
       && value.offered.every(x => typeof x === 'string' && /^lesson_[a-f0-9]{24}:\d+$/u.test(x)), 'invalid_session_state')
+    check(value.lastTurn === undefined || /^[a-f0-9]{64}$/u.test(value.lastTurn), 'invalid_session_state')
+    check(value.turnOffered === undefined || (Array.isArray(value.turnOffered) && value.turnOffered.length <= 32
+      && value.turnOffered.every(x => /^lesson_[a-f0-9]{24}:\d+$/u.test(x))), 'invalid_session_state')
+    check(value.turnBytes === undefined || (Number.isSafeInteger(value.turnBytes) && value.turnBytes >= 0
+      && value.turnBytes <= 1536), 'invalid_session_state')
     return value
   }
   reserveSession(session) {

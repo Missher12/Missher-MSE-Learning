@@ -66,14 +66,23 @@ assert.deepEqual(strays, [], `source tree carries Mac metadata: ${strays.slice(0
 // shape that cannot leak: `.probes/` (private evidence), coordination notes and local scratch are
 // simply not members, instead of being excluded by names someone remembered to list.
 const published = publicFiles(root)
-assert.ok(published.includes('src/index.mjs') && published.length > 100,
-  'the public set must be a real source tree')
+// The public set must still be the real source closure of THIS package: every packaged file, the
+// package entry points, and the shipped test with its sanitized fixture are all members. This is a
+// manifest-derived check, not a magic size that a stub could walk through.
+const entryPoints = [pkg.main, ...Object.values(pkg.exports ?? {}).map(v => typeof v === 'string' ? v : v?.default)]
+  .filter(Boolean).map(p => p.replace(/^\.\//u, ''))
+for (const file of pkg.files) assert.ok(published.includes(file), `the public set is missing packaged file ${file}`)
+for (const file of entryPoints) assert.ok(published.includes(file), `the public set is missing entry point ${file}`)
+for (const file of ['rebuild/rebuild.test.mjs', 'tests/fixtures/native-a3-diagnostic.json', 'scripts/pack.mjs']) {
+  assert.ok(published.includes(file), `the public set is missing required source ${file}`)
+}
 assert.equal(published.some(relative => relative.startsWith('.')), false,
   'the public set never carries a dot-directory')
 execFileSync('tar', ['-czf', target, '-C', root, ...published],
 { env: { ...process.env, COPYFILE_DISABLE: '1' } })
 
-const sourceCheck = assertPortable(target, { requireEntries: ['src/index.mjs', 'package.json', 'tests/upgrade.test.mjs', 'scripts/pack-source.mjs'] })
+const sourceCheck = assertPortable(target, { requireEntries: ['rebuild/root.mjs', 'package.json',
+  'tests/fixtures/native-a3-diagnostic.json', 'scripts/pack-source.mjs'] })
 
 // The shipped runtime artifacts must be portable too.
 const runtime = []

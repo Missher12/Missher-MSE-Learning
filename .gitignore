@@ -1,4 +1,6 @@
 node_modules/
+/node_modules
+/delivery/
 dist/
 __pycache__/
 *.pyc
