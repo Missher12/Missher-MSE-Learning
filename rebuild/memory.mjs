@@ -34,9 +34,21 @@ import { isAbsolute, join } from 'node:path'
 import { LearningError, MAX_STORE_BYTES, check } from '../src/store.mjs'
 import { problemLoopValid, ensureProblemLoop } from '../src/problems.mjs'
 
-export const MEMORY_FORMAT = 3
+// EVOLUTION016: format 4 adds the version evidence ledger (methodStats / methodHistory /
+// receipt.methodFeedback / request.methodFingerprint). Format 3 stays READ-COMPATIBLE: a pure
+// read never rewrites it, and the first real write transaction migrates it atomically.
+export const MEMORY_FORMAT = 4
+export const READABLE_FORMATS = [3, 4]
 export const ENTRY_STATUSES = ['user_rule', 'pending', 'check_passed', 'needs_revision', 'retired']
 export const TURN_OUTCOMES = ['failed', 'cancelled', 'unknown', 'verified']
+export const METHOD_HISTORY_LIMIT = 128
+export const METHOD_HISTORY_ROW_BYTES = 6144
+export const METHOD_FEEDBACK_LIMIT = 12
+export const METHOD_STATS_COVERAGES = ['complete', 'since_upgrade']
+export const METHOD_HISTORY_STATUSES = ['pending', 'check_passed', 'needs_revision', 'retired',
+  'legacy_partial']
+export const METHOD_FEEDBACK_KINDS = ['recurrence', 'check_pass', 'check_fail']
+export const OFFER_MODES = ['method', 'guard']
 export const ENTRY_LIMIT = 256
 export const RECEIPT_LIMIT = 256
 export const REQUEST_LIMIT = 96
@@ -60,6 +72,25 @@ export const boundedUnits = (value, maxUnits) => {
   }
   return out
 }
+/**
+ * REVIEW-FIX1: a code-point/byte bounded clamp for LEGACY snapshots whose original bounds are
+ * unknown. It never splits a surrogate pair and never exceeds either bound; it is NOT used for a
+ * legal current edition (that one is archived verbatim).
+ */
+export const boundedCodepoints = (value, maxCodepoints, maxBytes) => {
+  const text = String(value ?? '')
+  let out = ''
+  let points = 0
+  let bytes = 0
+  for (const ch of text) {
+    const size = Buffer.byteLength(ch, 'utf8')
+    if (points + 1 > maxCodepoints || bytes + size > maxBytes) break
+    out += ch
+    points += 1
+    bytes += size
+  }
+  return out
+}
 const isPlainObject = value => value !== null && typeof value === 'object'
   && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
 const hex64 = value => typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value)
@@ -76,11 +107,63 @@ const usageValid = value => value === null || (isPlainObject(value)
     || (Number.isSafeInteger(value[key]) && value[key] >= 0))
   && typeof value.known === 'boolean')
 
+/** The CURRENT version's own statistics window (EVOLUTION016). Family totals stay on the entry. */
+const methodStatsValid = value => isPlainObject(value)
+  && Object.keys(value).every(key => ['version', 'since', 'coverage', 'injected', 'recurrences',
+    'checkPasses', 'checkFails'].includes(key))
+  && Number.isSafeInteger(value.version) && value.version >= 1
+  && Number.isFinite(value.since)
+  && METHOD_STATS_COVERAGES.includes(value.coverage)
+  && Number.isSafeInteger(value.injected) && value.injected >= 0
+  && Number.isSafeInteger(value.recurrences) && value.recurrences >= 0
+  && Number.isSafeInteger(value.checkPasses) && value.checkPasses >= 0
+  && Number.isSafeInteger(value.checkFails) && value.checkFails >= 0
+
+/** One archived method edition: instruction/lesson kept, statistics only when they were real. */
+const historyRowValid = row => isPlainObject(row)
+  && Object.keys(row).every(key => ['entryId', 'version', 'instruction', 'applicability', 'exclusions',
+    'visibility', 'lesson', 'originScope', 'originEnvironment', 'originSession', 'originSessions',
+    'stats', 'status', 'reason', 'archivedAt', 'evidenceHash'].includes(key))
+  && entryHex(row.entryId)
+  && Number.isSafeInteger(row.version) && row.version >= 1
+  && typeof row.instruction === 'string' && [...row.instruction].length >= 1
+  && [...row.instruction].length <= 240 && Buffer.byteLength(row.instruction, 'utf8') <= 480
+  && (row.applicability === '' || boundedLabel(row.applicability, 160))
+  && (row.exclusions === '' || boundedLabel(row.exclusions, 160))
+  && ['global', 'scoped'].includes(row.visibility)
+  && (row.lesson === null || (isPlainObject(row.lesson) && hex64(row.lesson.problemId)
+    && Array.isArray(row.lesson.evidenceIds) && row.lesson.evidenceIds.every(hex64)
+    && Array.isArray(row.lesson.repairSteps) && row.lesson.repairSteps.length >= 1
+    && isPlainObject(row.lesson.verification) && typeof row.lesson.verification.check === 'string'
+    && Buffer.byteLength(JSON.stringify(row.lesson), 'utf8') <= 4096))
+  && hex64(row.originScope) && hex64(row.originEnvironment)
+  && (row.originSession === null || boundedLabel(row.originSession, 512))
+  // REVIEW-FIX1: the bounded provenance frozen with the evidence capsules (≤4 sessions). Old
+  // rows without it keep loading; unknown provenance is admitted only as a fixed reason.
+  && (row.originSessions === undefined || (Array.isArray(row.originSessions)
+    && row.originSessions.length <= 4 && row.originSessions.every(session => boundedLabel(session, 512))))
+  && (row.stats === null || methodStatsValid(row.stats))
+  && METHOD_HISTORY_STATUSES.includes(row.status)
+  && (row.reason === null || boundedLabel(row.reason, 64))
+  && Number.isFinite(row.archivedAt)
+  && (row.evidenceHash === null || hex64(row.evidenceHash))
+
+/** The per-turn proof that a version was already counted — survives checkEvents rotation. */
+const methodFeedbackValid = row => isPlainObject(row)
+  && Object.keys(row).every(key => ['entryId', 'version', 'kind', 'checkId', 'at', 'voided'].includes(key))
+  && entryHex(row.entryId) && Number.isSafeInteger(row.version) && row.version >= 1
+  && METHOD_FEEDBACK_KINDS.includes(row.kind)
+  && (row.checkId === null || boundedLabel(row.checkId, 128))
+  && Number.isFinite(row.at)
+  // REVIEW-FIX1: a cancelled turn rolls its credit back but KEEPS the proof row (voided), so the
+  // same turn can never be counted twice after the rollback.
+  && (row.voided === undefined || typeof row.voided === 'boolean')
+
 const entryValid = entry => isPlainObject(entry)
   && Object.keys(entry).every(key => ['id', 'type', 'status', 'instruction', 'applicability', 'exclusions',
-    'visibility', 'originScope', 'originEnvironment', 'originSession', 'lesson', 'problemSignature',
+    'visibility', 'originScope', 'originEnvironment', 'originSession', 'originSessions', 'lesson', 'problemSignature',
     'version', 'parentVersion', 'superseded', 'injected', 'recurrences', 'createdAt', 'updatedAt',
-    'lastInjectedAt', 'evidenceHash', 'factDigest', 'digestDay', 'importedFrom',
+    'lastInjectedAt', 'evidenceHash', 'methodStats', 'factDigest', 'digestDay', 'importedFrom',
     'sourceDigest'].includes(key))
   && entryHex(entry.id)
   && ['rule', 'lesson', 'digest'].includes(entry.type)
@@ -92,6 +175,13 @@ const entryValid = entry => isPlainObject(entry)
   && ['global', 'scoped'].includes(entry.visibility)
   && hex64(entry.originScope) && hex64(entry.originEnvironment)
   && (entry.originSession === null || boundedLabel(entry.originSession, 512))
+  // REVIEW-FIX2: the edition's OWN bounded birth-source snapshot (2..4 sessions). Absent means
+  // explicitly unknown; old libraries without it stay valid. Overflow is stored as unknown, not
+  // as a silently truncated subset.
+  && (entry.originSessions === undefined || (Array.isArray(entry.originSessions)
+    && entry.originSessions.length >= 2 && entry.originSessions.length <= 4
+    && entry.originSessions.every(session => boundedLabel(session, 512))
+    && new Set(entry.originSessions).size === entry.originSessions.length))
   && (entry.lesson === null || (isPlainObject(entry.lesson) && hex64(entry.lesson.problemId)
     && Array.isArray(entry.lesson.evidenceIds) && entry.lesson.evidenceIds.every(hex64)
     && Array.isArray(entry.lesson.repairSteps) && entry.lesson.repairSteps.length >= 1
@@ -111,6 +201,9 @@ const entryValid = entry => isPlainObject(entry)
   && Number.isFinite(entry.createdAt) && Number.isFinite(entry.updatedAt)
   && (entry.lastInjectedAt === null || Number.isFinite(entry.lastInjectedAt))
   && (entry.evidenceHash === null || hex64(entry.evidenceHash))
+  // EVOLUTION016: the CURRENT version's own window. Optional — a format3 entry keeps loading.
+  && (entry.methodStats === undefined || entry.methodStats === null
+    || methodStatsValid(entry.methodStats))
   && (entry.factDigest === undefined || entry.factDigest === null || hex64(entry.factDigest))
   && (entry.digestDay === undefined || entry.digestDay === null || dayText(entry.digestDay))
   && (entry.importedFrom === null || (isPlainObject(entry.importedFrom) && hex64(entry.importedFrom.sourceDigest)
@@ -119,15 +212,24 @@ const entryValid = entry => isPlainObject(entry)
 
 const receiptValid = row => isPlainObject(row)
   && Object.keys(row).every(key => ['id', 'turnKey', 'at', 'bytes', 'offered', 'settled', 'outcome',
-    'evidenceHash', 'source'].includes(key))
+    'evidenceHash', 'source', 'methodFeedback'].includes(key))
   && hex64(row.id) && hex64(row.turnKey) && Number.isFinite(row.at)
   && Number.isSafeInteger(row.bytes) && row.bytes >= 0 && row.bytes <= 1536
   && Array.isArray(row.offered) && row.offered.length <= 4
-  && row.offered.every(x => entryHex(x.id) && Number.isSafeInteger(x.version))
+  && row.offered.every(x => isPlainObject(x) && entryHex(x.id) && Number.isSafeInteger(x.version)
+    && Object.keys(x).every(key => ['id', 'version', 'mode'].includes(key))
+    && (x.mode === undefined || OFFER_MODES.includes(x.mode)))
   && typeof row.settled === 'boolean'
   && (row.outcome === null || TURN_OUTCOMES.includes(row.outcome))
   && (row.evidenceHash === null || hex64(row.evidenceHash))
   && (row.source === null || (isPlainObject(row.source) && hex64(row.source.routeId)))
+  // EVOLUTION016: per-turn feedback identity. Old receipts have NO array and keep loading; a
+  // 4-offer turn can carry at most 12 (entry,version,kind) rows.
+  && (row.methodFeedback === undefined
+    || (Array.isArray(row.methodFeedback) && row.methodFeedback.length <= METHOD_FEEDBACK_LIMIT
+      && row.methodFeedback.every(methodFeedbackValid)
+      && new Set(row.methodFeedback.map(x => `${x.entryId}\u0000${x.version}\u0000${x.kind}`)).size
+        === row.methodFeedback.length))
 
 const factValid = row => isPlainObject(row)
   && Object.keys(row).every(key => ['id', 'turnKey', 'sessionId', 'day', 'at', 'settledAt',
@@ -175,9 +277,23 @@ const revisionRefValid = ref => isPlainObject(ref)
       && Number.isSafeInteger(ref.version) && ref.version >= 1 && hex64(ref.digest))
     : (Number.isSafeInteger(ref.count) && ref.count >= 2 && ref.count <= 8))
 
+const correctionContextItemValid = item => isPlainObject(item)
+  && Object.keys(item).every(key => ['role', 'turn', 'text', 'source'].includes(key))
+  && (item.role === 'user' || item.role === 'assistant')
+  && (item.turn === null || Number.isSafeInteger(item.turn))
+  && typeof item.text === 'string' && item.text.length > 0 && item.text.length <= 512
+  && (item.source === 'messages' || item.source === 'events')
+const correctionDecisionValid = row => isPlainObject(row)
+  && Object.keys(row).every(key => ['durability', 'scope', 'basis', 'result', 'reason'].includes(key))
+  && ['durable', 'one_off', 'uncertain'].includes(row.durability)
+  && ['global', 'project', 'uncertain'].includes(row.scope)
+  && (row.basis === undefined || boundedLabel(row.basis, 160))
+  && (row.result === 'saved' || row.result === 'ignored')
+  && (row.reason === null || row.reason === undefined || boundedLabel(row.reason, 64))
 const correctionValid = row => isPlainObject(row)
   && Object.keys(row).every(key => ['id', 'sessionId', 'turnId', 'at', 'day', 'userText', 'assistantBrief',
-    'cwd', 'contentDigest', 'status', 'reason', 'ticket', 'entryIds', 'revision'].includes(key))
+    'cwd', 'contentDigest', 'status', 'reason', 'ticket', 'entryIds', 'revision', 'context',
+    'decisions', 'contextOmitted'].includes(key))
   // rows written before this field stay valid: absent OR null are both accepted
   && (row.revision === undefined || row.revision === null || revisionRefValid(row.revision))
   && (row.cwd === null || boundedLabel(row.cwd, 512))
@@ -191,13 +307,21 @@ const correctionValid = row => isPlainObject(row)
   && (row.reason === null || boundedLabel(row.reason, 64))
   && (row.ticket === null || boundedLabel(row.ticket, 64))
   && Array.isArray(row.entryIds) && row.entryIds.length <= 2
+  // CONTEXT-SCOPE-016 optional bounded fields: absent in old candidates (format 3/4 stays valid).
+  && (row.context === undefined || row.context === null || (Array.isArray(row.context)
+    && row.context.length <= 4 && row.context.every(correctionContextItemValid)
+    && row.context.reduce((units, item) => units + item.text.length, 0) <= 1536))
+  && (row.decisions === undefined || row.decisions === null || (Array.isArray(row.decisions)
+    && row.decisions.length <= 2 && row.decisions.every(correctionDecisionValid)))
+  && (row.contextOmitted === undefined || row.contextOmitted === null
+    || boundedLabel(row.contextOmitted, 160))
 
 const requestValid = row => isPlainObject(row)
   && Object.keys(row).every(key => ['ticket', 'kind', 'at', 'problemId', 'entryId', 'digestDay', 'requestHash',
     'dispatchHash', 'dispatchedAt', 'settled', 'terminal', 'usage', 'maxTokens', 'evidenceIds', 'tokenHashes',
     'parentVersion', 'routeId', 'material', 'retryOf', 'digestFacts', 'digestThrough', 'sourceSessionId',
     'sourceRoute', 'outputBytes', 'finishKind', 'digestKeys', 'digestExcluded', 'digestAdmission',
-    'verdictCode', 'verdictFields'].includes(key))
+    'verdictCode', 'verdictFields', 'methodFingerprint'].includes(key))
   // OPTIONAL MSE17 output audit: absent in pre-MSE17 libraries — they must keep loading as-is.
   && (row.outputBytes === undefined || (Number.isSafeInteger(row.outputBytes)
     && row.outputBytes >= 0 && row.outputBytes <= 65_536))
@@ -269,6 +393,9 @@ const requestValid = row => isPlainObject(row)
   && (row.verdictFields === undefined || row.verdictFields === null
     || (Array.isArray(row.verdictFields) && row.verdictFields.length <= 8
       && row.verdictFields.every(name => boundedLabel(name, 24))))
+  // EVOLUTION016: the frozen parent mechanism this revision was requested against.
+  && (row.methodFingerprint === undefined || row.methodFingerprint === null
+    || hex64(row.methodFingerprint))
 
 const materialValid = row => isPlainObject(row)
   && Object.keys(row).every(key => ['key', 'terminal', 'attempts', 'autoRetriesUsed', 'unknownCost',
@@ -287,14 +414,14 @@ const checkEventValid = row => isPlainObject(row)
 
 export function createDoc() {
   return { format: MEMORY_FORMAT, updatedAt: 0, entries: [], receipts: [], requests: [], turnFacts: [],
-    materials: [], checkEvents: [], routes: [], corrections: [],
+    materials: [], checkEvents: [], routes: [], corrections: [], methodHistory: [],
     controls: { userPaused: false },
     digest: { lastDoneDay: null, backlog: [], lastRunAt: null, waitReason: null, days: [] },
     turnUsage: [], problemLoop: undefined }
 }
 
 export function validateDoc(doc) {
-  if (!isPlainObject(doc) || doc.format !== MEMORY_FORMAT) throw new LearningError('invalid_memory')
+  if (!isPlainObject(doc) || !READABLE_FORMATS.includes(doc.format)) throw new LearningError('invalid_memory')
   if (!Array.isArray(doc.entries) || doc.entries.length > ENTRY_LIMIT || !doc.entries.every(entryValid)) {
     throw new LearningError('invalid_memory')
   }
@@ -312,6 +439,14 @@ export function validateDoc(doc) {
   }
   if (!Array.isArray(doc.checkEvents) || doc.checkEvents.length > 128
     || !doc.checkEvents.every(checkEventValid)) throw new LearningError('invalid_memory')
+  // EVOLUTION016: the archived method ledger. Absent in a format3 library (defaulted, never
+  // written on a pure read); bounded by count, by unique (entryId,version) and by row bytes.
+  if (doc.methodHistory === undefined) doc.methodHistory = []
+  if (!Array.isArray(doc.methodHistory) || doc.methodHistory.length > METHOD_HISTORY_LIMIT
+    || !doc.methodHistory.every(row => historyRowValid(row)
+      && Buffer.byteLength(JSON.stringify(row), 'utf8') <= METHOD_HISTORY_ROW_BYTES)
+    || new Set(doc.methodHistory.map(row => `${row.entryId}\u0000${row.version}`)).size
+      !== doc.methodHistory.length) throw new LearningError('invalid_memory')
   if (!isPlainObject(doc.controls) || typeof doc.controls.userPaused !== 'boolean'
     || Object.keys(doc.controls).some(key => key !== 'userPaused')) throw new LearningError('invalid_memory')
   if (doc.corrections === undefined) doc.corrections = [] // additive default: old docs migrate, nothing lost
@@ -358,6 +493,41 @@ export function validateDoc(doc) {
 
 export const memoryOf = doc => (doc.problemLoop === undefined ? ensureProblemLoop(doc) : doc.problemLoop)
 
+/**
+ * EVOLUTION016 format3 → format4 migration, executed ONLY inside the first real write transaction
+ * (a pure read never calls this). Old text/status/counters/gates are untouched. The one existing
+ * `superseded` snapshot of a LESSON becomes a partial history row — no statistics, no evidence
+ * hash and no lesson body are invented. User-rule snapshots never enter the method ledger.
+ */
+export function upgradeDocFormat(doc, now) {
+  if (doc.format !== 3) return doc
+  if (!Array.isArray(doc.methodHistory)) doc.methodHistory = []
+  for (const entry of doc.entries) {
+    if (entry.type !== 'lesson' || entry.superseded === null || entry.superseded === undefined) continue
+    const version = entry.superseded.version
+    if (!Number.isSafeInteger(version) || version < 1 || version >= entry.version) continue
+    if (doc.methodHistory.some(row => row.entryId === entry.id && row.version === version)) continue
+    if (doc.methodHistory.length >= METHOD_HISTORY_LIMIT) break
+    const row = {
+      entryId: entry.id, version,
+      instruction: boundedCodepoints(String(entry.superseded.instruction ?? ''), 240, 480),
+      applicability: boundedUnits(String(entry.applicability ?? ''), 160),
+      exclusions: boundedUnits(String(entry.exclusions ?? ''), 160),
+      visibility: entry.visibility, lesson: null,
+      originScope: entry.originScope, originEnvironment: entry.originEnvironment,
+      originSession: entry.originSession ?? null,
+      ...(Array.isArray(entry.originSessions) && entry.originSessions.length > 0
+        ? { originSessions: [...entry.originSessions] } : {}),
+      stats: null, status: 'legacy_partial', reason: 'legacy_superseded_partial',
+      archivedAt: Number.isFinite(now) ? now : Date.now(), evidenceHash: null,
+    }
+    if (row.instruction === '') continue // never fabricate a body that was not there
+    doc.methodHistory.push(row)
+  }
+  doc.format = MEMORY_FORMAT
+  return doc
+}
+
 export class MemoryStore {
   // Own tiny atomic store: temp+rename durability, one writer (the plugin process). A mutation is
   // committed ONLY when it completes without throwing and does not return the explicit rollback
@@ -381,6 +551,9 @@ export class MemoryStore {
   }
   transaction(mutate) {
     const doc = this.read()
+    // EVOLUTION016: ONE atomic format3→4 migration on the first real write; a ROLLBACK or a
+    // refusal throws the migrated copy away together with the mutation (the file is untouched).
+    if (doc.format === 3) upgradeDocFormat(doc, Date.now())
     const out = mutate(doc)
     if (out === ROLLBACK) return { ok: false, rolledBack: true }
     validateDoc(doc)

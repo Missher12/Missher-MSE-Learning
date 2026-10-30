@@ -1,0 +1,2714 @@
+{
+  "schema": "mse-recall-replay-v1",
+  "note": "24 hand-labelled regression cases; NOT a blind test.",
+  "generatedBy": "delivery/evolution016/gen-recall-fixture.mjs",
+  "cases": [
+    {
+      "id": "recall-01",
+      "category": "workspace",
+      "prompt": "帮我修这个 JSON 配置文件，解析一直失败",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_d3798caf923a9075a0a3ff1e",
+          "type": "lesson",
+          "status": "pending",
+          "instruction": "生成 JSON 时先删除结尾多余逗号并用 JSON.parse 预校验再写入",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "354b3e141d691a3b53b60bc1dac1fc1c191e62985958a6355ad276c68b0faf08",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "6d0aa112f7fd56317942c52620ddd0376019c0e1404f5ac8bc64fb1222f1acec"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "6d0aa112f7fd56317942c52620ddd0376019c0e1404f5ac8bc64fb1222f1acec"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "11442260f7d5d430a5b9dd5a2f245a78feddf9ea88a568188fbb06cfc0e6dfb0",
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2000,
+          "updatedAt": 2000,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_1ef36f56071c9e811db29609",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_30b79b52c61b2524c697b0ad",
+          "type": "lesson",
+          "status": "pending",
+          "instruction": "生成 JSON 时先删除结尾多余逗号并用 JSON.parse 预校验再写入",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "scoped",
+          "originScope": "5e69ec396579c3a8a12c81bfacf74b794304a3301e55d4af789ff06582871ce9",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "a1ec4925d764b8b8b9f5f44de631000584b38d5e51add13a6a71b9faa18a4a33",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "d1e6cee60f696f9433d56c192b9b21a43be433ef9ec926745da3e28653aae53d"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "d1e6cee60f696f9433d56c192b9b21a43be433ef9ec926745da3e28653aae53d"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "9836185efaea3ce7c1330faced9dafe2b08e6cfbbf5d57ec18b1647b923ffdda",
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 1800,
+          "updatedAt": 1800,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_d3798caf923a9075a0a3ff1e"
+        ],
+        "excluded": [
+          "mem_1ef36f56071c9e811db29609"
+        ],
+        "baseline": [
+          {
+            "id": "mem_d3798caf923a9075a0a3ff1e",
+            "version": 1,
+            "mode": "method"
+          }
+        ],
+        "bytes": 146
+      }
+    },
+    {
+      "id": "recall-02",
+      "category": "workspace",
+      "prompt": "JSON 配置文件里有尾随逗号，帮我重新生成并解析校验",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_c5213bae7825449a1da11173",
+          "type": "lesson",
+          "status": "pending",
+          "instruction": "生成 JSON 时先删除结尾多余逗号并用 JSON.parse 预校验再写入",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "bea2619057d4eb21898dea009b2113dbbeb796fb23f3d74d4db7da8453998714",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "02faf7f104a6013dbe8dbd85e5fa16116c9ec83ef8924fc4bc6ad643c7af5e0b"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "02faf7f104a6013dbe8dbd85e5fa16116c9ec83ef8924fc4bc6ad643c7af5e0b"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "bdbb83b47359bcb8d5061b19b367c359d80c66bf5599a7cb7823eb45f49bfbd0",
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2000,
+          "updatedAt": 2000,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_2e59eb718ac08d54a3362c23",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_e2c1c6ddaa84cd528c7cc666",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "不要读取工作区外的临时文件再写回",
+          "applicability": "处理工作区外的临时文件时",
+          "exclusions": "",
+          "visibility": "scoped",
+          "originScope": "5e69ec396579c3a8a12c81bfacf74b794304a3301e55d4af789ff06582871ce9",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 1900,
+          "updatedAt": 1900,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_c5213bae7825449a1da11173"
+        ],
+        "excluded": [
+          "mem_2e59eb718ac08d54a3362c23",
+          "mem_e2c1c6ddaa84cd528c7cc666"
+        ],
+        "baseline": [
+          {
+            "id": "mem_c5213bae7825449a1da11173",
+            "version": 1,
+            "mode": "method"
+          }
+        ],
+        "bytes": 146
+      }
+    },
+    {
+      "id": "recall-03",
+      "category": "workspace",
+      "prompt": "这个项目里的 JSON 配置文件解析失败，用项目规则修",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_72668685793031667d81f6bf",
+          "type": "lesson",
+          "status": "pending",
+          "instruction": "生成 JSON 时先删除结尾多余逗号并用 JSON.parse 预校验再写入",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "scoped",
+          "originScope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "98168d1ebb3be4207a0250bf90cdffeacc3e4e43c975fdbaeeb49e7ef0afc013",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "e9240843c131f747b6c3759a29c286b3be5684abe8c966c8d5fe1cd3c4643c25"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "e9240843c131f747b6c3759a29c286b3be5684abe8c966c8d5fe1cd3c4643c25"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "de36695e6e31f479b37e053e71340e9f6418389ad658a1150dcfc07e8599c500",
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2000,
+          "updatedAt": 2000,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_d3f26fd218331714c15afd3a",
+          "type": "lesson",
+          "status": "pending",
+          "instruction": "生成 JSON 时先删除结尾多余逗号并用 JSON.parse 预校验再写入",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "scoped",
+          "originScope": "5e69ec396579c3a8a12c81bfacf74b794304a3301e55d4af789ff06582871ce9",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "367090f76be25c9294920ee815361b2cd6f1c0ce52d5c74d65630e7cc56e14a7",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "323e6c54fd1b9f461fa7af4b196a8f179bd9f61ec5cec8b10e76bb3512d65e3a"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "323e6c54fd1b9f461fa7af4b196a8f179bd9f61ec5cec8b10e76bb3512d65e3a"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "3a5eb30b015b7dbea4ae08422c0f6852916b4e1f575b13b24e45be6a7f31df36",
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 1800,
+          "updatedAt": 1800,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_1c4ffb6dbe94801e498982f9",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_72668685793031667d81f6bf"
+        ],
+        "excluded": [
+          "mem_1c4ffb6dbe94801e498982f9",
+          "mem_d3f26fd218331714c15afd3a"
+        ],
+        "baseline": [
+          {
+            "id": "mem_72668685793031667d81f6bf",
+            "version": 1,
+            "mode": "method"
+          }
+        ],
+        "bytes": 152
+      }
+    },
+    {
+      "id": "recall-04",
+      "category": "workspace",
+      "prompt": "临时工作区里的 JSON 文件解析失败，先修好再交付",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_d98ff57e7be3f35c0a8cf387",
+          "type": "lesson",
+          "status": "pending",
+          "instruction": "生成 JSON 时先删除结尾多余逗号并用 JSON.parse 预校验再写入",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "scoped",
+          "originScope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "31fed6bf305b8b3f2ddfb8b268514e4e937131958b800b5d2b7d9f4873e07f43",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "b6199ca114603e81fae5466a96d38aa45968215e6330e33ea43207d3706e1e2d"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "b6199ca114603e81fae5466a96d38aa45968215e6330e33ea43207d3706e1e2d"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "90d60a92a073e99ef92a3d413c9a136b4174b3dffb013a094fcb291e3dfd838f",
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2000,
+          "updatedAt": 2000,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_fe7d27f90438f50e961eaa90",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "临时工作区清理时不要删除 .gitkeep 与版本文件",
+          "applicability": "清理临时工作区时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 1850,
+          "updatedAt": 1850,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_d8de62b406438f77d781d4c0",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_d98ff57e7be3f35c0a8cf387",
+          "mem_fe7d27f90438f50e961eaa90"
+        ],
+        "excluded": [
+          "mem_d8de62b406438f77d781d4c0"
+        ],
+        "baseline": [
+          {
+            "id": "mem_d98ff57e7be3f35c0a8cf387",
+            "version": 1,
+            "mode": "method"
+          },
+          {
+            "id": "mem_fe7d27f90438f50e961eaa90",
+            "version": 1,
+            "mode": "method"
+          }
+        ],
+        "bytes": 225
+      }
+    },
+    {
+      "id": "recall-05",
+      "category": "correction",
+      "prompt": "以后生成 JSON 都先整体解析校验再写入",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_91ddd9308b5e66461ea3b95a",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "生成 JSON 前先整体解析校验并删除尾随逗号再写入",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2100,
+          "updatedAt": 2100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_2831e690ec1431f9dcff5b5f",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_91ddd9308b5e66461ea3b95a"
+        ],
+        "excluded": [
+          "mem_2831e690ec1431f9dcff5b5f"
+        ],
+        "baseline": [
+          {
+            "id": "mem_91ddd9308b5e66461ea3b95a",
+            "version": 1,
+            "mode": "method"
+          }
+        ],
+        "bytes": 78
+      }
+    },
+    {
+      "id": "recall-06",
+      "category": "correction",
+      "prompt": "这次任务里的 JSON 随便写就行，不要校验",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_17792d3b42c10a7c8eb24e43",
+          "type": "lesson",
+          "status": "pending",
+          "instruction": "生成 JSON 时先删除结尾多余逗号并用 JSON.parse 预校验再写入",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "3b6d49310eb26ce17ac9891c161db42e5bcab66782c0e32c7d6101b557543d82",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "b4c170fceb883d2a5adc98520237bf4de54633d146a984bf1b05a01bcf2d72e2"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "b4c170fceb883d2a5adc98520237bf4de54633d146a984bf1b05a01bcf2d72e2"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "76d5a2b7cafcd383a7cb99c687580ef388d102aedfe8dff65864285169928cde",
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2000,
+          "updatedAt": 2000,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_13fe0c6c7985c2354409775e",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_a2265d2bdf6c90116edcf701",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "本轮临时任务跳过校验，只输出草稿",
+          "applicability": "本轮临时任务",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 1900,
+          "updatedAt": 1900,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_17792d3b42c10a7c8eb24e43",
+          "mem_a2265d2bdf6c90116edcf701"
+        ],
+        "excluded": [
+          "mem_13fe0c6c7985c2354409775e"
+        ],
+        "baseline": [
+          {
+            "id": "mem_17792d3b42c10a7c8eb24e43",
+            "version": 1,
+            "mode": "method"
+          },
+          {
+            "id": "mem_a2265d2bdf6c90116edcf701",
+            "version": 1,
+            "mode": "method"
+          }
+        ],
+        "bytes": 206
+      }
+    },
+    {
+      "id": "recall-07",
+      "category": "correction",
+      "prompt": "以后把 JSON 文件的字段顺序固定下来，别再乱序写入",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_ca00095eb0ad3b940723e022",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "写 JSON 时固定字段顺序并整体 JSON.parse 预校验",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2200,
+          "updatedAt": 2200,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_0fdac5084cc9186d12b3778d",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_ca00095eb0ad3b940723e022"
+        ],
+        "excluded": [
+          "mem_0fdac5084cc9186d12b3778d"
+        ],
+        "baseline": [
+          {
+            "id": "mem_ca00095eb0ad3b940723e022",
+            "version": 1,
+            "mode": "method"
+          }
+        ],
+        "bytes": 72
+      }
+    },
+    {
+      "id": "recall-08",
+      "category": "correction",
+      "prompt": "JSON 配置解析报错，先把当前文件修好",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_63f79b0499d846c70ad88238",
+          "type": "lesson",
+          "status": "pending",
+          "instruction": "生成 JSON 时先删除结尾多余逗号并用 JSON.parse 预校验再写入",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "9f3d33a2e0282f4d89376d9f55b33d35b8229d4d5077bec0f5343ade5553f1ed",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "8cfa189ee124f9cddc1e564d31b6ba6dca4d3f9c93e844295b1705e25ed2e6b3"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "8cfa189ee124f9cddc1e564d31b6ba6dca4d3f9c93e844295b1705e25ed2e6b3"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "fb2b3b2373eeb479e1830f0f0025ed4af963131d762de51fe3f8cd25f1c28ce7",
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2000,
+          "updatedAt": 2000,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_fa0fc9231845f92df4aaac4f",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_b26377ce9af362053e095ab0",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "一次性调整只改这一份草稿，不升级为长期规则",
+          "applicability": "一次性草稿调整",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 1950,
+          "updatedAt": 1950,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_63f79b0499d846c70ad88238"
+        ],
+        "excluded": [
+          "mem_fa0fc9231845f92df4aaac4f"
+        ],
+        "baseline": [
+          {
+            "id": "mem_63f79b0499d846c70ad88238",
+            "version": 1,
+            "mode": "method"
+          }
+        ],
+        "bytes": 146
+      }
+    },
+    {
+      "id": "recall-09",
+      "category": "quotes",
+      "prompt": "别人说「JSON 一定要用 tab 缩进」，我该不该照做？",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_ffeb17de4fe8d6e05776553c",
+          "type": "lesson",
+          "status": "pending",
+          "instruction": "生成 JSON 时先删除结尾多余逗号并用 JSON.parse 预校验再写入",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "963a73ba988b261dbfd4d43a3e2d4a14587c693a11253e75481cc45976f58c8e",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "36ad0b3d0cc15025c327cf78d1f0860f2f8bf9e33bf549ca42f9825387c0d602"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "36ad0b3d0cc15025c327cf78d1f0860f2f8bf9e33bf549ca42f9825387c0d602"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "4cc820b68d5841a2e1de98ac4fa97771c015c41059f5429e9ab20ed831fd9d3f",
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2000,
+          "updatedAt": 2000,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_cd94691d06b5116e0d9c00a7",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_ffeb17de4fe8d6e05776553c"
+        ],
+        "excluded": [
+          "mem_cd94691d06b5116e0d9c00a7"
+        ],
+        "baseline": [
+          {
+            "id": "mem_ffeb17de4fe8d6e05776553c",
+            "version": 1,
+            "mode": "method"
+          }
+        ],
+        "bytes": 146
+      }
+    },
+    {
+      "id": "recall-10",
+      "category": "quotes",
+      "prompt": "JSON 解析失败时，只有在改配置文件的情况下才需要整体校验",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_4c95b18f48bfd059eaf03c07",
+          "type": "lesson",
+          "status": "pending",
+          "instruction": "生成 JSON 时先删除结尾多余逗号并用 JSON.parse 预校验再写入",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "5b5a547665a1f19b7d208e0f54d2214dc3b3236cb6518042253c4e53427d85ba",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "1099aa07976842ee445f166dbb5698724c9246ff38d5375bd9d1067ac02a8e65"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "1099aa07976842ee445f166dbb5698724c9246ff38d5375bd9d1067ac02a8e65"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "0408bbf7103adc74abf754b7cdb35c168e64a41b779095bf8a22624ad0084891",
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2000,
+          "updatedAt": 2000,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_8957784a1d325f90469cce57",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_4c95b18f48bfd059eaf03c07"
+        ],
+        "excluded": [
+          "mem_8957784a1d325f90469cce57"
+        ],
+        "baseline": [
+          {
+            "id": "mem_4c95b18f48bfd059eaf03c07",
+            "version": 1,
+            "mode": "method"
+          }
+        ],
+        "bytes": 146
+      }
+    },
+    {
+      "id": "recall-11",
+      "category": "quotes",
+      "prompt": "不要用 JSON.parse 直接改动生产配置，只在草稿上先解析校验",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_0fddecf209578242c95560fa",
+          "type": "lesson",
+          "status": "pending",
+          "instruction": "改 JSON 配置前先复制草稿并用 JSON.parse 校验",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "44c5279d80cbacee2e568b9de9413e3025511ac64bba5c9894bd298b46d996c2",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "90189341af4a05a3116cb4abbccc22471aca059867ea92cd5927eaaeac569aa8"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "90189341af4a05a3116cb4abbccc22471aca059867ea92cd5927eaaeac569aa8"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "47caacf6825744e05b240059ee8a60a2445dbfba956eda3dc7f9644df57d794f",
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2000,
+          "updatedAt": 2000,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_f3b88f66d7594a86c02d1a68",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_0fddecf209578242c95560fa"
+        ],
+        "excluded": [
+          "mem_f3b88f66d7594a86c02d1a68"
+        ],
+        "baseline": [
+          {
+            "id": "mem_0fddecf209578242c95560fa",
+            "version": 1,
+            "mode": "method"
+          }
+        ],
+        "bytes": 125
+      }
+    },
+    {
+      "id": "recall-12",
+      "category": "quotes",
+      "prompt": "引用：JSON 必须整体解析；现在帮我修这个 JSON 配置",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_8556d3a8770d7f3fc5429d32",
+          "type": "lesson",
+          "status": "pending",
+          "instruction": "生成 JSON 时先删除结尾多余逗号并用 JSON.parse 预校验再写入",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "5a4ac14df2abfded205e35c4c8492fe7ce33965feb09e55fcbf0b0329d9cead3",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "235f35cc4b056ddac67104aeeb533b9fda5aaf88d315a71cba26f29dba0687b1"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "235f35cc4b056ddac67104aeeb533b9fda5aaf88d315a71cba26f29dba0687b1"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "12ecc58d1b23fbe6a714fa20bccedf7df36bd902efb8c48991afadf82b4b1b37",
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2000,
+          "updatedAt": 2000,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_df039f8191df036507a2b3f7",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_8556d3a8770d7f3fc5429d32"
+        ],
+        "excluded": [
+          "mem_df039f8191df036507a2b3f7"
+        ],
+        "baseline": [
+          {
+            "id": "mem_8556d3a8770d7f3fc5429d32",
+            "version": 1,
+            "mode": "method"
+          }
+        ],
+        "bytes": 146
+      }
+    },
+    {
+      "id": "recall-13",
+      "category": "version",
+      "prompt": "JSON 配置文件解析失败，帮我按现有办法修",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_6a059a7f30c79650f1079024",
+          "type": "lesson",
+          "status": "pending",
+          "instruction": "生成 JSON 时先删除结尾多余逗号并用 JSON.parse 预校验再写入",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "2902812387652eca603ef5e1c37a59f860fd6671c35635db72ad83869a3c850b",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "0cc68e92f7baa96e6334f47a41b80b84da5c98e0afd353a3e3c9f28e4a0e332b"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "0cc68e92f7baa96e6334f47a41b80b84da5c98e0afd353a3e3c9f28e4a0e332b"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "f002ef16123cf420b2e9daefd027b638c4ef6c1101c736cb17be28ef6f6b00f0",
+          "version": 2,
+          "parentVersion": 1,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2000,
+          "updatedAt": 2000,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": {
+            "version": 2,
+            "since": 2000,
+            "coverage": "complete",
+            "injected": 1,
+            "recurrences": 0,
+            "checkPasses": 0,
+            "checkFails": 0
+          },
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_9bad25a2db0453c08a76c3c5",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_6a059a7f30c79650f1079024"
+        ],
+        "excluded": [
+          "mem_9bad25a2db0453c08a76c3c5"
+        ],
+        "baseline": [
+          {
+            "id": "mem_6a059a7f30c79650f1079024",
+            "version": 2,
+            "mode": "method"
+          }
+        ],
+        "bytes": 146
+      }
+    },
+    {
+      "id": "recall-14",
+      "category": "version",
+      "prompt": "JSON 解析又失败了，旧办法还有效吗？",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_f473778b5fa2e660c38d53ae",
+          "type": "lesson",
+          "status": "needs_revision",
+          "instruction": "整体解析 JSON 后再写盘",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "44221e9d8505f4bc8d063d02432848d0e93a5a3f2cfd0d105262dbbbdec80c24",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "ddcb5451d0f25a1af535b1bffcc15af90100f27da86709598dcad1a4c722d0c9"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "ddcb5451d0f25a1af535b1bffcc15af90100f27da86709598dcad1a4c722d0c9"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "8a982a5b90609f3bb60f54f32eb02efefa690eb37b03f5431d206f3cf2fa73d8",
+          "version": 2,
+          "parentVersion": 1,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2000,
+          "updatedAt": 2000,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": {
+            "version": 2,
+            "since": 2000,
+            "coverage": "complete",
+            "injected": 1,
+            "recurrences": 1,
+            "checkPasses": 0,
+            "checkFails": 0
+          },
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_0260717dd862a9f35d6feea1",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_f473778b5fa2e660c38d53ae"
+        ],
+        "excluded": [
+          "mem_0260717dd862a9f35d6feea1"
+        ],
+        "baseline": [
+          {
+            "id": "mem_f473778b5fa2e660c38d53ae",
+            "version": 2,
+            "mode": "guard"
+          }
+        ],
+        "bytes": 206
+      }
+    },
+    {
+      "id": "recall-15",
+      "category": "version",
+      "prompt": "之前那个 JSON 修复办法检查通过了吗？顺便修这个文件",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_75aa47b87812efbb7d81aba1",
+          "type": "lesson",
+          "status": "check_passed",
+          "instruction": "生成 JSON 时先删除结尾多余逗号并用 JSON.parse 预校验再写入",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "cc69d6735e30416b0ff7e7027bde48de460e07119d645cf3f1be2a5ac8bfa605",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "7334b0aa9f813bab7aa82baacb8764a7f6d76b22402897a482de173a75134f49"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "7334b0aa9f813bab7aa82baacb8764a7f6d76b22402897a482de173a75134f49"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "05ee3abbc5ddd14c456a6c04255a3c9d5b954e8fa4ce36a4131602072e9751ac",
+          "version": 2,
+          "parentVersion": 1,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2000,
+          "updatedAt": 2000,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": {
+            "version": 2,
+            "since": 2000,
+            "coverage": "complete",
+            "injected": 2,
+            "recurrences": 0,
+            "checkPasses": 1,
+            "checkFails": 0
+          },
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_e6c021da531be1ee03d4504e",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_75aa47b87812efbb7d81aba1"
+        ],
+        "excluded": [
+          "mem_e6c021da531be1ee03d4504e"
+        ],
+        "baseline": [
+          {
+            "id": "mem_75aa47b87812efbb7d81aba1",
+            "version": 2,
+            "mode": "method"
+          }
+        ],
+        "bytes": 146
+      }
+    },
+    {
+      "id": "recall-16",
+      "category": "version",
+      "prompt": "JSON 配置解析失败，还是用之前那套办法试试",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_19be60fec5cb83eb66559338",
+          "type": "lesson",
+          "status": "pending",
+          "instruction": "生成 JSON 时先删除结尾多余逗号并用 JSON.parse 预校验再写入",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "c0eb9255f7af5cad0ecf6e054e7ad6f27037280b93f17166f1aa1ddb8495e35f",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "98dfdd9e2ddaf9de554fc60cf0d49f1c3d7ce4bc6590d95dbc612257808c09ef"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "98dfdd9e2ddaf9de554fc60cf0d49f1c3d7ce4bc6590d95dbc612257808c09ef"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "8c8e1d1ae7a60294621c8da27d64e7b83ff1cc69357f3dd44e0ab9927f1d9512",
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2000,
+          "updatedAt": 2000,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_4ea7540a2e71fd67dbda53f5",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_19be60fec5cb83eb66559338"
+        ],
+        "excluded": [
+          "mem_4ea7540a2e71fd67dbda53f5"
+        ],
+        "baseline": [
+          {
+            "id": "mem_19be60fec5cb83eb66559338",
+            "version": 1,
+            "mode": "method"
+          }
+        ],
+        "bytes": 146
+      }
+    },
+    {
+      "id": "recall-17",
+      "category": "similar",
+      "prompt": "JSON 文件解析失败，帮我看看尾随逗号",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_fddb0a2c276aff808c9ce07f",
+          "type": "lesson",
+          "status": "pending",
+          "instruction": "生成 JSON 时先删除结尾多余逗号并用 JSON.parse 预校验再写入",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "40a6ae704500e8eec2576407a0200a92360b2edc0cb807ac0fdb7a23040b0a19",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "a25fa419fb07eec0e612287fb0dbd0f669013d5fee81dc4de6b6d631230330cc"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "a25fa419fb07eec0e612287fb0dbd0f669013d5fee81dc4de6b6d631230330cc"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "b3f4640ea9a4d923f49340eb6f25f5e0dac5c75e76be9032dd4bbeebdf5d692e",
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2000,
+          "updatedAt": 2000,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_b44fa35a273372473adc997d",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_ca086703187a8aa955bdab5c",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "运行 bash 脚本前先用 shellcheck 检查",
+          "applicability": "运行 bash 脚本时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 1850,
+          "updatedAt": 1850,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_fddb0a2c276aff808c9ce07f"
+        ],
+        "excluded": [
+          "mem_b44fa35a273372473adc997d",
+          "mem_ca086703187a8aa955bdab5c"
+        ],
+        "baseline": [
+          {
+            "id": "mem_fddb0a2c276aff808c9ce07f",
+            "version": 1,
+            "mode": "method"
+          }
+        ],
+        "bytes": 146
+      }
+    },
+    {
+      "id": "recall-18",
+      "category": "similar",
+      "prompt": "解析这本 JSON 配置，字段顺序和尾随逗号都要对",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_a8c39600a7e4caebfdb341a0",
+          "type": "lesson",
+          "status": "pending",
+          "instruction": "生成 JSON 时先删除结尾多余逗号并用 JSON.parse 预校验再写入",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "9355929e0f7313762fd797cfc341181efd6761b582064d79bdca07a3b3106911",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "92df0a551e3202a9024ddee4d685ba8b6ab55a3f180ac017564ea9d7e4d7ae8a"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "92df0a551e3202a9024ddee4d685ba8b6ab55a3f180ac017564ea9d7e4d7ae8a"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "cc32655e3480c17e8c6e6997a54136a4c84edddd30b7d5e0b4ea1b7276fb2a84",
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2000,
+          "updatedAt": 2000,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_b8e1de9400634d713f1af1a7",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_a8c39600a7e4caebfdb341a0"
+        ],
+        "excluded": [
+          "mem_b8e1de9400634d713f1af1a7"
+        ],
+        "baseline": [
+          {
+            "id": "mem_a8c39600a7e4caebfdb341a0",
+            "version": 1,
+            "mode": "method"
+          }
+        ],
+        "bytes": 146
+      }
+    },
+    {
+      "id": "recall-19",
+      "category": "similar",
+      "prompt": "这个 JSON 配置文件刚改完，帮我做整体解析校验",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_23b2ca298ab75c7da413419c",
+          "type": "lesson",
+          "status": "pending",
+          "instruction": "生成 JSON 时先删除结尾多余逗号并用 JSON.parse 预校验再写入",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "ae240192928d2650b3bf4d34d8d3982e7c6ba77c06f4ab97e1724cfef36ec6b8",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "9805097940af0f05ac513bc52e437d8045ad1d06614de6cdbac52f64cc268d3b"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "9805097940af0f05ac513bc52e437d8045ad1d06614de6cdbac52f64cc268d3b"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "7486789e8518e8a17ca479f58713620abac87fefb3a82e7f5145b897a5fa7f93",
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2000,
+          "updatedAt": 2000,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_4c8283214cb4040646b41fa7",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_b5134778f5f0dbae8381b114",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "提交前必须查看 git diff 并写清提交说明",
+          "applicability": "提交 git 变更时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 1860,
+          "updatedAt": 1860,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_23b2ca298ab75c7da413419c"
+        ],
+        "excluded": [
+          "mem_4c8283214cb4040646b41fa7",
+          "mem_b5134778f5f0dbae8381b114"
+        ],
+        "baseline": [
+          {
+            "id": "mem_23b2ca298ab75c7da413419c",
+            "version": 1,
+            "mode": "method"
+          }
+        ],
+        "bytes": 146
+      }
+    },
+    {
+      "id": "recall-20",
+      "category": "similar",
+      "prompt": "JSON 写盘前要整体解析，现在这个配置文件报错了",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_8a3347a5681eced7ea03aa66",
+          "type": "lesson",
+          "status": "pending",
+          "instruction": "生成 JSON 时先删除结尾多余逗号并用 JSON.parse 预校验再写入",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "1ea346512df9259d87008f8ad7446dddc6d1ba6c9804f00591197f39ff6659e5",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "29d663b8e996e9cc42fd39582cdab0d4b2dcdff1d5636d5456c483f7fcf4de97"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "29d663b8e996e9cc42fd39582cdab0d4b2dcdff1d5636d5456c483f7fcf4de97"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "ed3e0820e1d09fd25830c9ae6d1f04e0a98fad09df1a10a6c1d7aacba8ddedd3",
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2000,
+          "updatedAt": 2000,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_28ef891d2b8f492655e720c1",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_8a3347a5681eced7ea03aa66"
+        ],
+        "excluded": [
+          "mem_28ef891d2b8f492655e720c1"
+        ],
+        "baseline": [
+          {
+            "id": "mem_8a3347a5681eced7ea03aa66",
+            "version": 1,
+            "mode": "method"
+          }
+        ],
+        "bytes": 146
+      }
+    },
+    {
+      "id": "recall-21",
+      "category": "bytes",
+      "prompt": "长会话里的 JSON 配置解析失败了，按之前的长流程完整修一遍",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_fd388caad6a98253eba108bc",
+          "type": "lesson",
+          "status": "pending",
+          "instruction": "生成或修改 JSON 配置文件时先完整读取原文件，删除结尾多余逗号，整体执行 JSON.parse 预校验，确认字段顺序与写入前一致，再落盘并复核字节数与编码，最后把校验命令与结果写进交付说明，避免再次出现尾随逗号导致的解析失败。",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "3d4e512d1787e69fa9353993f8270ac5a5dfeaf3804f1d4c781b59684ce25890",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "124d561738e4f7fcaa8a4fc401dfbe38f70170fb2fce9d0805dd0417cce1b93d"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "124d561738e4f7fcaa8a4fc401dfbe38f70170fb2fce9d0805dd0417cce1b93d"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "710b83ca88d7cedf8fef5589a4c26ef64aa6d10dc847ccaa02e0ccd95ea78078",
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2000,
+          "updatedAt": 2000,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_50f65fc46ccb77499ae7a295",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_fd388caad6a98253eba108bc"
+        ],
+        "excluded": [
+          "mem_50f65fc46ccb77499ae7a295"
+        ],
+        "baseline": [
+          {
+            "id": "mem_fd388caad6a98253eba108bc",
+            "version": 1,
+            "mode": "method"
+          }
+        ],
+        "bytes": 377
+      }
+    },
+    {
+      "id": "recall-22",
+      "category": "bytes",
+      "prompt": "JSON 配置文件里字段很多，尾随逗号导致解析失败，帮我修",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_58bad881a596df96eaa0477f",
+          "type": "lesson",
+          "status": "pending",
+          "instruction": "生成或修改 JSON 配置文件时先完整读取原文件，删除结尾多余逗号，整体执行 JSON.parse 预校验，确认字段顺序与写入前一致，再落盘并复核字节数与编码，最后把校验命令与结果写进交付说明，避免再次出现尾随逗号导致的解析失败。",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "01b0b83c58fcc7cededf395b5c15f3c88ca3594b4ace3bedd2e8b23ab10c2ad8",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "2e845433f26bb2cfa7bbdb89629c423b7e0be0d8547dc94adba66321240fc6dc"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "2e845433f26bb2cfa7bbdb89629c423b7e0be0d8547dc94adba66321240fc6dc"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "0299ea886bf206dc35cbc3f22e789d478914b65074ae3c1b7c2efd69adfea8fc",
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2000,
+          "updatedAt": 2000,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_3b5640be920ee0a03b9d049c",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_58bad881a596df96eaa0477f"
+        ],
+        "excluded": [
+          "mem_3b5640be920ee0a03b9d049c"
+        ],
+        "baseline": [
+          {
+            "id": "mem_58bad881a596df96eaa0477f",
+            "version": 1,
+            "mode": "method"
+          }
+        ],
+        "bytes": 377
+      }
+    },
+    {
+      "id": "recall-23",
+      "category": "bytes",
+      "prompt": "之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，之前的对话很长，现在 JSON 配置文件解析失败，帮我修",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_66a339bc2c6b713373bec649",
+          "type": "lesson",
+          "status": "pending",
+          "instruction": "生成或修改 JSON 配置文件时先完整读取原文件，删除结尾多余逗号，整体执行 JSON.parse 预校验，确认字段顺序与写入前一致，再落盘并复核字节数与编码，最后把校验命令与结果写进交付说明，避免再次出现尾随逗号导致的解析失败。",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "602e901f08e09f337f8691411d19ab43ec165d9f267db44320a72ba4b25c75f5",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "c9d6805fa63ee7834096de2e33dd69fd1c8032bac3c91dfc5dd60babcec1958e"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "c9d6805fa63ee7834096de2e33dd69fd1c8032bac3c91dfc5dd60babcec1958e"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "367f0afa29a9e444b385f50ada38a6552053bc55d63da74339813499f7ef8f77",
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2000,
+          "updatedAt": 2000,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_d0a45b3148008deaabcf036c",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_66a339bc2c6b713373bec649"
+        ],
+        "excluded": [
+          "mem_d0a45b3148008deaabcf036c"
+        ],
+        "baseline": [
+          {
+            "id": "mem_66a339bc2c6b713373bec649",
+            "version": 1,
+            "mode": "method"
+          }
+        ],
+        "bytes": 377
+      }
+    },
+    {
+      "id": "recall-24",
+      "category": "bytes",
+      "prompt": "JSON 解析失败，先修文件再输出校验结果",
+      "scope": "2e1e1f42b942083a865b65b7aad6ed6c2220cc3b1bd738369231d30bd3d7c92e",
+      "environment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+      "entries": [
+        {
+          "id": "mem_82b703963c2e0a9ecfe09034",
+          "type": "lesson",
+          "status": "pending",
+          "instruction": "生成或修改 JSON 配置文件时先完整读取原文件，删除结尾多余逗号，整体执行 JSON.parse 预校验，确认字段顺序与写入前一致，再落盘并复核字节数与编码，最后把校验命令与结果写进交付说明，避免再次出现尾随逗号导致的解析失败。",
+          "applicability": "生成或修改 JSON 配置文件时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": {
+            "problemId": "d185eb76964b7ee736acf27a18a1621f13b94c59390b16b4c080745e846a246f",
+            "evidenceRevision": 0,
+            "evidenceIds": [
+              "d9b3a0b51ef32943b8fd624838725751d7f362f7c035ce5b811a3ae00e4fc406"
+            ],
+            "failurePattern": "尾随逗号触发 JSON SyntaxError",
+            "rootCause": {
+              "summary": "结尾多余逗号没有删除",
+              "basis": "hypothesis",
+              "evidenceIds": [
+                "d9b3a0b51ef32943b8fd624838725751d7f362f7c035ce5b811a3ae00e4fc406"
+              ]
+            },
+            "repairSteps": [
+              "删除结尾多余逗号",
+              "用 JSON.parse 预校验再写入"
+            ],
+            "verification": {
+              "check": "对文件执行 JSON.parse",
+              "expected": "解析成功"
+            }
+          },
+          "problemSignature": "ac9c146feec5dd95ebe21013a296d7e047706b6fb67f584414c3f78f23c9467c",
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 2000,
+          "updatedAt": 2000,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_515e29181cb2dc49ccf7d0ea",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "处理超长文本时先分段并记录每段长度，避免一次写入过长内容",
+          "applicability": "处理超长文本时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 1870,
+          "updatedAt": 1870,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        },
+        {
+          "id": "mem_db136e990a21a8ecf2783192",
+          "type": "rule",
+          "status": "user_rule",
+          "instruction": "整理交付便笺时必须包含版本、本地包与 SHA256 三行",
+          "applicability": "整理本地插件交付便笺时",
+          "exclusions": "",
+          "visibility": "global",
+          "originScope": "2505ab3afac97de08cd0e2e9f657d5e3e78140906bdbca03b1777c4d486d72a3",
+          "originEnvironment": "37a8eec1ce19687d132fe29051dca629d164e2c4958ba141d5f4133a33f0688f",
+          "originSession": null,
+          "lesson": null,
+          "problemSignature": null,
+          "version": 1,
+          "parentVersion": null,
+          "superseded": null,
+          "injected": 0,
+          "recurrences": 0,
+          "createdAt": 100,
+          "updatedAt": 100,
+          "lastInjectedAt": null,
+          "evidenceHash": null,
+          "methodStats": null,
+          "factDigest": null,
+          "digestDay": null,
+          "importedFrom": null
+        }
+      ],
+      "expect": {
+        "relevant": [
+          "mem_82b703963c2e0a9ecfe09034"
+        ],
+        "excluded": [
+          "mem_db136e990a21a8ecf2783192"
+        ],
+        "baseline": [
+          {
+            "id": "mem_82b703963c2e0a9ecfe09034",
+            "version": 1,
+            "mode": "method"
+          }
+        ],
+        "bytes": 377
+      }
+    }
+  ]
+}

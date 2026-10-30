@@ -7,7 +7,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, realpathSync, symlinkSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync, realpathSync, symlinkSync } from 'node:fs'
 import { after } from 'node:test'
 after(() => { try { rmSync(PROBES, { recursive: true, force: true }) } catch { /* best effort */ } })
 import { tmpdir } from 'node:os'
@@ -16,6 +16,11 @@ import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { RebuildEngine } from './engine.mjs'
+import { MemoryStore, createDoc, validateDoc, MEMORY_FORMAT, boundedUnits } from './memory.mjs'
+import { mechanismKey, resolveMethodVersion, versionWindow, selectHistory, renderHistoryPrompt,
+  guardSummary, methodNeedsGuard, historyRowPreview, archiveVersion } from './evolution.mjs'
+import { MAX_STORE_BYTES } from '../src/store.mjs'
+import { publicFiles } from '../scripts/public-set.mjs'
 import { localDayKey } from './time.mjs'
 import { apply } from './dsh.mjs'
 
@@ -113,7 +118,7 @@ test('corrections persist globally, recall across projects, scoped stays local, 
   assert.ok(many.offered.length <= 2 && many.bytes <= 768, `cap: ${many.offered.length}/${many.bytes}`)
 })
 
-test('real failure → lesson → injection → attributed recurrence → audited revision → retire', () => {
+test('real failure → lesson → injection → attributed recurrence → audited revision → version window', () => {
   const dir = root()
   const engine = new RebuildEngine({ stateRoot: root() })
   engine.setRoute({ provider: 'demo', model: 'm1' })
@@ -203,16 +208,23 @@ test('real failure → lesson → injection → attributed recurrence → audite
   assert.equal(replaced.version, 2)
   assert.equal(entry().superseded.instruction, instruction)
 
-  // Two more failures inside injected turns → recurrences 3 → retired, never injected again.
+  // EVOLUTION016: three family recurrences no longer permanently stop the whole lesson, and the
+  // same turn can charge its edition only once. A failed edition is offered as a guard, never as
+  // a recommended method.
   engine.prepare({ sessionId: 's6', turnId: 't5', projectKey: 'p2', prompt: '这个 JSON 文件又解析报错了' })
   fail('c4', 's6', 't5', 'p2')
   fail('c5', 's6', 't5', 'p2')
-  assert.equal(entry().status, 'retired')
-  assert.equal(entry().recurrences, 3)
-  assert.equal(engine.statusView().entries.some(row => row.id === done.entryId), false)
+  assert.equal(entry().recurrences, 2, 'one recurrence per turn, and the family total keeps growing')
+  assert.equal(entry().status, 'needs_revision')
+  assert.notEqual(entry().status, 'retired', 'the old 3-strike permanent stop is removed')
+  assert.equal(entry().methodStats.recurrences, 1, 'only the current edition window counts here')
+  assert.ok(engine.statusView().entries.some(row => row.id === done.entryId))
   const after = engine.prepare({ sessionId: 's5', turnId: 't7', projectKey: 'p2',
     prompt: '我的 JSON 又解析失败了，帮我排查报错' })
-  assert.ok(!after.context.includes(better.slice(0, 12)), 'retired lesson is never injected again')
+  assert.equal(after.offered.find(row => row.id === done.entryId).mode, 'guard',
+    'the failed edition is a warning, not a recommended method')
+  assert.match(after.context, /风险警示/u)
+  assert.ok(!after.context.includes(better.slice(0, 12)), 'old steps are no longer replayed as a method')
 })
 
 test('daily digest: boundaries, once per day, empty days cost NO call, late facts re-open, restart catches up', () => {
@@ -1363,6 +1375,9 @@ test('N6 memory-v1 format 3 without the new corrections table loads with default
   assert.equal(w.plugin.engine.store.read().entries.length, 1)
   const file = join(dir, 'mse-learning', 'memory-v1.json')
   const doc = JSON.parse(readFileSync(file, 'utf8'))
+  // EVOLUTION016: a pre-rebuild.6 library really is format 3, so the simulation must say so.
+  doc.format = 3
+  delete doc.methodHistory
   delete doc.corrections // simulate a pre-rebuild.6 (format 3, no corrections table) file
   delete doc.entries[0].sourceDigest
   writeFileSync(file, JSON.stringify(doc))
@@ -1370,6 +1385,10 @@ test('N6 memory-v1 format 3 without the new corrections table loads with default
   assert.equal(engine2.store.read().format, 3, 'format 3 loads as-is')
   assert.equal(engine2.store.read().entries.length, 1, 'the old rule is intact')
   assert.deepEqual(engine2.store.read().corrections, [], 'the missing table defaults to empty')
+  // The first REAL write migrates the same file to format 4 and keeps the rule.
+  engine2.store.transaction(state => { state.controls.userPaused = false; return true })
+  assert.equal(engine2.store.read().format, 4)
+  assert.equal(engine2.store.read().entries.length, 1, 'migration keeps the old rule')
 })
 
 // ── FIX1 round (MSE-NATURAL-CORRECTION-FIX1-20261029): five proven root causes ─────────────
@@ -1555,7 +1574,15 @@ test('UI wiring: original five-tab design, full contributions, gated binding, re
       revisions: [{ id: 'mem_9120f3a144d3a52375952a4f', version: 1, currentVersion: 1,
         status: 'retired', reason: 'user_correction', at: 1793280000000 }],
       corrections: { pending: 2, dispatched: 0, saved: 1,
-        ignoredRecent: [{ reason: 'generic_advice', at: 1 }] } }
+        ignoredRecent: [{ reason: 'generic_advice', at: 1 }],
+        recentDecisions: [
+          { at: 3, status: 'saved', contextOmitted: null, decisions: [{ durability: 'durable',
+            scope: 'global', basis: 'current_message;普通工作方法', result: 'saved', reason: null }] },
+          { at: 2, status: 'ignored', contextOmitted: 'context_too_long', decisions: [{ durability: 'one_off',
+            scope: 'global', basis: 'temporary_sentence', result: 'ignored', reason: 'temporary_scope' }] },
+          { at: 1, status: 'saved', contextOmitted: null, decisions: [{ durability: 'durable',
+            scope: 'project', basis: 'context_turn_2;上一轮项目约束', result: 'saved', reason: null }] },
+        ] } }
     const ctx = {
       effect(fn) { return typeof fn === 'function' ? fn() : undefined },
       locale: { register: () => true, getLocale: () => ({ active: 'zh' }) },
@@ -1747,6 +1774,39 @@ test('UI wiring: original five-tab design, full contributions, gated binding, re
       assert.match(usageTree, /保存规则说明/u, 'the full judgement stays readable in an expansion')
       assert.match(usageTree, /通用空话被拒绝/u)
       assert.match(usageTree, /忽略原因/u)
+      // UI-DECISION-DEFECT: the real Panel branch/React tree must render decision TEXT, never
+      // stringify React elements. Use the actual rendered usage tab, not source-string checks.
+      assert.doesNotMatch(usageTree, /\[object Object\]/u, 'no React element is stringified')
+      assert.match(usageTree, /长期\/全局\/保存\/当前消息；普通工作方法/u, 'saved global decision reads in Chinese')
+      assert.match(usageTree, /临时\/全局\/忽略\/临时句\/临时限定，不长期保存/u,
+        'ignored temporary decision keeps Chinese reason')
+      assert.match(usageTree, /长期\/项目\/保存\/引用第2轮；上一轮项目约束/u,
+        'context_turn_2 basis is readable Chinese')
+      assert.match(usageTree, /引用第2轮/u)
+      assert.ok(usageTree.includes(' ｜ ') && usageTree.includes('；'),
+        'rows and decisions keep their separators')
+      assert.ok(usageTree.includes('"title":"context_turn_2;上一轮项目约束"'),
+        'the complete basis survives in the span title')
+      assert.ok(usageTree.includes('"title":"current_message;普通工作方法"'),
+        'model/basis text stays complete in title')
+      assert.match(usageTree, /上下文省略:上下文单条过长/u, 'contextOmitted code reads Chinese')
+      // Observable actual-Panel evidence for the log: the decision <span>s and their titles.
+      {
+        const findCd = node => {
+          if (Array.isArray(node)) { for (const kid of node) { const hit = findCd(kid); if (hit) return hit } return null }
+          if (node !== null && typeof node === 'object') {
+            if (node?.props?.key === 'cd') return node
+            return findCd(node.children ?? [])
+          }
+          return null
+        }
+        const cd = findCd(JSON.parse(usageTree))
+        assert.ok(cd, 'the recent-decisions paragraph is a real rendered node')
+        const spans = (cd.children?.[0] ?? []).filter(x => x?.type === 'span')
+        assert.equal(spans.length, 3, 'all three decision spans render as elements, not strings')
+        console.log('UI-DECISION-TEXT', JSON.stringify(spans.map(span => ({
+          title: span.props.title, text: (span.children ?? []).join('') }))))
+      }
       assert.match(usageTree, /现存规则与经验/u)
       assert.match(usageTree, /按当前现存经验统计，不是全历史总量/u, 'totals are honestly scoped')
       assert.match(usageTree, /查看经验列表/u, 'a real navigation to the lessons tab')
@@ -2146,13 +2206,17 @@ test('M3 temporary candidate never graduates even with a global label; concrete 
   try {
     const s1 = w.mk('m3', dir_of(w))
     await w.turn(s1, 1, '本轮你应该先跑检查再提交，修完再装。你又跳过了检查，应该先解析再保存。')
-    // MSE21: a deterministically temporary candidate (TEMPORARY_SCOPE + no revision target) is
-    // refused BEFORE any paid extraction — same non-graduation, readable reason, audit kept.
-    assert.equal(w.ext().length, 0, 'no provider call for a deterministic temporary refusal')
+    // CONTEXT-SCOPE FIX1: this message has TWO sentences — the first is dominated by the
+    // temporary 本轮/修完再, the second is an independent durable method. The extractor may run
+    // ONCE; only the independent durable sentence is learned and no temporary wording leaks.
+    assert.equal(w.ext().length, 1, 'a mixed message is extracted once, not blanket-refused')
     const doc = w.plugin.engine.store.read()
-    assert.equal(doc.entries.length, 0, 'the model\'s global label cannot override 本轮/修完再')
-    assert.equal(doc.corrections.at(-1).reason, 'temporary_scope', 'readable skip reason')
-    assert.equal(doc.corrections.at(-1).status, 'ignored', 'the persistent audit keeps the outcome')
+    const saved = ruleInstruction(w.plugin, '先解析校验')
+    assert.ok(saved, 'the independent durable sentence is learned')
+    assert.ok(!saved.instruction.includes('本轮') && !saved.instruction.includes('修完再装'),
+      'the temporary sentence is not merged into the durable rule')
+    assert.equal(doc.corrections.at(-1).status, 'saved')
+    assert.equal(doc.corrections.at(-1).decisions[0].result, 'saved')
     const w2 = extWiring(root(), [answer('global')])
     try {
       const s2 = w2.mk('m3b')
@@ -4442,4 +4506,2007 @@ test('W1 real gateway reflection accepts the Remote signatures; wire args valida
   fiber.dispose()
   const dead = await statusService.status({})
   assert.deepEqual(dead, { ok: false, code: 'core_unavailable' }, 'failure path keeps the envelope')
+})
+
+// ── EVOLUTION016 (Task 1): format3/4 compatibility and pure version evidence ─────────────────
+const e16Hex = label => createHash('sha256').update(`e16:${label}`).digest('hex')
+const e16Id = label => `mem_${e16Hex(`id:${label}`).slice(0, 24)}`
+const e16Lesson = evidence => ({
+  problemId: e16Hex('problem'), evidenceRevision: 0, evidenceIds: [evidence],
+  failurePattern: '尾随逗号触发 SyntaxError：Expected double-quoted property name',
+  rootCause: { summary: '手写 JSON 结尾多余逗号', basis: 'hypothesis', evidenceIds: [evidence] },
+  repairSteps: ['删除结尾多余逗号', '用 JSON.parse 预校验再写入'],
+  verification: { check: '对文件执行 JSON.parse', expected: '解析成功' },
+})
+const e16Entry = ({ label = 'default', ...over } = {}) => ({
+  id: e16Id(label), type: 'lesson', status: 'pending',
+  instruction: '生成 JSON 时先删除结尾多余逗号并用 JSON.parse 预校验再写入',
+  applicability: '生成或修改 JSON 配置文件时', exclusions: '', visibility: 'global',
+  originScope: e16Hex('scope'), originEnvironment: e16Hex('env'), originSession: null,
+  lesson: e16Lesson(e16Hex('evidence')), problemSignature: e16Hex('signature'),
+  version: 1, parentVersion: null, superseded: null, injected: 0, recurrences: 0,
+  createdAt: 1000, updatedAt: 1000, lastInjectedAt: null, evidenceHash: null,
+  factDigest: null, digestDay: null, importedFrom: null, ...over,
+})
+const e16HistoryRow = ({ label = 'h', version = 1, ...over } = {}) => ({
+  entryId: e16Id(label), version, instruction: '旧的 JSON 修复办法',
+  applicability: '生成或修改 JSON 配置文件时', exclusions: '', visibility: 'global',
+  lesson: null, originScope: e16Hex('scope'), originEnvironment: e16Hex('env'),
+  originSession: null, stats: null, status: 'needs_revision', reason: 'matched_recurrence',
+  archivedAt: 1000, evidenceHash: null, ...over,
+})
+const e16Receipt = ({ label = 'r', offers = [[e16Id('default'), 1]], ...over } = {}) => ({
+  id: e16Hex(label), turnKey: e16Hex(`turn:${label}`), at: 1000, bytes: 100,
+  offered: offers.map(([id, version, mode]) => (mode === undefined ? { id, version } : { id, version, mode })),
+  settled: false, outcome: null, evidenceHash: null, source: null, ...over,
+})
+const e16Request = over => ({
+  ticket: 'ticket-1', kind: 'revise', at: 1000, problemId: null, entryId: e16Id('default'),
+  digestDay: null, requestHash: e16Hex('request'), dispatchHash: null, dispatchedAt: null,
+  settled: false, terminal: null, usage: null, maxTokens: 2048, evidenceIds: [], tokenHashes: [],
+  parentVersion: 1, routeId: null, material: e16Hex('material'), retryOf: null, digestFacts: null,
+  digestThrough: null, sourceSessionId: null, sourceRoute: null, ...over,
+})
+const e16Material = over => ({ key: e16Hex('material'), terminal: 'usage_unknown', attempts: 1,
+  autoRetriesUsed: 0, unknownCost: true, updatedAt: 1000, manualAllowed: false,
+  autoRetryAllowed: false, ticket: null, ...over })
+const e16Seed = (dir, mutate) => {
+  const doc = createDoc()
+  mutate(doc)
+  writeFileSync(join(dir, 'memory-v1.json'), JSON.stringify(doc))
+  return doc
+}
+const e16Format3 = doc => { doc.format = 3; delete doc.methodHistory; return doc }
+
+test('E1 format3 is read byte-for-byte; the first real write migrates once keeping text/status/counters/gates', () => {
+  const dir = root()
+  const entry = e16Entry({ label: 'legacy-current', injected: 17, status: 'check_passed',
+    evidenceHash: e16Hex('evidence-hash') })
+  const receipt = e16Receipt({ label: 'legacy-receipt',
+    offers: [[e16Id('legacy-current'), 1], [e16Id('other-a'), 1], [e16Id('other-b'), 1], [e16Id('other-c'), 1]] })
+  const seeded = e16Seed(dir, doc => {
+    e16Format3(doc)
+    doc.entries.push(entry)
+    doc.receipts.push(receipt)
+    doc.materials.push(e16Material())
+  })
+  const file = join(dir, 'memory-v1.json')
+  const beforeRead = hashFile(file)
+  const store = new MemoryStore({ stateRoot: dir })
+  const read = store.read()
+  assert.equal(read.format, 3, 'format3 stays format3 on a pure read')
+  assert.equal(hashFile(file), beforeRead, 'a pure read never rewrites the file')
+  assert.equal(read.entries[0].injected, 17)
+  // The old family counter is NOT presented as this version's window: no inherited 17.
+  const window = versionWindow(read.entries[0], 2000)
+  assert.equal(window.version, 1)
+  assert.equal(window.coverage, 'since_upgrade', 'old activity has unknown version attribution')
+  assert.equal(window.injected, 0, 'the old cumulative 17 must not become a version window')
+  assert.deepEqual(resolveMethodVersion(read, entry.id, 1), { kind: 'current', record: read.entries[0] })
+  assert.equal(resolveMethodVersion(read, entry.id, 2), null, 'no history for a version never archived')
+  // First REAL write: one atomic migration, old rows preserved verbatim.
+  const changed = store.transaction(doc => { doc.controls.userPaused = true; return true })
+  assert.equal(changed, true)
+  const after = JSON.parse(readFileSync(file, 'utf8'))
+  assert.equal(after.format, 4)
+  assert.equal(after.format, MEMORY_FORMAT)
+  assert.deepEqual(after.entries, [entry], 'original text/status/counters are byte-identical')
+  assert.deepEqual(after.receipts, [receipt], 'old receipts keep their exact shape')
+  assert.deepEqual(after.materials.map(row => row.unknownCost), [true], 'the unknown-cost gate is preserved')
+  assert.deepEqual(after.methodHistory, [], 'nothing is fabricated without a superseded snapshot')
+  // A second write never re-migrates anything.
+  store.transaction(doc => { doc.controls.userPaused = false; return true })
+  const again = JSON.parse(readFileSync(file, 'utf8'))
+  assert.deepEqual(again.entries, seeded.entries)
+  assert.deepEqual(again.methodHistory, [])
+})
+
+test('E1b migration moves only lesson superseded snapshots (partial), keeps retired and user-rule history out', () => {
+  const dir = root()
+  const supersededLesson = e16Entry({ label: 'superseded-lesson', version: 2, parentVersion: 1,
+    superseded: { instruction: '旧版 JSON 办法', version: 1, steps: ['旧步骤'], verification: { check: '旧检查' } } })
+  const supersededRule = { ...e16Entry({ label: 'superseded-rule' }), type: 'rule', status: 'user_rule',
+    lesson: null, problemSignature: null, superseded: { instruction: '旧用户规则', version: 1, reason: 'user_correction', at: 900 } }
+  const retired = e16Entry({ label: 'retired-lesson', status: 'retired', recurrences: 3 })
+  const plainOld = e16Entry({ label: 'plain-old', version: 3, parentVersion: 2, superseded: null })
+  e16Seed(dir, doc => {
+    e16Format3(doc)
+    doc.entries.push(supersededLesson, supersededRule, retired, plainOld)
+  })
+  const store = new MemoryStore({ stateRoot: dir })
+  store.transaction(doc => { doc.digest.waitReason = 'probe'; return true })
+  const doc = store.read()
+  assert.equal(doc.format, 4)
+  assert.deepEqual(doc.methodHistory.map(row => [row.entryId, row.version, row.status]),
+    [[supersededLesson.id, 1, 'legacy_partial']], 'only the lesson snapshot becomes partial history')
+  const history = doc.methodHistory[0]
+  assert.equal(history.instruction, '旧版 JSON 办法')
+  assert.equal(history.stats, null, 'no statistics are invented for a partial snapshot')
+  assert.equal(history.evidenceHash, null, 'no evidence hash is invented')
+  assert.equal(history.lesson, null, 'no root cause/lesson body is invented')
+  assert.equal(doc.entries.find(row => row.id === supersededRule.id).status, 'user_rule')
+  assert.equal(doc.entries.find(row => row.id === retired.id).status, 'retired', 'explicit retired is never revived')
+  assert.equal(doc.entries.find(row => row.id === plainOld.id).version, 3, 'versions stay untouched')
+  assert.equal(doc.methodHistory.some(row => row.entryId === supersededRule.id), false,
+    'user-rule history never enters the method ledger')
+
+  // Schema bounds for the NEW fields: strict validation, old shapes remain valid.
+  const good = createDoc()
+  good.entries.push(e16Entry({ label: 'stats-entry', methodStats: {
+    version: 1, since: 1000, coverage: 'since_upgrade', injected: 0, recurrences: 0,
+    checkPasses: 0, checkFails: 0 } }))
+  good.methodHistory.push(e16HistoryRow({ label: 'h1', version: 1 }))
+  good.receipts.push(e16Receipt({ label: 'fb', offers: [[e16Id('stats-entry'), 1]],
+    methodFeedback: [{ entryId: e16Id('stats-entry'), version: 1, kind: 'recurrence', checkId: null, at: 1000 }] }))
+  good.requests.push(e16Request({ methodFingerprint: e16Hex('fingerprint') }))
+  assert.doesNotThrow(() => validateDoc(good))
+  const badStats = structuredClone(good)
+  badStats.entries[0].methodStats.coverage = 'unknown'
+  assert.throws(() => validateDoc(badStats), error => error.code === 'invalid_memory')
+  const tooManyHistory = structuredClone(good)
+  tooManyHistory.methodHistory = Array.from({ length: 129 },
+    (_, index) => e16HistoryRow({ label: `many-${index}`, version: index + 1 }))
+  assert.throws(() => validateDoc(tooManyHistory), error => error.code === 'invalid_memory')
+  const duplicatedHistory = structuredClone(good)
+  duplicatedHistory.methodHistory.push(e16HistoryRow({ label: 'h1', version: 1 }))
+  assert.throws(() => validateDoc(duplicatedHistory), error => error.code === 'invalid_memory')
+  const tooManyFeedback = structuredClone(good)
+  tooManyFeedback.receipts[0].methodFeedback = Array.from({ length: 13 }, (_, index) => ({
+    entryId: e16Id('stats-entry'), version: index + 1, kind: 'recurrence', checkId: null, at: 1000 }))
+  assert.throws(() => validateDoc(tooManyFeedback), error => error.code === 'invalid_memory')
+  const duplicatedFeedback = structuredClone(good)
+  duplicatedFeedback.receipts[0].methodFeedback.push(
+    { entryId: e16Id('stats-entry'), version: 1, kind: 'recurrence', checkId: null, at: 1001 })
+  assert.throws(() => validateDoc(duplicatedFeedback), error => error.code === 'invalid_memory')
+  const badFingerprint = structuredClone(good)
+  badFingerprint.requests[0].methodFingerprint = 'not-a-hash'
+  assert.throws(() => validateDoc(badFingerprint), error => error.code === 'invalid_memory')
+  // Old receipts (no mode/methodFeedback) and old entries (no methodStats) stay valid.
+  const legacy = structuredClone(good)
+  legacy.receipts = [e16Receipt({ label: 'old' })]
+  delete legacy.receipts[0].methodFeedback
+  legacy.entries = [e16Entry({ label: 'old-entry' })]
+  legacy.methodHistory = []
+  legacy.requests = []
+  assert.doesNotThrow(() => validateDoc(legacy))
+})
+
+test('E1c mechanismKey keeps parameters/order/case/negation distinct but normalizes whitespace only', () => {
+  const base = e16Lesson(e16Hex('ev'))
+  const variant = over => ({ ...base, ...over })
+  const normalized = variant({ repairSteps: ['  删除结尾多余逗号\t\t', '\n用 JSON.parse  预校验再写入  '] })
+  assert.equal(mechanismKey(normalized), mechanismKey(base), 'leading/trailing/repeated whitespace is normalized')
+  assert.notEqual(mechanismKey(variant({ repairSteps: ['不要删除结尾多余逗号', '用 JSON.parse 预校验再写入'] })),
+    mechanismKey(base), 'a negation stays a different mechanism')
+  assert.notEqual(mechanismKey(variant({ repairSteps: ['运行 node --check file.json'] })),
+    mechanismKey(variant({ repairSteps: ['运行 node -check file.json'] })), 'parameters are preserved')
+  assert.notEqual(mechanismKey(variant({ repairSteps: ['Run JSON.parse check'] })),
+    mechanismKey(variant({ repairSteps: ['run json.parse check'] })), 'case is preserved')
+  assert.notEqual(mechanismKey(variant({ repairSteps: ['第一步', '第二步'] })),
+    mechanismKey(variant({ repairSteps: ['第二步', '第一步'] })), 'step order is preserved')
+  assert.notEqual(mechanismKey(variant({ verification: { check: '对文件执行 JSON.parse。', expected: '解析成功' } })),
+    mechanismKey(base), 'punctuation is not deleted into a false equivalence')
+  // Only repairSteps + verification define the mechanism, never the prose instruction.
+  assert.equal(mechanismKey({ ...base, instruction: '完全不同的措辞' }), mechanismKey(base))
+})
+
+// ── EVOLUTION016 (Task 2): feedback settles only the exact injected edition ──────────────────
+const E16_DAY = '2026-10-29'
+const e16Lifecycle = () => {
+  let clock = new Date(2026, 9, 29, 10, 0, 0).getTime()
+  const engine = new RebuildEngine({ stateRoot: root(), now: () => clock += 1000 })
+  engine.setRoute({ provider: 'demo', model: 'm1' })
+  engine.setSourceGuard(() => true)
+  const first = failingJsonRun(root())
+  const fail = (callId, turn, session = 's1') => engine.observeToolFailure({ sessionId: session,
+    turnId: turn, projectKey: 'p1', callId, toolName: 'bash', failureCode: 'tool_nonzero_exit',
+    exitCode: first.exit, stderr: first.stderr, command: 'node parse-broken.js bad.json' })
+  fail('fx-1', 't1')
+  fail('fx-2', 't2')
+  const plan = engine.reviewDayPlan(E16_DAY)
+  assert.equal(plan.run, true)
+  const index = plan.facts.findIndex(fact => fact.kind === 'failure') + 1
+  const capsuleId = plan.facts[index - 1].capsuleId
+  const started = engine.beginReviewDay(E16_DAY)
+  const instruction = '生成 JSON 时先删除结尾多余逗号并用 JSON.parse 预校验'
+  const saved = engine.finishWork({ ticket: started.ticket, usage: { total: 40 }, result: {
+    schema: 'mse-daily-digest-v1', summary: '当天修复 JSON 尾随逗号', actions: [
+      { instruction, applicability: '生成或修改 JSON 配置文件时', factRefs: [index],
+        lesson: lessonFor([capsuleId], instruction) }] } })
+  assert.equal(saved.saved.added, 1)
+  const entryId = saved.saved.entryIds[0]
+  const entry = () => engine.store.read().entries.find(row => row.id === entryId)
+  return { engine, entryId, entry, fail, day: E16_DAY, first }
+}
+const e16Prompt = '我的 JSON 配置文件解析失败了，帮我修'
+const e16Revise = (engine, { steps, instruction = '生成 JSON 前先整体解析校验并删除尾随逗号再写入' } = {}) => {
+  const revision = engine.beginWork()
+  assert.equal(revision?.kind, 'revise', JSON.stringify(revision))
+  const evidenceIds = JSON.parse(revision.request.text).evidenceIds
+  engine.markDispatched(revision.ticket)
+  return engine.finishWork({ ticket: revision.ticket,
+    usage: { input: 60, output: 40, total: 100 },
+    result: lessonFor(evidenceIds, instruction, steps ?? ['整体 JSON.parse 校验', '删除尾随逗号后写入']) })
+}
+
+test('E2 a late v1 checker never changes v2 status/evidenceHash/statistics', () => {
+  const { engine, entryId, entry, fail } = e16Lifecycle()
+  const injected = engine.prepare({ sessionId: 's5', turnId: 't3', projectKey: 'p1', prompt: e16Prompt })
+  assert.ok(injected.offered.some(offer => offer.id === entryId && offer.version === 1))
+  fail('fx-3', 't3', 's5') // matched recurrence on the injected v1
+  assert.equal(entry().status, 'needs_revision')
+  assert.equal(entry().methodStats.recurrences, 1)
+  const revised = e16Revise(engine)
+  assert.equal(revised.ok, true, JSON.stringify(revised))
+  assert.equal(revised.revision, 'replaced')
+  const v2Before = structuredClone(entry())
+  assert.equal(v2Before.version, 2)
+  assert.equal(v2Before.evidenceHash, null)
+  // A LATE v1 checker (the old injected turn) settles the archived v1 only.
+  const latePass = engine.recordCheck({ checkId: 'json-file-parses-v1', passed: true,
+    evidence: { reason: 'late-pass' }, sessionId: 's5', turnId: 't3', entryId, entryVersion: 1,
+    eventId: 'late-v1-pass' })
+  assert.equal(latePass.ok, true)
+  assert.equal(latePass.versionScope, 'history')
+  const lateFail = engine.recordCheck({ checkId: 'json-file-parses-v1', passed: false,
+    evidence: { reason: 'late-fail' }, sessionId: 's5', turnId: 't3', entryId, entryVersion: 1,
+    eventId: 'late-v1-fail' })
+  assert.equal(lateFail.versionScope, 'history')
+  const doc = engine.store.read()
+  const current = doc.entries.find(row => row.id === entryId)
+  assert.equal(current.version, 2)
+  assert.equal(current.status, 'pending', 'v2 status is untouched by a late v1 result')
+  assert.equal(current.evidenceHash, null, 'v2 never inherits v1 evidence')
+  assert.deepEqual(current.methodStats, v2Before.methodStats, 'v2 window is untouched')
+  const history = doc.methodHistory.find(row => row.entryId === entryId && row.version === 1)
+  assert.equal(history.stats.checkPasses, 1)
+  assert.equal(history.stats.checkFails, 1)
+  assert.equal(history.status, 'needs_revision')
+  // A result for an edition with NO archived evidence stays unattributable — never promoted.
+  engine.store.transaction(state => { state.methodHistory = []; return true })
+  const orphan = engine.recordCheck({ checkId: 'json-file-parses-v1', passed: true,
+    evidence: { reason: 'gone' }, sessionId: 's5', turnId: 't3', entryId, entryVersion: 1,
+    eventId: 'late-v1-orphan' })
+  assert.equal(orphan.settled, false)
+  assert.equal(orphan.reason, 'version_evidence_missing')
+  assert.equal(engine.store.read().entries.find(row => row.id === entryId).status, 'pending')
+})
+
+test('E2b family totals survive editions; the v2 window counts its own recurrence only; no 3-strike stop', () => {
+  const { engine, entryId, entry, fail } = e16Lifecycle()
+  // A legacy library could already hold a family total of 2 with NO version window.
+  engine.store.transaction(doc => {
+    const row = doc.entries.find(item => item.id === entryId)
+    row.recurrences = 2
+    row.status = 'needs_revision'
+    row.methodStats = null
+    return true
+  })
+  const revised = e16Revise(engine)
+  assert.equal(revised.ok, true, JSON.stringify(revised))
+  assert.equal(entry().version, 2)
+  assert.equal(entry().recurrences, 2, 'the family total is preserved through the edition change')
+  const archived = engine.store.read().methodHistory.find(row => row.entryId === entryId && row.version === 1)
+  assert.equal(archived.stats, null, 'old family totals are not fabricated into a v1 window')
+  const injected = engine.prepare({ sessionId: 's6', turnId: 't5', projectKey: 'p1', prompt: e16Prompt })
+  const offer = injected.offered.find(item => item.id === entryId)
+  assert.equal(offer.version, 2)
+  fail('fx-4', 't5', 's6') // a REAL matched recurrence on v2
+  assert.equal(entry().recurrences, 3, 'the family total counts the new recurrence')
+  assert.equal(entry().methodStats.version, 2)
+  assert.equal(entry().methodStats.recurrences, 1, 'v2 counts only its own recurrence, not v1 history')
+  assert.equal(entry().status, 'needs_revision')
+  assert.notEqual(entry().status, 'retired', 'the old "3 family recurrences → permanent stop" is gone')
+})
+
+test('E2c per-turn dedupe, repeated checker events, 12-row legacy feedback, cancelled turns', () => {
+  const { engine, entryId, entry, first } = e16Lifecycle()
+  const prepared = engine.prepare({ sessionId: 's5', turnId: 't3', projectKey: 'p1', prompt: e16Prompt })
+  assert.ok(prepared.offered.some(offer => offer.id === entryId))
+  // Three identical real failures within ONE turn charge the edition exactly once.
+  const caused = 'node parse-broken.js bad.json'
+  for (const callId of ['dup-1', 'dup-2', 'dup-3']) {
+    engine.observeToolFailure({ sessionId: 's5', turnId: 't3', projectKey: 'p1', callId,
+      toolName: 'bash', failureCode: 'tool_nonzero_exit', exitCode: first.exit, stderr: first.stderr,
+      command: caused })
+  }
+  const turnKey = engine.store.read().receipts.find(row => row.offered.some(x => x.id === entryId)).turnKey
+  let doc = engine.store.read()
+  let receipt = doc.receipts.find(row => row.turnKey === turnKey)
+  assert.equal(receipt.methodFeedback.filter(row => row.kind === 'recurrence').length, 1)
+  assert.equal(entry().recurrences, 1)
+  // Repeated checker EVENTS (same eventId) and a second event of the same kind in one turn dedupe.
+  const passA = engine.recordCheck({ checkId: 'json-file-parses-v1', passed: true,
+    evidence: { reason: 'a' }, sessionId: 's5', turnId: 't3', entryId, entryVersion: 1, eventId: 'ev-a' })
+  assert.equal(passA.outcome, 'check_passed')
+  const passARepeat = engine.recordCheck({ checkId: 'json-file-parses-v1', passed: true,
+    evidence: { reason: 'a' }, sessionId: 's5', turnId: 't3', entryId, entryVersion: 1, eventId: 'ev-a' })
+  assert.equal(passARepeat.duplicate, true)
+  const passBDifferentEvent = engine.recordCheck({ checkId: 'json-file-parses-v1', passed: true,
+    evidence: { reason: 'b' }, sessionId: 's5', turnId: 't3', entryId, entryVersion: 1, eventId: 'ev-b' })
+  assert.equal(passBDifferentEvent.duplicate, true, 'the per-turn feedback proof is independent of checkEvents')
+  doc = engine.store.read()
+  assert.equal(entry().methodStats.checkPasses, 1, 'one pass per edition per turn')
+  // checkEvents rotation must not re-open the same turn's feedback.
+  engine.store.transaction(state => { state.checkEvents = []; return true })
+  const afterRotation = engine.recordCheck({ checkId: 'json-file-parses-v1', passed: true,
+    evidence: { reason: 'c' }, sessionId: 's5', turnId: 't3', entryId, entryVersion: 1, eventId: 'ev-c' })
+  assert.equal(afterRotation.duplicate, true)
+  assert.equal(entry().methodStats.checkPasses, 1)
+  // Cancellation is never a method charge: the turn's recurrence is rolled back and receipt-proof removed.
+  engine.recordCancellation({ sessionId: 's5', turnId: 't3', callId: 'cancel-1' })
+  engine.complete({ sessionId: 's5', turnId: 't3', outcome: 'cancelled' })
+  doc = engine.store.read()
+  receipt = doc.receipts.find(row => row.turnKey === turnKey)
+  // REVIEW-FIX1: the proof row is kept (voided) so the same turn can never be counted twice.
+  assert.equal(receipt.methodFeedback.some(row => row.kind === 'recurrence' && row.voided === true), true)
+  assert.equal(entry().recurrences, 0, 'a cancelled turn carries no method recurrence')
+  assert.equal(entry().methodStats.recurrences, 0)
+  assert.equal(entry().methodStats.checkFails, 0)
+  // An UNKNOWN settlement never invents success or failure either.
+  const prepared2 = engine.prepare({ sessionId: 's7', turnId: 't7', projectKey: 'p1', prompt: e16Prompt })
+  assert.ok(prepared2.offered.some(offer => offer.id === entryId))
+  const before = structuredClone(entry())
+  engine.complete({ sessionId: 's7', turnId: 't7', outcome: 'unknown' })
+  assert.deepEqual(entry().methodStats, before.methodStats, 'unknown settles no method feedback')
+  assert.equal(entry().status, before.status)
+  // A legacy 4-offer receipt with all three feedback kinds for each offer (12 rows) stays legal.
+  const legacy = createDoc()
+  const offers = [1, 2, 3, 4].map(index => ({ id: e16Id(`legacy-${index}`), version: 1 }))
+  const feedback = offers.flatMap(offer => ['recurrence', 'check_pass', 'check_fail']
+    .map(kind => ({ entryId: offer.id, version: 1, kind, checkId: null, at: 1000 })))
+  legacy.receipts.push({ id: e16Hex('legacy-receipt'), turnKey: e16Hex('legacy-turn'), at: 1000,
+    bytes: 200, offered: offers, settled: false, outcome: null, evidenceHash: null, source: null,
+    methodFeedback: feedback })
+  assert.doesNotThrow(() => validateDoc(legacy))
+})
+
+// ── EVOLUTION016 (Task 3): related history, mechanism refusal, material identity ─────────────
+test('E3 revise prompt carries related edition results; an identical mechanism never becomes a new edition', () => {
+  const { engine, entryId, entry, fail } = e16Lifecycle()
+  const first = engine.prepare({ sessionId: 's5', turnId: 't3', projectKey: 'p1', prompt: e16Prompt })
+  assert.ok(first.offered.some(offer => offer.id === entryId))
+  engine.recordCheck({ checkId: 'json-file-parses-v1', passed: false, evidence: { reason: 'bad' },
+    sessionId: 's5', turnId: 't3', entryId, entryVersion: 1, eventId: 'ev-fail-1' })
+  assert.equal(entry().status, 'needs_revision')
+  assert.equal(entry().methodStats.checkFails, 1)
+  const v2 = e16Revise(engine)
+  assert.equal(v2.revision, 'replaced')
+  // The v2 edition really fails in its own injected turn.
+  const second = engine.prepare({ sessionId: 's6', turnId: 't5', projectKey: 'p1', prompt: e16Prompt })
+  assert.equal(second.offered.find(offer => offer.id === entryId).version, 2)
+  fail('fx-4', 't5', 's6')
+  assert.equal(entry().status, 'needs_revision')
+  // The NEXT revision prompt carries the archived v1 known check failure and the v2 recurrence.
+  const revision = engine.beginWork()
+  assert.equal(revision.kind, 'revise')
+  assert.match(revision.request.system, /相关旧版结果/u)
+  const marker = revision.request.system.indexOf('相关旧版结果')
+  const rest = revision.request.system.slice(revision.request.system.indexOf('：', marker) + 1)
+  const historyText = rest.slice(0, rest.indexOf('\n'))
+  const history = JSON.parse(historyText)
+  assert.ok(history.some(row => row.version === 1 && row.reason === 'check_failed'
+    && row.checkFails === 1), JSON.stringify(history))
+  // The CURRENT v2 edition travels in the existing "old method" JSON, never as fake history.
+  const currentText = revision.request.system.slice(0, marker)
+  assert.match(currentText, /"version":2/u)
+  assert.match(currentText, /"recurrences":1/u)
+  assert.doesNotMatch(historyText, /证伪|falsified|refuted/u)
+  // A literally identical mechanism is refused deterministically: no new edition, no new history.
+  const live = entry()
+  const historyBefore = engine.store.read().methodHistory.length
+  engine.markDispatched(revision.ticket)
+  const repeated = engine.finishWork({ ticket: revision.ticket,
+    usage: { input: 20, output: 10, total: 30 },
+    result: lessonFor(JSON.parse(revision.request.text).evidenceIds,
+      '仍用 JSON.parse 预校验并删除结尾多余逗号写入', live.lesson.repairSteps) })
+  assert.equal(repeated.ok, true, JSON.stringify(repeated))
+  assert.equal(repeated.revision, 'no_change')
+  assert.equal(repeated.reason, 'repeated_mechanism')
+  assert.equal(entry().version, 2, 'no version bump for the same mechanism')
+  assert.equal(engine.store.read().methodHistory.length, historyBefore)
+  const repeatedRow = engine.store.read().requests.find(row => row.ticket === revision.ticket)
+  assert.equal(repeatedRow.verdictCode, 'repeated_mechanism')
+  const repeatedGate = engine.store.read().materials.find(row => row.key === repeatedRow.material)
+  assert.equal(repeatedGate.terminal, 'repeated_mechanism')
+  // NEW evidence (a new capsule) changes the material; a genuinely different mechanism lands v3.
+  fail('fx-5', 't7', 's6')
+  const revision2 = engine.beginWork()
+  assert.equal(revision2.kind, 'revise')
+  assert.notEqual(JSON.parse(revision2.request.text).evidenceIds.length, 0)
+  engine.markDispatched(revision2.ticket)
+  const replaced = engine.finishWork({ ticket: revision2.ticket,
+    usage: { input: 20, output: 10, total: 30 },
+    result: lessonFor(JSON.parse(revision2.request.text).evidenceIds,
+      '先完整解析 JSON 再写盘并显式捕获 SyntaxError', ['先解析整份 JSON', '捕获并记录 SyntaxError', '再写盘并保留原文件备份']) })
+  assert.equal(replaced.ok, true, JSON.stringify(replaced))
+  assert.equal(replaced.revision, 'replaced')
+  const after = engine.store.read()
+  const v3 = after.entries.find(row => row.id === entryId)
+  assert.equal(v3.version, 3)
+  assert.equal(v3.status, 'pending')
+  assert.equal(v3.evidenceHash, null, 'a new edition never inherits the old evidence')
+  assert.deepEqual(v3.methodStats, { version: 3, since: v3.methodStats.since, coverage: 'complete',
+    injected: 0, recurrences: 0, checkPasses: 0, checkFails: 0 })
+  const archivedV2 = after.methodHistory.find(row => row.entryId === entryId && row.version === 2)
+  assert.equal(archivedV2.stats.recurrences, 1, 'the old edition keeps its complete record')
+  assert.ok(archivedV2.lesson.repairSteps.length >= 2)
+  assert.equal(archivedV2.instruction, live.instruction, 'the old body is preserved verbatim')
+})
+
+test('E3b history/stat/schema changes never change the material identity; closed gates stay closed', () => {
+  const { engine, entryId, fail } = e16Lifecycle()
+  engine.prepare({ sessionId: 's5', turnId: 't3', projectKey: 'p1', prompt: e16Prompt })
+  fail('fx-3', 't3', 's5')
+  const copy = () => {
+    const dir = root()
+    writeFileSync(join(dir, 'memory-v1.json'), readFileSync(engine.store.path))
+    const next = new RebuildEngine({ stateRoot: dir })
+    next.setRoute({ provider: 'demo', model: 'm1' })
+    return next
+  }
+  const a = copy()
+  const planA = a.pendingWork()
+  assert.equal(planA.kind, 'revise')
+  const startedA = a.beginWork()
+  assert.ok(startedA && startedA.ticket)
+  const requestA = a.store.read().requests.find(row => row.ticket === startedA.ticket)
+  // B: same row.text, but a bigger method ledger + a newer stats window + a different updatedAt.
+  const b = copy()
+  b.store.transaction(doc => {
+    const row = doc.entries.find(entry => entry.id === entryId)
+    row.version = 2
+    row.parentVersion = 1
+    row.methodStats = { version: 2, since: 1, coverage: 'since_upgrade', injected: 3,
+      recurrences: 1, checkPasses: 0, checkFails: 1 }
+    doc.methodHistory.push({ entryId, version: 1, instruction: '更早的修复办法',
+      applicability: '生成或修改 JSON 配置文件时', exclusions: '', visibility: 'global', lesson: null,
+      originScope: row.originScope, originEnvironment: row.originEnvironment, originSession: null,
+      stats: null, status: 'legacy_partial', reason: 'legacy_superseded_partial', archivedAt: 1,
+      evidenceHash: null })
+    doc.digest.waitReason = 'previous-wait'
+    return true
+  })
+  const planB = b.pendingWork()
+  assert.equal(planB.kind, 'revise')
+  assert.equal(planB.text, planA.text, 'the same row.text stays the same')
+  assert.notEqual(planB.system, planA.system, 'the history summary really entered the system slot')
+  assert.match(planB.system, /legacy_partial/u)
+  const startedB = b.beginWork()
+  const requestB = b.store.read().requests.find(row => row.ticket === startedB.ticket)
+  assert.equal(requestB.material, requestA.material, 'material identity is unchanged by history/stat updates')
+  assert.equal(requestB.methodFingerprint, requestA.methodFingerprint,
+    'the frozen parent mechanism is unchanged for the same edition')
+  // Unknown cost: the same material is NEVER re-issued automatically.
+  const c = copy()
+  c.store.transaction(doc => {
+    doc.materials.push({ key: requestA.material, terminal: 'usage_unknown', attempts: 1,
+      autoRetriesUsed: 0, unknownCost: true, updatedAt: 1, manualAllowed: false,
+      autoRetryAllowed: false, ticket: null })
+    return true
+  })
+  const requestsBefore = c.store.read().requests.length
+  assert.equal(c.pendingWork(), null)
+  assert.equal(c.store.read().digest.waitReason, 'unknown_cost_never_auto_replayed')
+  assert.equal(c.store.read().requests.length, requestsBefore, 'no model request was prepared')
+  // Exhausted material: same, with its own readable reason.
+  const d = copy()
+  d.store.transaction(doc => {
+    doc.materials.push({ key: requestA.material, terminal: 'aborted', attempts: 2,
+      autoRetriesUsed: 0, unknownCost: false, updatedAt: 1, manualAllowed: false,
+      autoRetryAllowed: false, ticket: null })
+    return true
+  })
+  assert.equal(d.pendingWork(), null)
+  assert.equal(d.store.read().digest.waitReason, 'material_exhausted')
+})
+
+test('E3c external/withdrawn method history never reaches the prompt — only fixed safe reasons', () => {
+  const { engine, entryId, entry, fail } = e16Lifecycle()
+  engine.prepare({ sessionId: 's5', turnId: 't3', projectKey: 'p1', prompt: e16Prompt })
+  engine.recordCheck({ checkId: 'json-file-parses-v1', passed: false, evidence: { reason: 'bad' },
+    sessionId: 's5', turnId: 't3', entryId, entryVersion: 1, eventId: 'ev-c-1' })
+  // The v1 body now names an OUTSIDE path; it is archived into history by the real revision.
+  engine.store.transaction(doc => {
+    const row = doc.entries.find(item => item.id === entryId)
+    row.instruction = '读取 /Users/missher/secret/private.json 后删除结尾逗号再写入'
+    return true
+  })
+  const v2 = e16Revise(engine)
+  assert.equal(v2.revision, 'replaced')
+  // The v2 edition is really injected and fails again, so the next revision is legal; the host
+  // material screen then refuses OUTSIDE paths — the same predicate the real host uses.
+  const injectedV2 = engine.prepare({ sessionId: 's6', turnId: 't6', projectKey: 'p1', prompt: e16Prompt })
+  assert.equal(injectedV2.offered.find(offer => offer.id === entryId).version, 2)
+  fail('fx-4', 't6', 's6')
+  assert.equal(entry().status, 'needs_revision')
+  engine.setMaterialGuard(text => !text.includes('/Users/'))
+  const revision = engine.beginWork()
+  assert.equal(revision.kind, 'revise')
+  const marker = revision.request.system.indexOf('相关旧版结果')
+  assert.ok(marker >= 0)
+  const rest = revision.request.system.slice(revision.request.system.indexOf('：', marker) + 1)
+  const historyText = rest.slice(0, rest.indexOf('\n'))
+  assert.doesNotMatch(historyText, /\/Users\/|secret\/private\.json|missher/u,
+    'no external path or body leaks into the prompt')
+  const history = JSON.parse(historyText)
+  assert.ok(history.length >= 1)
+  assert.ok(history.every(row => row.instruction === null), 'a refused row keeps no body')
+  assert.ok(history.every(row => row.reason === 'material_unverified'), 'only a fixed reason remains')
+  // Explicit retired history is never brought back into a prompt either.
+  engine.abortWork({ ticket: revision.ticket, failure: 'aborted', usage: null })
+  engine.store.transaction(doc => {
+    for (const row of doc.methodHistory) row.status = 'retired'
+    return true
+  })
+  fail('fx-5', 't8', 's6')
+  const revision2 = engine.beginWork()
+  assert.equal(revision2.kind, 'revise')
+  const marker2 = revision2.request.system.indexOf('相关旧版结果')
+  const rest2 = revision2.request.system.slice(revision2.request.system.indexOf('：', marker2) + 1)
+  const history2 = JSON.parse(rest2.slice(0, rest2.indexOf('\n')))
+  assert.deepEqual(history2, [], 'retired editions are not offered as revision context')
+})
+
+// ── EVOLUTION016 (Task 4): guard recall and the true status face ─────────────────────────────
+test('E4 a matched-failure edition is only a concrete guard; the pending new edition stays a method', () => {
+  const { engine, entryId, entry, fail } = e16Lifecycle()
+  const first = engine.prepare({ sessionId: 's5', turnId: 't3', projectKey: 'p1', prompt: e16Prompt })
+  assert.equal(first.offered.find(offer => offer.id === entryId).mode, 'method')
+  assert.match(first.context, /删除结尾多余逗号/u)
+  fail('fx-3', 't3', 's5')
+  const guard = engine.prepare({ sessionId: 's6', turnId: 't6', projectKey: 'p1', prompt: e16Prompt })
+  const offer = guard.offered.find(item => item.id === entryId)
+  assert.equal(offer.mode, 'guard', 'a failed old edition is recalled as a warning only')
+  assert.match(guard.context, /风险警示/u)
+  assert.match(guard.context, /同类复发/u)
+  assert.doesNotMatch(guard.context, /删除结尾多余逗号/u, 'the old repair steps are not recommended')
+  assert.ok(Buffer.byteLength(guard.context, 'utf8') <= 768, 'the guard counts inside the SAME byte cap')
+  assert.equal(guard.bytes, Buffer.byteLength(guard.context, 'utf8'))
+  // A guard can never earn method success or failure credit.
+  assert.deepEqual(engine.jsonRelevantOffers({ sessionId: 's6', turnId: 't6' }), [])
+  const guardCheck = engine.recordCheck({ checkId: 'json-file-parses-v1', passed: true,
+    evidence: { reason: 'guard-should-not-credit' }, sessionId: 's6', turnId: 't6',
+    entryId, entryVersion: 1, eventId: 'guard-ev-1' })
+  assert.equal(guardCheck.ok, false)
+  assert.equal(guardCheck.code, 'guard_not_method_credit')
+  assert.equal(entry().status, 'needs_revision')
+  assert.equal(entry().evidenceHash, null)
+  // Same-turn dedupe and later turns: the same guard is offered, never a method.
+  const sameTurn = engine.prepare({ sessionId: 's6', turnId: 't6', projectKey: 'p1', prompt: e16Prompt })
+  assert.equal(sameTurn.reason, 'same_turn_dedup')
+  const later = engine.prepare({ sessionId: 's6', turnId: 't9', projectKey: 'p1', prompt: e16Prompt })
+  assert.equal(later.offered.find(item => item.id === entryId).mode, 'guard')
+  // A real revision produces a NEW pending edition that is a normal method again.
+  const revised = e16Revise(engine)
+  assert.equal(revised.revision, 'replaced')
+  const methodAgain = engine.prepare({ sessionId: 's7', turnId: 't10', projectKey: 'p1', prompt: e16Prompt })
+  assert.equal(methodAgain.offered.find(item => item.id === entryId).mode, 'method')
+  assert.match(methodAgain.context, /生成 JSON 前先整体解析校验/u, 'the new pending method is offered')
+  assert.equal(methodAgain.offered.length <= 2, true)
+})
+
+test('E4b the status face shows the version window and last revision reason without a new page', () => {
+  const { engine, entryId, entry, fail } = e16Lifecycle()
+  engine.prepare({ sessionId: 's5', turnId: 't3', projectKey: 'p1', prompt: e16Prompt })
+  engine.recordCheck({ checkId: 'json-file-parses-v1', passed: false, evidence: { reason: 'bad' },
+    sessionId: 's5', turnId: 't3', entryId, entryVersion: 1, eventId: 'e4b-fail' })
+  assert.equal(e16Revise(engine).revision, 'replaced')
+  engine.prepare({ sessionId: 's6', turnId: 't5', projectKey: 'p1', prompt: e16Prompt })
+  engine.recordCheck({ checkId: 'json-file-parses-v1', passed: true, evidence: { reason: 'ok' },
+    sessionId: 's6', turnId: 't5', entryId, entryVersion: 2, eventId: 'e4b-pass' })
+  const view = engine.statusView()
+  const row = view.entries.find(item => item.id === entryId)
+  assert.equal(row.methodStats.version, 2)
+  assert.equal(row.methodStats.coverage, 'complete')
+  assert.equal(row.methodStats.checkPasses, 1)
+  assert.equal(row.methodStats.checkFails, 0)
+  assert.equal(row.methodStats.injected, 1, 'the v2 window counts its own method injection only')
+  assert.equal(row.injected, 2, 'the family total is still shown separately')
+  assert.equal(row.recentRevision.version, 1)
+  assert.equal(row.recentRevision.reason, 'matched_recurrence')
+  assert.equal(row.recentRevision.at > 0, true)
+  assert.equal(row.guard, false)
+  // A matcher failure flips the SAME entry row to a guard flag (no new page or column).
+  fail('fx-4', 't5', 's6')
+  const after = engine.statusView().entries.find(item => item.id === entryId)
+  assert.equal(after.guard, true)
+  assert.equal(after.methodStats.recurrences, 1)
+  // The five existing tabs stay exactly five; the new labels are detail-only additions.
+  const clientSrc = readFileSync(new URL('./client.js', import.meta.url), 'utf8')
+  for (const key of ['tabOverview', 'tabLessons', 'tabRecall', 'tabTasks', 'tabUsage']) {
+    assert.match(clientSrc, new RegExp(key, 'u'))
+  }
+  assert.match(clientSrc, /versionWindowLabel/u)
+  assert.match(clientSrc, /coverageSinceUpgrade/u)
+  assert.match(clientSrc, /recentRevision/u)
+  assert.equal((clientSrc.match(/tab[A-Z][A-Za-z]+:/gu) ?? []).length, 5, 'no sixth tab was added')
+})
+
+// ── EVOLUTION016 (Task 5): real capacity paths, emoji/history bounds, restart & old libraries ──
+const e16BigLesson = (salt = '') => {
+  const step = `${salt}删除结尾多余逗号后用 JSON.parse 全量预校验再写入文件并复核字段顺序`
+  return { problemId: e16Hex(`big-problem-${salt}`), evidenceRevision: 0,
+    evidenceIds: [e16Hex(`big-evidence-${salt}`)],
+    failurePattern: `${salt}尾随逗号导致 JSON 解析报 Expected double-quoted property name，`.slice(0, 240),
+    rootCause: { summary: `${salt}手写或拼接 JSON 时结尾多余逗号没有删除且未做整份解析校验，`.slice(0, 240),
+      basis: 'hypothesis', evidenceIds: [e16Hex(`big-evidence-${salt}`)] },
+    repairSteps: [step.slice(0, 160), `${step}第二步`.slice(0, 160), `${step}第三步`.slice(0, 160)],
+    verification: { check: '对文件执行完整 JSON.parse 并比较字段顺序'.slice(0, 160),
+      expected: '解析成功且字段顺序与写入时一致'.slice(0, 160) } }
+}
+const e16InflateDoc = (doc, targetBytes, { historyRows = 128 } = {}) => {
+  let extra = 0
+  while (doc.entries.length < 256) {
+    const label = `inflate-${extra}`
+    doc.entries.push(e16Entry({ label, lesson: e16BigLesson(label), createdAt: 1000 + extra,
+      updatedAt: 1000 + extra }))
+    extra += 1
+  }
+  let row = 0
+  while (doc.methodHistory.length < historyRows) {
+    doc.methodHistory.push({ entryId: e16Id(`history-${row}`), version: 1,
+      instruction: `${row}更早的 JSON 修复办法与失败记录说明`.slice(0, 240),
+      applicability: '生成或修改 JSON 配置文件时', exclusions: '', visibility: 'global',
+      lesson: e16BigLesson(`history-${row}`), originScope: e16Hex('scope'),
+      originEnvironment: e16Hex('env'), originSession: null,
+      stats: { version: 1, since: 1000, coverage: 'complete', injected: 0, recurrences: 1,
+        checkPasses: 0, checkFails: 0 },
+      status: 'needs_revision', reason: 'matched_recurrence', archivedAt: 1000 + row, evidenceHash: null })
+    row += 1
+  }
+  // Fine-tune the legal size with digest-day identities (factKeys ≤1024 × 256 chars per day),
+  // binary-searching the largest number of keys that still fits under the REAL 2 MiB bound.
+  const filler = index => Array.from({ length: 1024 }, (_, position) => `d${index}-${position}-`.padEnd(256, 'x'))
+  const size = () => Buffer.byteLength(JSON.stringify(doc), 'utf8')
+  let dayIndex = 0
+  while (size() < targetBytes && doc.digest.days.length < 31) {
+    const index = dayIndex
+    const day = { day: `2026-09-${String((dayIndex % 28) + 1).padStart(2, '0')}`,
+      throughAt: 1000, status: 'summarized', summary: null, entryIds: [], factKeys: [] }
+    doc.digest.days.push(day)
+    const pool = filler(index)
+    let low = 0
+    let high = pool.length
+    let best = 0
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2)
+      day.factKeys = pool.slice(0, mid)
+      if (size() <= MAX_STORE_BYTES) { best = mid; low = mid + 1 } else high = mid - 1
+    }
+    day.factKeys = pool.slice(0, best)
+    if (best === 0) break
+    dayIndex += 1
+  }
+  return doc
+}
+
+test('E5 a legal temp store actually reaches the 128-row and 2 MiB refusals without a half update', () => {
+  const { engine, entryId, entry } = e16Lifecycle()
+  engine.prepare({ sessionId: 's5', turnId: 't3', projectKey: 'p1', prompt: e16Prompt })
+  engine.recordCheck({ checkId: 'json-file-parses-v1', passed: false, evidence: { reason: 'bad' },
+    sessionId: 's5', turnId: 't3', entryId, entryVersion: 1, eventId: 'e5-fail' })
+  assert.equal(entry().status, 'needs_revision')
+  const revision = engine.beginWork()
+  assert.equal(revision.kind, 'revise')
+  engine.markDispatched(revision.ticket)
+  // A real legal 128-row ledger on disk (temporary state only).
+  engine.store.transaction(doc => {
+    for (let row = 0; row < 128; row += 1) {
+      doc.methodHistory.push({ entryId: e16Id(`cap-${row}`), version: 1,
+        instruction: `${row} 旧办法与失败记录`.slice(0, 240), applicability: '', exclusions: '',
+        visibility: 'global', lesson: null, originScope: e16Hex('scope'),
+        originEnvironment: e16Hex('env'), originSession: null, stats: null,
+        status: 'legacy_partial', reason: 'legacy_superseded_partial', archivedAt: 1000,
+        evidenceHash: null })
+    }
+    return true
+  })
+  const file = engine.store.path
+  const hashBefore = hashFile(file)
+  const historyBefore = engine.store.read().methodHistory.length
+  const lesson = lessonFor(JSON.parse(revision.request.text).evidenceIds,
+    '生成 JSON 前先整体解析校验并删除尾随逗号再写入',
+    ['整体 JSON.parse 校验', '删除尾随逗号后写入'])
+  const refused = engine.finishWork({ ticket: revision.ticket, usage: { total: 30 }, result: lesson })
+  assert.equal(refused.ok, false)
+  assert.equal(refused.code, 'method_history_full')
+  assert.equal(hashFile(file), hashBefore, 'the store file is byte-identical after the refusal')
+  assert.equal(engine.store.read().methodHistory.length, historyBefore, 'nothing is silently deleted')
+  assert.equal(engine.store.read().requests.find(row => row.ticket === revision.ticket).settled, false,
+    'the request stays unsettled: no half settlement')
+  assert.equal(entry().version, 1)
+  // The in-flight request still owns the slot; once it ends, the pre-flight read path stops the
+  // NEXT revision before any model call.
+  engine.abortWork({ ticket: revision.ticket, failure: 'aborted', usage: { total: 10 } })
+  assert.equal(engine.pendingWork(), null)
+  assert.equal(engine.store.read().digest.waitReason, 'method_history_full')
+  assert.equal(engine.store.read().requests.filter(row => row.kind === 'revise'
+    && row.ticket !== revision.ticket).length, 0)
+  // A realistic legal store just under 2 MiB: the capacity pre-flight refuses readably first.
+  const { engine: engine2, entryId: entryId2 } = e16Lifecycle()
+  engine2.prepare({ sessionId: 's5', turnId: 't3', projectKey: 'p1', prompt: e16Prompt })
+  engine2.recordCheck({ checkId: 'json-file-parses-v1', passed: false, evidence: { reason: 'bad' },
+    sessionId: 's5', turnId: 't3', entryId: entryId2, entryVersion: 1, eventId: 'e5-fail-2' })
+  const inflated = e16InflateDoc(engine2.store.read(), MAX_STORE_BYTES - 4096, { historyRows: 8 })
+  const bytes = Buffer.byteLength(JSON.stringify(inflated), 'utf8')
+  assert.ok(bytes <= MAX_STORE_BYTES, `inflated doc is legal (${bytes})`)
+  assert.ok(bytes > MAX_STORE_BYTES - 8192, `inflated doc is near the real bound (${bytes})`)
+  engine2.store.transaction(doc => {
+    doc.entries = inflated.entries
+    doc.methodHistory = inflated.methodHistory
+    doc.digest.days = inflated.digest.days
+    return true
+  })
+  const requestsBefore = engine2.store.read().requests.length
+  assert.equal(engine2.pendingWork(), null)
+  assert.equal(engine2.store.read().digest.waitReason, 'storage_capacity')
+  assert.equal(engine2.store.read().requests.length, requestsBefore, 'no request was prepared')
+  assert.equal(engine2.store.read().entries.find(row => row.id === entryId2).version, 1)
+})
+
+test('E5b emoji history, prompt bounds, restart dedupe and the unknown-cost hold', () => {
+  // Emoji boundary: a 200-emoji legacy snapshot is bounded to 240 UTF-16 units, never split.
+  const dir = root()
+  e16Seed(dir, doc => {
+    e16Format3(doc)
+    doc.entries.push(e16Entry({ label: 'emoji', version: 2, parentVersion: 1,
+      superseded: { instruction: '😀'.repeat(200), version: 1 } }))
+  })
+  const store = new MemoryStore({ stateRoot: dir })
+  store.transaction(doc => { doc.controls.userPaused = false; return true })
+  const migrated = store.read()
+  assert.equal(migrated.format, 4)
+  const emojiRow = migrated.methodHistory[0]
+  assert.equal(Buffer.byteLength(emojiRow.instruction, 'utf8'), 480)
+  assert.equal([...emojiRow.instruction].length, 120)
+  assert.equal(emojiRow.instruction.includes('\uFFFD'), false, 'no surrogate pair was split')
+  assert.ok(Buffer.byteLength(JSON.stringify(emojiRow), 'utf8') <= 6144)
+  // Prompt bounds: at most 6 rows / 1536 UTF-8 bytes, even with maximal-looking history text.
+  const historyDoc = createDoc()
+  const target = e16Entry({ label: 'bounded', version: 10, parentVersion: 9 })
+  historyDoc.entries.push(target)
+  for (let version = 1; version <= 8; version += 1) {
+    historyDoc.methodHistory.push({ entryId: target.id, version,
+      instruction: `第${version}版旧的修复办法说明`.padEnd(160, '与'),
+      applicability: '生成或修改 JSON 配置文件时'.padEnd(160, 'x'), exclusions: '',
+      visibility: 'global', lesson: e16BigLesson(`bounded-${version}`),
+      originScope: target.originScope, originEnvironment: target.originEnvironment,
+      originSession: null, stats: { version, since: 1000, coverage: 'complete', injected: 1,
+        recurrences: version, checkPasses: 0, checkFails: 0 },
+      status: 'needs_revision', reason: 'matched_failure', archivedAt: 1000 + version, evidenceHash: null })
+  }
+  const selected = selectHistory(historyDoc, target, () => true)
+  assert.ok(selected.length <= 6)
+  assert.ok(Buffer.byteLength(renderHistoryPrompt(selected), 'utf8') <= 1536)
+  assert.ok(Buffer.byteLength(JSON.stringify(selected), 'utf8') <= 1536)
+  // Restart: the receipt-backed feedback proof survives a new process instance.
+  const { engine, entryId, entry } = e16Lifecycle()
+  engine.prepare({ sessionId: 's5', turnId: 't3', projectKey: 'p1', prompt: e16Prompt })
+  engine.recordCheck({ checkId: 'json-file-parses-v1', passed: true, evidence: { reason: 'ok' },
+    sessionId: 's5', turnId: 't3', entryId, entryVersion: 1, eventId: 'restart-a' })
+  assert.equal(entry().methodStats.checkPasses, 1)
+  const engine2 = new RebuildEngine({ stateRoot: engine.stateRoot })
+  engine2.setRoute({ provider: 'demo', model: 'm1' })
+  const replay = engine2.recordCheck({ checkId: 'json-file-parses-v1', passed: true,
+    evidence: { reason: 'again' }, sessionId: 's5', turnId: 't3', entryId, entryVersion: 1,
+    eventId: 'restart-b' })
+  assert.equal(replay.duplicate, true, 'a restart cannot re-count the same turn/edition')
+  assert.equal(engine2.store.read().entries.find(row => row.id === entryId).methodStats.checkPasses, 1)
+  // Unknown cost: an aborted revise attempt never unlocks the same material.
+  engine2.prepare({ sessionId: 's6', turnId: 't4', projectKey: 'p1', prompt: e16Prompt })
+  engine2.store.transaction(doc => {
+    const row = doc.entries.find(entry => entry.id === entryId)
+    row.status = 'needs_revision'
+    return true
+  })
+  const revision = engine2.beginWork()
+  assert.equal(revision.kind, 'revise')
+  engine2.abortWork({ ticket: revision.ticket, failure: 'aborted', usage: null })
+  const abortedGate = engine2.store.read().materials.find(row =>
+    row.key === engine2.store.read().requests.find(request => request.ticket === revision.ticket).material)
+  assert.equal(abortedGate.unknownCost, true)
+  assert.equal(engine2.pendingWork(), null)
+  assert.equal(engine2.store.read().digest.waitReason, 'unknown_cost_never_auto_replayed')
+  assert.equal(engine2.store.read().entries.find(row => row.id === entryId).status, 'needs_revision')
+})
+
+// Optional REAL-library probe: a read-only backup COPY migrates in a temp dir only.
+test('E5c the read-only real old library backup loads and migrates in a temp copy only', t => {
+  const live = process.env.MSE_EVOLUTION016_LIVE_LIBRARY
+  if (live === undefined) return t.skip('set MSE_EVOLUTION016_LIVE_LIBRARY to a copied memory-v1.json')
+  const copy = root()
+  const original = JSON.parse(readFileSync(live, 'utf8'))
+  writeFileSync(join(copy, 'memory-v1.json'), JSON.stringify(original))
+  const liveStore = new MemoryStore({ stateRoot: copy })
+  const readOld = liveStore.read()
+  assert.equal(readOld.format, 3)
+  assert.deepEqual(readOld.entries, original.entries, 'every old row loads unchanged')
+  liveStore.transaction(doc => { doc.controls.userPaused = doc.controls.userPaused; return true })
+  const migratedLive = JSON.parse(readFileSync(join(copy, 'memory-v1.json'), 'utf8'))
+  assert.equal(migratedLive.format, 4)
+  assert.deepEqual(migratedLive.entries, original.entries, 'migration keeps every old row verbatim')
+  const lessonSnapshots = original.entries.filter(entry => entry.type === 'lesson'
+    && entry.superseded !== null && entry.superseded !== undefined)
+  assert.equal(migratedLive.methodHistory.length, Math.min(lessonSnapshots.length, 128))
+  for (const row of migratedLive.methodHistory) {
+    assert.equal(row.status, 'legacy_partial')
+    assert.equal(row.stats, null, 'no invented statistics')
+    assert.equal(row.evidenceHash, null, 'no invented evidence')
+    assert.equal(row.lesson, null, 'no invented lesson body')
+  }
+  const retiredBefore = original.entries.filter(entry => entry.status === 'retired').map(entry => entry.id)
+  for (const id of retiredBefore) {
+    assert.equal(migratedLive.entries.find(entry => entry.id === id).status, 'retired')
+  }
+  assert.equal(migratedLive.methodHistory.some(row =>
+    original.entries.find(entry => entry.id === row.entryId)?.type === 'rule'), false,
+  'user-rule snapshots never enter the method ledger')
+  const sourceHash = hashFile(live)
+  assert.equal(hashFile(live), sourceHash, 'the real backup file is never written')
+})
+
+// ── EVOLUTION016 (Task 6): extracted pure recall + offline replay proves NO ranking change ────
+test('E6 the extracted ranker reproduces the frozen 24-case selection/order/bytes exactly', async () => {
+  const { recallSelection, replayRecall, packRecall, rankForRecall } =
+    await import('./recall.mjs')
+  const fixture = JSON.parse(readFileSync(new URL('../tests/fixtures/recall-cases.json',
+    import.meta.url), 'utf8'))
+  assert.equal(fixture.schema, 'mse-recall-replay-v1')
+  assert.equal(fixture.cases.length, 24)
+  const categories = new Set(fixture.cases.map(row => row.category))
+  assert.deepEqual([...categories].sort(),
+    ['bytes', 'correction', 'quotes', 'similar', 'version', 'workspace'])
+  for (const testCase of fixture.cases) {
+    const selection = recallSelection(testCase.entries, { prompt: testCase.prompt,
+      scope: testCase.scope, environment: testCase.environment, now: 5000 })
+    assert.deepEqual(selection.offered, testCase.expect.baseline,
+      `${testCase.id}: selection/order/version/mode must be frozen`)
+    assert.equal(selection.bytes, testCase.expect.bytes, `${testCase.id}: byte count frozen`)
+    const selectedIds = selection.offered.map(offer => offer.id)
+    assert.deepEqual([...selectedIds].sort(), [...testCase.expect.relevant].sort(),
+      `${testCase.id}: labels are authored, and every selected id is explicitly relevant`)
+    for (const id of testCase.expect.excluded) assert.equal(selectedIds.includes(id), false)
+  }
+  const baseline = (entries, ctx) => recallSelection(entries, ctx)
+  const report = replayRecall(fixture.cases, baseline)
+  assert.equal(report.labelled, 24)
+  assert.equal(report.unlabelled, 0)
+  assert.equal(report.miss, 0)
+  assert.equal(report.falseOffer, 0)
+  assert.equal(report.criticalRegressions, 0)
+  assert.equal(report.bytes, fixture.cases.reduce((sum, row) => sum + row.expect.bytes, 0))
+  // An unlabelled case is listed separately and scores nothing — it can never look "correct".
+  const unlabelledProbe = fixture.cases.map((row, index) => index === 0
+    ? { ...row, expect: {} } : row)
+  const unlabelledReport = replayRecall(unlabelledProbe, baseline)
+  assert.equal(unlabelledReport.labelled, 23)
+  assert.equal(unlabelledReport.unlabelled, 1)
+  assert.deepEqual(unlabelledReport.unlabelledCases, [fixture.cases[0].id])
+  assert.equal(unlabelledReport.criticalRegressions, 0)
+  // A deliberately WRONG candidate ("unrelated/oldest rule first") must be caught, and its larger
+  // byte total never cancels the critical regression.
+  const unrelatedFirst = (entries, ctx) => {
+    const candidates = entries.filter(entry => entry.status !== 'retired'
+      && (entry.visibility === 'global'
+        || (entry.originScope === ctx.scope && entry.originEnvironment === ctx.environment)))
+    const ranked = candidates.map(entry => ({ entry }))
+      .sort((left, right) => left.entry.updatedAt - right.entry.updatedAt)
+    return packRecall(ranked, ctx)
+  }
+  const wrong = replayRecall(fixture.cases, unrelatedFirst)
+  assert.ok(wrong.criticalRegressions > 0, 'the wrong ranking must report critical regressions')
+  assert.ok(wrong.miss > 0 || wrong.falseOffer > 0)
+  assert.notEqual(wrong.bytes, report.bytes, 'the wrong candidate has its own byte total')
+  assert.equal(typeof wrong.bytes, 'number')
+  // The pure ranker really is scope-aware.
+  const probe = fixture.cases[0]
+  const scoped = rankForRecall(probe.entries, { prompt: probe.prompt,
+    scope: '0'.repeat(64), environment: '0'.repeat(64) })
+  assert.equal(scoped.some(row => row.entry.visibility === 'scoped'), false)
+})
+
+test('E6b the replay CLI is offline-only, writes nothing and is not part of the runtime package', () => {
+  const repo = fileURLToPath(new URL('..', import.meta.url))
+  const cli = join(repo, 'scripts', 'replay-recall.mjs')
+  const fixture = join(repo, 'tests', 'fixtures', 'recall-cases.json')
+  const before = hashFile(fixture)
+  const work = mkdtempSync(join(tmpdir(), 'mse-replay-cli-'))
+  try {
+    const baselineRun = execFileSync(process.execPath, [cli], { cwd: work, encoding: 'utf8' })
+    const baseline = JSON.parse(baselineRun)
+    assert.equal(baseline.ranker, 'baseline')
+    assert.equal(baseline.modelCalls, 0, 'no model call')
+    assert.equal(baseline.liveStoreReads, 0, 'no live store read')
+    assert.equal(baseline.liveStoreWrites, 0, 'no live store write')
+    assert.equal(baseline.labelled, 24)
+    assert.equal(baseline.criticalRegressions, 0)
+    assert.equal(readdirSync(work).length, 0, 'the CLI created no file in its cwd')
+    let wrongStatus = 0
+    let wrong = null
+    try {
+      execFileSync(process.execPath, [cli, '--ranker=irrelevant-first'], { cwd: work, encoding: 'utf8' })
+    } catch (error) {
+      wrongStatus = error.status
+      wrong = JSON.parse(String(error.stdout ?? '{}'))
+    }
+    assert.equal(wrongStatus, 1, 'a critical regression exits non-zero')
+    assert.ok(wrong.criticalRegressions > 0)
+    assert.equal(hashFile(fixture), before, 'the frozen fixture is never rewritten')
+  } finally { rmSync(work, { recursive: true, force: true }) }
+  // The developer CLI and the replay fixture are public SOURCE but NOT runtime package files.
+  const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'))
+  assert.equal(pkg.version, '0.16.0-rc.3')
+  assert.ok(pkg.files.includes('rebuild/recall.mjs'))
+  assert.ok(pkg.files.includes('rebuild/evolution.mjs'))
+  assert.equal(pkg.files.includes('scripts/replay-recall.mjs'), false)
+  assert.equal(pkg.files.includes('tests/fixtures/recall-cases.json'), false)
+  const cliSrc = readFileSync(cli, 'utf8')
+  assert.doesNotMatch(cliSrc, /from '\.\.\/rebuild\/(engine|memory|dsh)\.mjs'/u,
+    'the CLI never imports the runtime engine/store')
+  const publicSet = publicFiles(repo)
+  assert.ok(publicSet.includes('rebuild/recall.mjs'))
+  assert.ok(publicSet.includes('rebuild/evolution.mjs'))
+  assert.ok(publicSet.includes('scripts/replay-recall.mjs'))
+  assert.ok(publicSet.includes('tests/fixtures/recall-cases.json'))
+})
+
+// ── EVOLUTION016 REVIEW-FIX1: the nine independently reproduced counterexamples ──────────────
+const e7Prepare = (engine, turn, session = 's5') => engine.prepare({ sessionId: session, turnId: turn,
+  projectKey: 'p1', prompt: e16Prompt })
+const e7ReviseWith = (engine, steps, instruction = '生成 JSON 前先整体解析校验并删除尾随逗号再写入') => {
+  const revision = engine.beginWork()
+  assert.equal(revision?.kind, 'revise', JSON.stringify(revision))
+  const evidenceIds = JSON.parse(revision.request.text).evidenceIds
+  engine.markDispatched(revision.ticket)
+  return { revision, result: engine.finishWork({ ticket: revision.ticket,
+    usage: { input: 60, output: 40, total: 100 }, result: lessonFor(evidenceIds, instruction, steps) }) }
+}
+
+test('E7a a failed archived mechanism cannot return as a new edition (A→B→A), A→B still replaces', () => {
+  const { engine, entryId, entry, fail } = e16Lifecycle()
+  e7Prepare(engine, 't3')
+  engine.recordCheck({ checkId: 'json-file-parses-v1', passed: false, evidence: { reason: 'bad' },
+    sessionId: 's5', turnId: 't3', entryId, entryVersion: 1, eventId: 'e7a-check' })
+  const b = e7ReviseWith(engine, ['整体 JSON.parse 校验', '删除尾随逗号后写入'])
+  assert.equal(b.result.revision, 'replaced', 'normal A→B still works')
+  e7Prepare(engine, 't5', 's6')
+  fail('fx-7a', 't5', 's6')
+  assert.equal(entry().status, 'needs_revision')
+  const failedV1 = engine.store.read().methodHistory.find(row => row.entryId === entryId && row.version === 1)
+  assert.ok(failedV1.stats.checkFails > 0 || failedV1.stats.recurrences > 0)
+  const historyBefore = engine.store.read().methodHistory.length
+  const a = e7ReviseWith(engine, ['删除结尾多余逗号', '用 JSON.parse 预校验再写入'])
+  assert.equal(a.result.ok, true, JSON.stringify(a.result))
+  assert.equal(a.result.revision, 'no_change', 'the failed v1 mechanism must not become v3')
+  assert.equal(a.result.reason, 'repeated_mechanism')
+  assert.equal(entry().version, 2)
+  assert.equal(engine.store.read().methodHistory.length, historyBefore)
+  const auditRow = engine.store.read().requests.find(row => row.ticket === a.revision.ticket)
+  assert.equal(auditRow.verdictCode, 'repeated_mechanism', 'the refusal is readable in the audit')
+  const gate = engine.store.read().materials.find(row => row.key === auditRow.material)
+  assert.equal(gate.terminal, 'repeated_mechanism')
+})
+
+test('E7b case/parameter changes are a DIFFERENT mechanism, not the legacy normalized no_change', () => {
+  const { engine, entryId, entry, fail } = e16Lifecycle()
+  engine.store.transaction(doc => {
+    const row = doc.entries.find(item => item.id === entryId)
+    row.lesson.repairSteps = ['删除结尾多余逗号', '用 json.parse 预校验再写入']
+    return true
+  })
+  const parentKey = mechanismKey(entry().lesson)
+  const candidateKey = mechanismKey({ repairSteps: ['删除结尾多余逗号', '用 JSON.parse 预校验再写入'],
+    verification: entry().lesson.verification })
+  assert.notEqual(parentKey, candidateKey)
+  e7Prepare(engine, 't3')
+  fail('fx-7b', 't3', 's5')
+  const revised = e7ReviseWith(engine, ['删除结尾多余逗号', '用 JSON.parse 预校验再写入'])
+  assert.equal(revised.result.revision, 'replaced', 'a case change really is a new mechanism')
+  assert.equal(entry().version, 2)
+})
+
+test('E7c history provenance is re-checked by the current source guard; unknown sources stay fixed reasons', () => {
+  const { engine, entryId, fail } = e16Lifecycle()
+  e7Prepare(engine, 't3')
+  engine.recordCheck({ checkId: 'json-file-parses-v1', passed: false, evidence: { reason: 'bad' },
+    sessionId: 's5', turnId: 't3', entryId, entryVersion: 1, eventId: 'e7c-check' })
+  assert.equal(e7ReviseWith(engine, ['整体 JSON.parse 校验', '删除尾随逗号后写入']).result.revision, 'replaced')
+  e7Prepare(engine, 't5', 's6')
+  fail('fx-7c', 't5', 's6')
+  const positive = engine.pendingWork()
+  assert.equal(positive.kind, 'revise')
+  const positiveText = positive.system.slice(positive.system.indexOf('相关旧版结果'))
+  assert.match(positiveText, /删除结尾多余逗号/u, 'an admitted real-provenance history is usable')
+  assert.match(positiveText, /"reason":"check_failed"/u)
+  // Withdraw the archived edition's source, in both provenance representations.
+  engine.store.transaction(doc => {
+    const old = doc.methodHistory.find(row => row.entryId === entryId && row.version === 1)
+    old.originSession = 'withdrawn-source'
+    old.originSessions = ['withdrawn-source']
+    old.instruction = '生成 JSON 时先执行 WITHDRAWN_SOURCE_SENTINEL 再校验文件'
+    return true
+  })
+  engine.setSourceGuard(sessionId => sessionId !== 'withdrawn-source')
+  fail('fx-7c2', 't7', 's6') // new capsule → new material, same pending revision
+  const rejected = engine.pendingWork()
+  assert.equal(rejected.kind, 'revise')
+  const rejectedTail = rejected.system.slice(rejected.system.indexOf('相关旧版结果'))
+  assert.doesNotMatch(rejectedTail, /WITHDRAWN_SOURCE_SENTINEL/u, 'a withdrawn source never reaches the model')
+  const rejectedRow = JSON.parse(rejectedTail.slice(rejectedTail.indexOf('：') + 1, rejectedTail.indexOf('\n'))
+    .trim())
+  assert.equal(rejectedRow.find(row => row.version === 1).reason, 'source_unverified')
+  assert.equal(rejectedRow.find(row => row.version === 1).instruction, null)
+  // Unknown (null) provenance is a fixed safe reason too — never the generic "current source".
+  engine.store.transaction(doc => {
+    const old = doc.methodHistory.find(row => row.entryId === entryId && row.version === 1)
+    old.originSession = null
+    delete old.originSessions
+    return true
+  })
+  fail('fx-7c3', 't8', 's6')
+  const unknown = engine.pendingWork()
+  const unknownTail = unknown.system.slice(unknown.system.indexOf('相关旧版结果'))
+  const unknownRow = JSON.parse(unknownTail.slice(unknownTail.indexOf('：') + 1, unknownTail.indexOf('\n')).trim())
+  assert.equal(unknownRow.find(row => row.version === 1).reason, 'source_unverified')
+})
+
+test('E7d a legacy partial snapshot never becomes a complete window or a recovered method', () => {
+  const { engine, entryId, entry } = e16Lifecycle()
+  e7Prepare(engine, 't3')
+  engine.recordCheck({ checkId: 'json-file-parses-v1', passed: false, evidence: { reason: 'bad' },
+    sessionId: 's5', turnId: 't3', entryId, entryVersion: 1, eventId: 'e7d-check' })
+  assert.equal(e7ReviseWith(engine, ['整体 JSON.parse 校验', '删除尾随逗号后写入']).result.revision, 'replaced')
+  const doc = engine.store.read()
+  doc.format = 3
+  delete doc.methodHistory
+  writeFileSync(engine.store.path, JSON.stringify(doc))
+  const late = engine.recordCheck({ checkId: 'json-file-parses-v1', passed: true,
+    evidence: { reason: 'late-partial' }, sessionId: 's5', turnId: 't3', entryId, entryVersion: 1,
+    eventId: 'e7d-late' })
+  assert.equal(late.ok, true)
+  assert.equal(late.settled, false)
+  assert.equal(late.reason, 'version_evidence_partial')
+  const after = engine.store.read()
+  const partial = after.methodHistory.find(row => row.entryId === entryId && row.version === 1)
+  assert.equal(partial.status, 'legacy_partial')
+  assert.equal(partial.stats, null, 'no complete window is fabricated')
+  assert.equal(partial.lesson, null, 'no recovered method is fabricated')
+  const current = after.entries.find(row => row.id === entryId)
+  assert.equal(current.version, 2, 'the late result is never moved to the current edition')
+  assert.equal(current.evidenceHash, null)
+  assert.equal(current.methodStats.checkPasses, 0)
+  assert.ok(after.checkEvents.some(row => row.entryId === entryId && row.entryVersion === 1
+    && row.passed === true), 'the real event survives as an independent audit row')
+})
+
+test('E7d2 a complete old method with unknown stats only gets a since_upgrade window', () => {
+  const { engine, entryId } = e16Lifecycle()
+  e7Prepare(engine, 't3')
+  engine.store.transaction(doc => {
+    const row = doc.entries.find(entry => entry.id === entryId)
+    row.status = 'needs_revision'
+    row.methodStats = null
+    return true
+  })
+  assert.equal(e7ReviseWith(engine, ['整体 JSON.parse 校验', '删除尾随逗号后写入']).result.revision, 'replaced')
+  const archived = engine.store.read().methodHistory.find(row => row.entryId === entryId && row.version === 1)
+  assert.equal(archived.stats, null)
+  assert.ok(archived.lesson !== null, 'the old method body is complete')
+  const late = engine.recordCheck({ checkId: 'json-file-parses-v1', passed: true,
+    evidence: { reason: 'late-full' }, sessionId: 's5', turnId: 't3', entryId, entryVersion: 1,
+    eventId: 'e7d2-late' })
+  assert.equal(late.versionScope, 'history')
+  const after = engine.store.read().methodHistory.find(row => row.entryId === entryId && row.version === 1)
+  assert.equal(after.stats.coverage, 'since_upgrade', 'unknown old counts are never claimed as complete')
+  assert.equal(after.stats.injected, 0)
+  assert.equal(after.stats.checkPasses, 1)
+})
+
+test('E7e a cancelled turn refuses late method credit and keeps its per-turn proof', () => {
+  const { engine, entryId, entry } = e16Lifecycle()
+  e7Prepare(engine, 't3')
+  engine.complete({ sessionId: 's5', turnId: 't3', outcome: 'cancelled' })
+  const before = structuredClone(entry())
+  const late = engine.recordCheck({ checkId: 'json-file-parses-v1', passed: false,
+    evidence: { reason: 'late-after-cancel' }, sessionId: 's5', turnId: 't3', entryId,
+    entryVersion: 1, eventId: 'e7e-late' })
+  assert.equal(late.ok, true)
+  assert.equal(late.settled, false)
+  assert.equal(late.reason, 'cancelled_turn_not_creditable')
+  assert.deepEqual(entry(), before, 'a cancelled turn cannot acquire later method failure credit')
+  // A recurrence recorded in the turn is rolled back but its proof row remains (no unlock).
+  const s2 = e16Lifecycle()
+  e7Prepare(s2.engine, 't3')
+  s2.fail('fx-7e', 't3', 's5')
+  assert.equal(s2.entry().recurrences, 1)
+  s2.engine.complete({ sessionId: 's5', turnId: 't3', outcome: 'cancelled' })
+  assert.equal(s2.entry().recurrences, 0)
+  const receipt = s2.engine.store.read().receipts.find(row => row.offered.some(x => x.id === s2.entryId))
+  const proof = receipt.methodFeedback.find(row => row.kind === 'recurrence')
+  assert.ok(proof !== undefined, 'the per-turn proof is kept, not deleted')
+  assert.equal(proof.voided, true)
+})
+
+test('E7f the native JSON checker reads the ACTUALLY offered edition, both directions', () => {
+  const { engine, entryId } = e16Lifecycle()
+  e7Prepare(engine, 't3')
+  engine.recordCheck({ checkId: 'json-file-parses-v1', passed: false, evidence: { reason: 'bad' },
+    sessionId: 's5', turnId: 't3', entryId, entryVersion: 1, eventId: 'e7f-check' })
+  assert.equal(e7ReviseWith(engine, ['整体 JSON.parse 校验', '删除尾随逗号后写入']).result.revision, 'replaced')
+  // Current v2 is no longer JSON — the archived v1 JSON offer must still be recognized.
+  engine.store.transaction(doc => {
+    const row = doc.entries.find(entry => entry.id === entryId)
+    row.instruction = '生成 YAML 配置文件时先检验缩进层级再写入'
+    row.applicability = '生成 YAML 配置时'
+    row.lesson.failurePattern = 'YAML 缩进层级错误'
+    row.lesson.verification = { check: '验证 YAML 缩进层级', expected: '语法正确' }
+    return true
+  })
+  assert.deepEqual(engine.jsonRelevantOffers({ sessionId: 's5', turnId: 't3' })
+    .map(offer => [offer.id, offer.version]), [[entryId, 1]])
+  // Reverse: a non-JSON archived v1 must NOT become JSON-related because the current v2 is JSON.
+  engine.store.transaction(doc => {
+    const old = doc.methodHistory.find(row => row.entryId === entryId && row.version === 1)
+    old.instruction = '生成 YAML 配置文件时先检验缩进层级再写入'
+    old.applicability = '生成 YAML 配置时'
+    old.lesson.failurePattern = 'YAML 缩进层级错误'
+    old.lesson.verification = { check: '验证 YAML 缩进层级', expected: '语法正确' }
+    return true
+  })
+  assert.deepEqual(engine.jsonRelevantOffers({ sessionId: 's5', turnId: 't3' }), [])
+})
+
+test('E7g guard reports only what happened; legacy needs_revision is conservatively warned', () => {
+  const { engine, entry, entryId, fail } = e16Lifecycle()
+  e7Prepare(engine, 't3')
+  fail('fx-7g', 't3', 's5')
+  const matched = entry()
+  assert.equal(matched.methodStats.recurrences, 1)
+  assert.equal(matched.methodStats.checkFails, 0)
+  const warning = guardSummary(matched)
+  assert.match(warning, /同类复发 1 次/u)
+  assert.doesNotMatch(warning, /未通过/u, 'no checker failure is invented')
+  assert.doesNotMatch(warning, /检查「[^」]*」/u)
+  // A REAL checker failure is reported as such.
+  engine.store.transaction(doc => {
+    doc.entries.find(item => item.id === entryId).methodStats.checkFails = 1
+    return true
+  })
+  const failed = guardSummary(entry())
+  assert.match(failed, /检查「对文件执行 JSON\.parse」失败 1 次/u)
+  // Legacy needs_revision with no stats and zero recurrences must still be a warning, without fake counts.
+  engine.store.transaction(doc => {
+    const row = doc.entries.find(item => item.id === entryId)
+    row.recurrences = 0
+    row.status = 'needs_revision'
+    delete row.methodStats
+    return true
+  })
+  assert.equal(methodNeedsGuard(entry()), true)
+  const legacy = guardSummary(entry())
+  assert.match(legacy, /待修订|未记录/u)
+  assert.doesNotMatch(legacy, /0 次/u)
+  assert.doesNotMatch(legacy, /未通过/u)
+})
+
+test('E7h a complete legal edition is archived byte-for-byte (emoji boundary)', () => {
+  const { engine, entryId, entry, fail } = e16Lifecycle()
+  const emojiInstruction = '😀'.repeat(119) + 'JSON'
+  assert.equal(Buffer.byteLength(emojiInstruction, 'utf8'), 480)
+  assert.equal(emojiInstruction.length, 242, 'UTF-16 units')
+  assert.equal([...emojiInstruction].length, 123, 'code points')
+  engine.store.transaction(doc => {
+    doc.entries.find(item => item.id === entryId).instruction = emojiInstruction
+    return true
+  })
+  e7Prepare(engine, 't3')
+  fail('fx-7h', 't3', 's5')
+  assert.equal(e7ReviseWith(engine, ['整体 JSON.parse 校验', '删除尾随逗号后写入']).result.revision, 'replaced')
+  const archived = engine.store.read().methodHistory.find(row => row.entryId === entryId && row.version === 1)
+  assert.equal(archived.instruction, emojiInstruction, 'the whole legal instruction is preserved')
+  assert.equal(Buffer.byteLength(archived.instruction, 'utf8'), 480)
+  assert.equal(archived.instruction.endsWith('JSON'), true)
+  assert.ok(Buffer.byteLength(JSON.stringify(archived), 'utf8') <= 6144)
+})
+
+test('E7i a freshly generated daily lesson owns a complete window from birth', () => {
+  const { engine, entryId, entry } = e16Lifecycle()
+  const created = entry().methodStats
+  assert.equal(created.version, 1)
+  assert.equal(created.coverage, 'complete', 'a new edition does not inherit an unknown old window')
+  assert.equal(created.injected, 0)
+  e7Prepare(engine, 't3')
+  assert.equal(entry().methodStats.coverage, 'complete')
+  assert.equal(entry().methodStats.injected, 1)
+})
+
+test('E7j the archive-row preview drives early capacity refusal; impossible rows are refused', () => {
+  const { engine, entry, fail } = e16Lifecycle()
+  e7Prepare(engine, 't3')
+  fail('fx-7j', 't3', 's5')
+  const v1 = structuredClone(entry())
+  const preview = historyRowPreview(v1, { now: 5000, provenanceSessions: ['s1'] })
+  assert.ok(preview.bytes > 100 && preview.bytes < 6144, JSON.stringify(preview.bytes))
+  assert.equal(preview.tooLarge, false)
+  // A row that cannot be represented is refused, never truncated silently.
+  const oversized = structuredClone(v1)
+  oversized.lesson.failurePattern = 'x'.repeat(8000)
+  const refused = archiveVersion({ methodHistory: [] }, oversized, { now: 5000 })
+  assert.equal(refused.ok, false)
+  assert.equal(refused.code, 'method_history_row_too_large')
+  // A legal store whose REMAINING slack is smaller than the ACTUAL archive row waits BEFORE the
+  // model request instead of charging first and rolling back at commit.
+  const { engine: engine2, entryId: entryId2 } = e16Lifecycle()
+  e7Prepare(engine2, 't3')
+  engine2.recordCheck({ checkId: 'json-file-parses-v1', passed: false, evidence: { reason: 'bad' },
+    sessionId: 's5', turnId: 't3', entryId: entryId2, entryVersion: 1, eventId: 'e7j-check' })
+  const pendingEntry = structuredClone(engine2.store.read().entries.find(row => row.id === entryId2))
+  const rowPreview = historyRowPreview(pendingEntry, { now: 5000, provenanceSessions: ['s1'] })
+  const inflated = e16InflateDoc(engine2.store.read(), MAX_STORE_BYTES - rowPreview.bytes - 512,
+    { historyRows: 0 })
+  const bytes = Buffer.byteLength(JSON.stringify(inflated), 'utf8')
+  assert.ok(bytes <= MAX_STORE_BYTES, `inflated store stays legal (${bytes})`)
+  engine2.store.transaction(doc => {
+    doc.entries = inflated.entries
+    doc.methodHistory = inflated.methodHistory
+    doc.digest.days = inflated.digest.days
+    return true
+  })
+  const requestsBefore = engine2.store.read().requests.length
+  assert.equal(engine2.pendingWork(), null)
+  assert.equal(engine2.store.read().digest.waitReason, 'storage_capacity')
+  assert.equal(engine2.store.read().requests.length, requestsBefore, 'no model request was prepared')
+})
+
+// ── EVOLUTION016 REVIEW-FIX2: shared feedback admission, birth source snapshots, full guard,
+//    real-transaction capacity forecast ───────────────────────────────────────────────────────
+const e16ReflectFrom = sessions => {
+  let clock = new Date(2026, 9, 29, 12, 0, 0).getTime()
+  const engine = new RebuildEngine({ stateRoot: root(), now: () => clock += 1000 })
+  engine.setRoute({ provider: 'demo', model: 'm1' })
+  engine.setSourceGuard(() => true)
+  const first = failingJsonRun(root())
+  const fail = (callId, turn, session) => engine.observeToolFailure({ sessionId: session,
+    turnId: turn, projectKey: 'p1', callId, toolName: 'bash', failureCode: 'tool_nonzero_exit',
+    exitCode: first.exit, stderr: first.stderr, command: 'node parse-broken.js bad.json' })
+  sessions.forEach((session, index) => fail(`fxr-${index}`, `tr${index}`, session))
+  const work = engine.beginWork()
+  assert.equal(work?.kind, 'reflect', JSON.stringify(work))
+  const evidenceIds = JSON.parse(work.request.text).evidenceIds
+  engine.markDispatched(work.ticket)
+  const created = engine.finishWork({ ticket: work.ticket, usage: { total: 40 },
+    result: lessonFor(evidenceIds, '生成 JSON 时先删除结尾多余逗号并用 JSON.parse 预校验') })
+  assert.equal(created.ok, true, JSON.stringify(created))
+  return { engine, entryId: created.entryId,
+    entry: () => engine.store.read().entries.find(row => row.id === created.entryId), fail }
+}
+
+test('E8a a cancelled turn refuses the FIRST late tool recurrence (no feedback row to rely on)', () => {
+  const { engine, entryId, entry, fail } = e16Lifecycle()
+  e7Prepare(engine, 't3')
+  engine.complete({ sessionId: 's5', turnId: 't3', outcome: 'cancelled' })
+  const before = structuredClone(entry())
+  fail('fx-8a', 't3', 's5')
+  assert.deepEqual(entry(), before, 'no recurrence/status/window credit after a cancelled terminal')
+  assert.equal(entry().methodStats.recurrences, 0)
+  const receipt = engine.store.read().receipts.find(row => row.offered.some(x => x.id === entryId))
+  assert.equal((receipt.methodFeedback ?? []).some(row => row.kind === 'recurrence'), false)
+  // The real tool event is still audited as a capsule — refusing credit never deletes evidence.
+  assert.equal(engine.store.read().problemLoop.problems
+    .some(problem => (problem.capsules ?? []).some(capsule => capsule.originSessionId === 's5')), true)
+})
+
+test('E8b a late tool failure on a complete history edition with unknown stats is since_upgrade', () => {
+  const { engine, entryId, entry, fail } = e16Lifecycle()
+  e7Prepare(engine, 't3')
+  engine.recordCheck({ checkId: 'json-file-parses-v1', passed: false, evidence: { reason: 'bad' },
+    sessionId: 's5', turnId: 't3', entryId, entryVersion: 1, eventId: 'e8b-check' })
+  assert.equal(e16Revise(engine).revision, 'replaced')
+  engine.store.transaction(doc => { doc.methodHistory[0].stats = null; return true })
+  fail('fx-8b', 't3', 's5')
+  const archived = engine.store.read().methodHistory.find(row => row.entryId === entryId && row.version === 1)
+  assert.equal(archived.stats.coverage, 'since_upgrade')
+  assert.equal(archived.stats.recurrences, 1)
+  assert.equal(archived.stats.injected, 0)
+  assert.equal(entry().version, 2)
+  assert.equal(entry().methodStats.recurrences, 0, 'the late result never lands on the current edition')
+})
+
+test('E8c a multi-source birth keeps its whole snapshot; a revision cannot lend it a newer source', () => {
+  const { engine, entryId, entry, fail } = e16ReflectFrom(['birth-A', 'birth-B'])
+  assert.equal(entry().originSession, null)
+  assert.deepEqual(entry().originSessions, ['birth-A', 'birth-B'], 'both birth sources are frozen')
+  e7Prepare(engine, 't3', 'admitted-source')
+  fail('fx-8c', 't3', 'admitted-source')
+  assert.equal(e16Revise(engine).revision, 'replaced')
+  const old = engine.store.read().methodHistory.find(row => row.entryId === entryId && row.version === 1)
+  assert.equal(old.originSession, null)
+  assert.deepEqual(old.originSessions, ['birth-A', 'birth-B'], 'the archive copies the OLD edition snapshot')
+  assert.deepEqual([...entry().originSessions].sort(),
+    ['admitted-source', 'birth-A', 'birth-B'], 'the NEW edition freezes its own request evidence')
+  assert.notDeepEqual(entry().originSessions, old.originSessions)
+  // Withdraw the birth sources: the old-body revision must wait BEFORE the provider, not leak.
+  engine.setSourceGuard(session => !['birth-A', 'birth-B'].includes(session))
+  e7Prepare(engine, 't4', 'admitted-source')
+  fail('fx-8c2', 't4', 'admitted-source')
+  const before = structuredClone(entry())
+  const work = engine.beginWork()
+  assert.equal(work, null, 'a withdrawn birth source blocks the revision request')
+  assert.equal(engine.pendingWork(), null)
+  assert.equal(engine.store.read().digest.waitReason, 'source_unverified')
+  assert.deepEqual(entry(), before, 'no half transaction on the blocked edition')
+})
+
+test('E8d guard names the concrete failure; two guards each stay identifiable inside 2×768 B', () => {
+  const { engine, entryId, entry, fail } = e16Lifecycle()
+  e7Prepare(engine, 't3')
+  fail('fx-8d', 't3', 's5')
+  engine.store.transaction(doc => {
+    const base = doc.entries.find(row => row.id === entryId)
+    const second = structuredClone(base)
+    second.id = e16Id('guard-two')
+    second.instruction = '生成 JSON 时先备份原文件再删除结尾多余逗号'
+    second.lesson.failurePattern = '备份文件缺失 ENOENT: no such file'
+    second.lesson.verification = { check: '确认备份存在', expected: '备份可读' }
+    second.problemSignature = null
+    second.createdAt = second.updatedAt = base.updatedAt + 1
+    second.methodStats = { version: 1, since: second.createdAt, coverage: 'since_upgrade',
+      injected: 0, recurrences: 1, checkPasses: 0, checkFails: 0 }
+    delete second.originSessions
+    doc.entries.push(second)
+    return true
+  })
+  const recalled = engine.prepare({ sessionId: 's5', turnId: 't6', projectKey: 'p1', prompt: e16Prompt })
+  assert.equal(recalled.offered.length, 2)
+  assert.equal(recalled.offered.every(offer => offer.mode === 'guard'), true)
+  assert.match(recalled.context, /具体失败模式/u)
+  assert.match(recalled.context, /SyntaxError/u)
+  assert.match(recalled.context, /ENOENT/u)
+  assert.doesNotMatch(recalled.context, /用 JSON\.parse 预校验再写入/u, 'old repair steps are never replayed')
+  assert.doesNotMatch(recalled.context, /未通过/u, 'no checker failure is invented')
+  assert.ok(Buffer.byteLength(recalled.context, 'utf8') <= 768)
+})
+
+test('E8e the REAL transaction is forecast: a legal near-capacity store waits before dispatch', () => {
+  const { engine, entryId, entry, fail } = e16Lifecycle()
+  e7Prepare(engine, 't3')
+  fail('fx-8e', 't3', 's5')
+  const preview = historyRowPreview(entry(), { now: 2000 })
+  const doc = engine.store.read()
+  const target = MAX_STORE_BYTES - preview.bytes - 1100
+  const size = () => Buffer.byteLength(JSON.stringify(doc))
+  for (let i = 1; i <= 20 && size() + 400 < target; i++) {
+    const day = { day: `2026-09-${String(i).padStart(2, '0')}`, throughAt: 1000,
+      status: 'summarized', summary: null, entryIds: [], factKeys: [] }
+    doc.digest.days.push(day)
+    const pool = Array.from({ length: 1024 }, (_, j) => `case-${i}-${j}-`.padEnd(256, 'x'))
+    let low = 0, high = 1024, best = 0
+    while (low <= high) {
+      const mid = (low + high) >> 1
+      day.factKeys = pool.slice(0, mid)
+      if (size() <= target) { best = mid; low = mid + 1 } else high = mid - 1
+    }
+    day.factKeys = pool.slice(0, best)
+    const delta = target - size()
+    if (best < 1024 && delta > 10 && delta <= 259) {
+      day.factKeys.push('tail-'.padEnd(delta - 3, 'x'))
+      break
+    }
+    if (best < 1024) break
+  }
+  validateDoc(doc)
+  writeFileSync(engine.store.path, JSON.stringify(doc))
+  const before = structuredClone(engine.store.read())
+  const work = engine.beginWork()
+  assert.equal(work, null, 'the forecast refuses before the provider instead of throwing at commit')
+  assert.equal(engine.store.read().digest.waitReason, 'storage_capacity')
+  assert.equal(engine.store.read().requests.length, before.requests.length,
+    'no request row was half-written (existing settled audit rows stay)')
+  assert.equal(engine.store.read().requests.some(row => !row.settled), false)
+  assert.equal(engine.store.read().entries.find(row => row.id === entryId).version, before.entries
+    .find(row => row.id === entryId).version)
+  assert.equal(engine.store.read().entries.find(row => row.id === entryId).status, 'needs_revision')
+})
+
+test('E8f Unicode survives snapshots and guard bounds without replacement characters', () => {
+  const { engine, entryId, entry, fail } = e16ReflectFrom(['会话😀A', '会话😀B'])
+  assert.deepEqual(entry().originSessions, ['会话😀A', '会话😀B'])
+  e7Prepare(engine, 't3', 'admitted-source')
+  fail('fx-8f', 't3', 'admitted-source')
+  assert.equal(e16Revise(engine).revision, 'replaced')
+  const archived = engine.store.read().methodHistory.find(row => row.entryId === entryId && row.version === 1)
+  assert.deepEqual(archived.originSessions, ['会话😀A', '会话😀B'])
+  assert.equal(JSON.parse(JSON.stringify(archived.originSessions)).join('|'), '会话😀A|会话😀B')
+  engine.store.transaction(doc => {
+    const row = doc.entries.find(item => item.id === entryId)
+    row.status = 'needs_revision'
+    row.lesson.failurePattern = '😀'.repeat(100)
+    return true
+  })
+  const warning = guardSummary(entry())
+  assert.equal(warning.includes('\uFFFD'), false)
+  assert.equal(JSON.parse(JSON.stringify(warning)), warning)
+  assert.ok(Buffer.byteLength(warning, 'utf8') < 768)
+})
+
+// ── NATURAL-GATE-FIX: ordinary corrections must read the REAL prohibition, not a 别 inside
+//    分别/区别/类别/识别/特别, and a positive clarification is not an inversion merely because it
+//    shares the banned object. Real live wording is the source text; answers are fabricated only.
+const NATURAL_LIVE_TEXT = 'MSE016-LIVE-CORRECTION-A  不对，插件升级验收时，报告里的已安装版本必须读取当前'
+  + '宿主实际加载的插件版本，不能拿候选包文件名代替； 候选版本和已安装版本要分别写清。 '
+  + '后续类似插件验收都按这个口径。 简短答复即可。'
+const e9Engine = () => {
+  let clock = new Date(2026, 9, 30, 16, 0, 0).getTime()
+  const stateRoot = root()
+  const engine = new RebuildEngine({ stateRoot, now: () => clock += 1000 })
+  engine.setRoute({ provider: 'fake-natural', model: 'local' })
+  engine.setSourceGuard(() => true)
+  engine.naturalStateRoot = stateRoot
+  return engine
+}
+const e9Extract = (engine, correction, userText = NATURAL_LIVE_TEXT,
+  sessionId = 'session-8783b7c3-e0b6-4cb4-a05b-81ac72940129', turnId = '1') => {
+  const candidate = engine.recordCorrectionCandidate({ sessionId, turnId, userText,
+    cwd: '/Users/missher/Documents/Deepseek-File/Crodis' })
+  assert.equal(candidate.ok, true, JSON.stringify(candidate))
+  const work = engine.beginWork()
+  assert.equal(work?.kind, 'extract', JSON.stringify(work))
+  engine.markDispatched(work.ticket)
+  return engine.finishWork({ ticket: work.ticket, usage: { total: 40 },
+    result: { schema: 'mse-correction-extract-v1', corrections: [correction] } })
+}
+const E9_C1 = '插件升级验收时，已安装版本必须读取当前宿主实际加载的插件版本，不能拿候选包文件名代替；候选版本和已安装版本要分别写清。'
+const E9_C2 = '插件升级验收时，已安装版本必须读取当前宿主实际加载的插件版本；不能拿候选包文件名代替已安装版本；候选包文件名仅用于标示候选版本，两种版本分别写清。'
+
+test('E9a natural correction candidate 1 (分别) saves and reaches a rebuilt engine in another session/cwd', () => {
+  const engine = e9Engine()
+  const result = e9Extract(engine, { evidence: '已安装版本必须读取当前宿主实际加载的插件版本，不能拿候选包文件名代替',
+    instruction: E9_C1, applicability: '插件升级验收时', intent: 'global', reason: '验收口径' })
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.equal(result.saved?.length, 1, JSON.stringify(result))
+  assert.equal(engine.store.read().entries.length, 1)
+  // A fresh engine over the SAME store, a NEW session and another project/cwd must recall it.
+  const rebuilt = new RebuildEngine({ stateRoot: engine.naturalStateRoot })
+  rebuilt.setRoute({ provider: 'fake-natural', model: 'local' })
+  rebuilt.setSourceGuard(() => true)
+  const recalled = rebuilt.prepare({ sessionId: 'session-other', turnId: '7',
+    projectKey: '/repo/another-cwd', prompt: '插件升级验收时，已安装版本怎么报告？' })
+  assert.ok(recalled.offered.length >= 1, 'the saved correction is recalled in the rebuilt engine')
+  assert.match(recalled.context, /宿主实际加载的插件版本/u)
+  assert.match(recalled.context, /不能拿候选包文件名代替/u)
+})
+
+test('E9b natural correction candidate 2 (separate candidate-version statement) saves', () => {
+  const engine = e9Engine()
+  const result = e9Extract(engine, { evidence: '候选版本和已安装版本要分别写清',
+    instruction: E9_C2, applicability: '插件升级验收时', intent: 'global', reason: '验收口径' })
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.equal(result.saved?.length, 1, JSON.stringify(result))
+  assert.equal(engine.store.read().entries.length, 1)
+})
+
+test('E9c the UNCHANGED real sentence (with 分别) is saved, not only the 分开 lexical control', () => {
+  const engine = e9Engine()
+  const instruction = '插件升级验收时，报告里的已安装版本必须读取当前宿主实际加载的插件版本，'
+    + '不能拿候选包文件名代替；候选版本和已安装版本要分别写清。'
+  const result = e9Extract(engine, { evidence: '不能拿候选包文件名代替',
+    instruction, applicability: '插件升级验收时', intent: 'global', reason: '验收口径' })
+  assert.equal(result.saved?.length, 1, JSON.stringify(result))
+})
+
+test('E9d positive words 分别/区别/类别/识别/特别 never fabricate a prohibition', () => {
+  const engine = e9Engine()
+  const user = '不对，特别说明：区别候选版本和已安装版本时要识别清楚，不能拿候选包文件名代替实际加载版本。'
+  const result = e9Extract(engine, {
+    evidence: '区别候选版本和已安装版本时要识别清楚，不能拿候选包文件名代替实际加载版本',
+    instruction: '特别说明：区别候选版本和已安装版本时要识别清楚，不能拿候选包文件名代替实际加载版本。',
+    applicability: '插件升级验收时', intent: 'global', reason: '区分两种版本' }, user,
+  'session-positive-words', '1')
+  assert.equal(result.saved?.length, 1, JSON.stringify(result))
+})
+
+test('E9e a real ban kept faithfully still saves; the same action affirmed remains refused', () => {
+  const source = '这个不对，不要重复运行已经通过的测试，只检查这次受影响的部分。'
+  const faithfulEngine = e9Engine()
+  const faithful = e9Extract(faithfulEngine, { evidence: '不要重复运行已经通过的测试，只检查这次受影响的部分',
+    instruction: '只检查本次受影响的部分，不要重复运行已经通过的测试',
+    applicability: '做回归确认时', intent: 'global', reason: '测试纪律' }, source, 's-faithful', '1')
+  assert.equal(faithful.saved?.length, 1, JSON.stringify(faithful))
+  const invertedEngine = e9Engine()
+  const inverted = e9Extract(invertedEngine, { evidence: '不要重复运行已经通过的测试，只检查这次受影响的部分',
+    instruction: '不要重复运行已经通过的测试，同时重复运行已经通过的测试以确保无遗漏',
+    applicability: '做检查时', intent: 'global', reason: 'x' }, source, 's-inverted', '1')
+  assert.equal(inverted.saved?.length, 0, JSON.stringify(inverted))
+  assert.equal(invertedEngine.store.read().corrections[0].reason, 'negation_or_scope_dropped')
+})
+
+test('E9f a dropped negation is still refused (no "有一个不要就通过") and object-only sharing is not inversion', () => {
+  const source = '这个不对，不要重复运行已经通过的测试，只检查这次受影响的部分。'
+  const droppedEngine = e9Engine()
+  const dropped = e9Extract(droppedEngine, { evidence: '不要重复运行已经通过的测试',
+    instruction: '重复运行已经通过的测试前先确认环境干净', applicability: '跑测试时',
+    intent: 'global', reason: 'x' }, source, 's-dropped', '1')
+  assert.equal(dropped.saved?.length, 0, JSON.stringify(dropped))
+  assert.equal(droppedEngine.store.read().corrections[0].reason, 'negation_or_scope_dropped')
+  // Positive object mention (same object, different stated action) beside the faithful ban must save.
+  const objectOnlyEngine = e9Engine()
+  const objectOnly = e9Extract(objectOnlyEngine, { evidence: '不能拿候选包文件名代替',
+    instruction: '候选包文件名仅用于标示候选版本；已安装版本必须读取当前宿主实际加载的插件版本，不能拿候选包文件名代替。',
+    applicability: '插件升级验收时', intent: 'global', reason: '区分口径' }, NATURAL_LIVE_TEXT, 's-object', '1')
+  assert.equal(objectOnly.saved?.length, 1, JSON.stringify(objectOnly))
+})
+
+test('E9g word-initial 别拿 is a real prohibition (faithful saves, dropped refuses); 别的 stays ordinary', () => {
+  const source = '这个不对，别拿候选包文件名代替已安装版本。'
+  const savedEngine = e9Engine()
+  const saved = e9Extract(savedEngine, { evidence: '别拿候选包文件名代替已安装版本',
+    instruction: '别拿候选包文件名代替已安装版本，候选版本和已安装版本要分别写清。',
+    applicability: '插件升级验收时', intent: 'global', reason: '验收口径' }, source, 's-bie', '1')
+  assert.equal(saved.saved?.length, 1, JSON.stringify(saved))
+  const droppedEngine = e9Engine()
+  const dropped = e9Extract(droppedEngine, { evidence: '别拿候选包文件名代替已安装版本',
+    instruction: '候选包文件名代替已安装版本即可，版本写清就行。',
+    applicability: '插件升级验收时', intent: 'global', reason: 'x' }, source, 's-bie-drop', '1')
+  assert.equal(dropped.saved?.length, 0, JSON.stringify(dropped))
+  assert.equal(droppedEngine.store.read().corrections[0].reason, 'negation_or_scope_dropped')
+  const ordinary = '这个不对，别的插件不要直接改安装目录，只在源码里改。'
+  const ordinaryEngine = e9Engine()
+  const ordinaryResult = e9Extract(ordinaryEngine, { evidence: '别的插件不要直接改安装目录，只在源码里改',
+    instruction: '别的插件不要直接改安装目录，只在源码里改。',
+    applicability: '处理其它插件时', intent: 'global', reason: '安装纪律' }, ordinary, 's-other', '1')
+  assert.equal(ordinaryResult.saved?.length, 1, JSON.stringify(ordinaryResult))
+})
+
+test('E9h the SAME predicate on the SAME object is an inversion even without the 拿 coverb', () => {
+  for (const tail of ['候选包文件名可以代替已安装版本。', '用候选包文件名代替已安装版本。']) {
+    const engine = e9Engine()
+    const result = e9Extract(engine, { evidence: '不能拿候选包文件名代替',
+      instruction: E9_C1 + tail, applicability: '插件升级验收时', intent: 'global',
+      reason: '验收口径' }, NATURAL_LIVE_TEXT, 's-same-predicate', '1')
+    assert.equal(result.saved?.length, 0, `${tail} -> ${JSON.stringify(result)}`)
+    assert.equal(engine.store.read().corrections[0].reason, 'negation_or_scope_dropped', tail)
+  }
+})
+
+// ── CONTEXT-SCOPE-016: trusted bounded prior-turn context, split durability/scope, mixed
+//    temporary+durable messages, project scope without a 「全局」 passphrase. ────────────────────
+// REAL rc.4 shapes observed in probes/evolution016-real-demo: user/message data is FLAT
+// ({role,content,source,id}) with no turn; turn ownership comes from turn/start…turn/end.
+const ctxUserEvent = (seq, turn, text, source = { kind: 'user' }) => ({ type: 'user/message', seq,
+  data: { id: `u${turn}-${seq}`, role: 'user', source, content: [{ type: 'text', text }] } })
+const ctxAssistantEvent = (seq, turn, text) => ({ type: 'assistant/message', seq,
+  data: { turn, step: 1, message: { role: 'assistant',
+    source: { kind: 'model', provider: 'demo', model: 'm1' }, content: [{ type: 'text', text }] } } })
+const pushContextTurn = (s, turn, userText, assistantText = null, base = 0) => {
+  s.events.push({ type: 'turn/start', seq: base, data: { turn } })
+  s.events.push(ctxUserEvent(base + 1, turn, userText))
+  let seq = base + 2
+  if (assistantText !== null) { s.events.push(ctxAssistantEvent(seq, turn, assistantText)); seq += 1 }
+  s.events.push({ type: 'turn/end', seq, data: { turn, reason: { kind: 'completed' } } })
+}
+
+test('CS1 a mixed message stores the durable rule and refuses only its temporary clause', async () => {
+  const w = extWiring(root(), [{ answer: { schema: 'mse-correction-extract-v1', corrections: [
+    { evidence: '这次先别改安装目录', instruction: '这次先别改安装目录', applicability: '这次改动',
+      durability: 'one_off', scope: 'uncertain', basis: '当前句明确说这次', reason: '临时' },
+    { evidence: '以后所有插件改动都要在源码改完并打包后再交付', instruction: '插件改动必须在源码里改完并打包后再交付',
+      applicability: '修改插件时', durability: 'durable', scope: 'global', basis: '以后所有插件', reason: '工作流' },
+  ] }, usage: { totalTokens: 90 } }])
+  try {
+    const s1 = w.mk('cs1', '/repo/alpha')
+    await w.turn(s1, 1, '不对，这次先别改安装目录。以后所有插件改动都要在源码改完并打包后再交付。')
+    const doc = w.plugin.engine.store.read()
+    assert.ok(ruleInstruction(w.plugin, '源码里改完并打包后再交付'), 'the durable half is stored')
+    assert.equal(ruleInstruction(w.plugin, '先别改安装目录'), undefined, 'the temporary half is not durable')
+    const cand = doc.corrections.at(-1)
+    assert.equal(cand.status, 'saved')
+    assert.ok(Array.isArray(cand.decisions) && cand.decisions.some(row => row.reason === 'temporary_scope'),
+      'the per-clause decision audit names the temporary refusal')
+    assert.ok(cand.decisions.some(row => row.result === 'saved' && row.durability === 'durable'))
+  } finally { w.plugin.dispose() }
+})
+
+test('CS2 a model-tagged project rule saves WITHOUT any 「项目/仓库」 passphrase in the current words', async () => {
+  const w = extWiring(root(), [{ answer: { schema: 'mse-correction-extract-v1', corrections: [{
+    evidence: '候选包必须先读宿主实际加载版本再验收', instruction: '候选包验收必须先读宿主实际加载版本，不能拿包文件名代替',
+    applicability: '插件验收时', durability: 'durable', scope: 'project', basis: '插件验收约束', reason: '验收口径' }] },
+    usage: { totalTokens: 60 } }])
+  try {
+    const s1 = w.mk('cs2', '/repo/alpha')
+    await w.turn(s1, 1, '不对，候选包必须先读宿主实际加载版本再验收，不能拿包文件名代替。')
+    const saved = ruleInstruction(w.plugin, '宿主实际加载版本')
+    assert.ok(saved, 'a durable project-scoped correction is not discarded just because no scope word was said')
+    assert.equal(saved.visibility, 'scoped')
+    assert.equal(w.plugin.engine.store.read().corrections.at(-1).decisions[0].scope, 'project')
+  } finally { w.plugin.dispose() }
+})
+
+test('CS3 durable but scope-uncertain is kept as a readable conservative PROJECT rule, not silently dropped', async () => {
+  const w = extWiring(root(), [{ answer: { schema: 'mse-correction-extract-v1', corrections: [{
+    evidence: '跑迁移前必须先补测试', instruction: '跑迁移前必须先补测试',
+    applicability: '迁移时', durability: 'durable', scope: 'uncertain', basis: '方法可复用但范围不明', reason: '方法' }] },
+    usage: { totalTokens: 60 } }])
+  try {
+    const s1 = w.mk('cs3', '/repo/alpha')
+    await w.turn(s1, 1, '不对，跑迁移前必须先补测试。')
+    const saved = ruleInstruction(w.plugin, '跑迁移前必须先补测试')
+    assert.ok(saved, 'durable content is not mechanistically dropped at uncertain scope')
+    assert.equal(saved.visibility, 'scoped')
+    assert.match(w.plugin.engine.store.read().corrections.at(-1).decisions[0].basis,
+      /scope_conservative_project/u)
+  } finally { w.plugin.dispose() }
+})
+
+test('CS4 real pre-step consumes bounded prior-turn USER context for an omitted object; assistant/plugin text never becomes evidence', async () => {
+  const w = extWiring(root(), [{ answer: { schema: 'mse-correction-extract-v1', corrections: [{
+    evidence: '必须读取宿主实际加载的插件版本', instruction: '这个项目的插件验收必须读取宿主实际加载的插件版本，不能拿候选包文件名代替',
+    applicability: '插件验收时', durability: 'durable', scope: 'project', basis: '上一轮用户说这个项目', reason: '验收口径',
+    anchor: '按上一轮说的验收口径来，必须读取宿主实际加载的插件版本',
+    referenceTurn: 1, referenceText: '这个项目的插件验收必须读取宿主实际加载的插件版本，不能拿候选包文件名代替' }] },
+    usage: { totalTokens: 60 } }])
+  try {
+    const s = w.mk('cs4', '/repo/alpha')
+    pushContextTurn(s, 1, '这个项目的插件验收必须读取宿主实际加载的插件版本，不能拿候选包文件名代替',
+      '应当用候选包文件名代替实际加载版本')
+    await w.turn(s, 2, '不对，按上一轮说的验收口径来，必须读取宿主实际加载的插件版本。')
+    const cand = w.plugin.engine.store.read().corrections.at(-1)
+    assert.ok(Array.isArray(cand.context) && cand.context.some(row => row.role === 'user'
+      && row.turn === 1 && row.text.includes('宿主实际加载的插件版本')), 'prior USER context is frozen from the real event log')
+    assert.ok(cand.context.some(row => row.role === 'assistant'),
+      'assistant context may explain a reference but is never a rule source')
+    assert.ok(cand.decisions[0].basis.includes('context_turn_1'),
+      'the saved decision names the prior turn it used')
+    assert.ok(cand.context.filter(row => row.role === 'user').some(row => row.text.includes('必须读取宿主实际加载的插件版本')), 'evidence comes from the prior USER text')
+    const saved = ruleInstruction(w.plugin, '宿主实际加载的插件版本')
+    assert.ok(saved, 'the anaphoric correction saves using the prior user object')
+    assert.equal(saved.visibility, 'scoped')
+    assert.match(cand.decisions[0].basis, /context/u)
+  } finally { w.plugin.dispose() }
+})
+
+test('CS5 an assistant suggestion in context is never evidence; only USER text can complete a correction', async () => {
+  const w = extWiring(root(), [{ answer: { schema: 'mse-correction-extract-v1', corrections: [{
+    evidence: '直接拿候选包文件名代替已安装版本', instruction: '直接拿候选包文件名代替已安装版本的写法继续用',
+    applicability: '验收时', durability: 'durable', scope: 'global', basis: '上文', reason: 'x' }] },
+    usage: { totalTokens: 50 } }])
+  try {
+    const s = w.mk('cs5', '/repo/alpha')
+    pushContextTurn(s, 1, '这个项目的验收口径还要再确认一下', '建议直接拿候选包文件名代替已安装版本')
+    await w.turn(s, 2, '不对，按你说的继续改成那样。')
+    const cand = w.plugin.engine.store.read().corrections.at(-1)
+    assert.equal(cand.status, 'ignored')
+    assert.ok(['reference_not_provided', 'evidence_not_verbatim'].includes(cand.reason), cand.reason)
+    assert.equal(w.plugin.engine.store.read().entries.length, 0)
+  } finally { w.plugin.dispose() }
+})
+
+test('CS6 an outside-workspace temporary file in context is omitted WHOLE with a readable reason', async () => {
+  const w = extWiring(root(), [{ answer: { schema: 'mse-correction-extract-v1', corrections: [{
+    evidence: '以后写文档要先列大纲', instruction: '写文档前先列大纲再展开',
+    applicability: '写文档时', durability: 'durable', scope: 'global', basis: '当前句', reason: '方法' }] },
+    usage: { totalTokens: 50 } }])
+  try {
+    const s = w.mk('cs6', '/repo/alpha')
+    pushContextTurn(s, 1, '临时文件 /tmp/outside-secret-notes.txt 里说要先写正文')
+    await w.turn(s, 2, '不对，这次先别写正文。以后写文档要先列大纲。')
+    const doc = w.plugin.engine.store.read()
+    const cand = doc.corrections.at(-1)
+    assert.equal(cand.context, undefined, 'the outside material context item is not stored at all')
+    assert.match(cand.contextOmitted ?? '', /context_material_outside/u, 'the omission is readable')
+    assert.ok(!JSON.stringify(doc.corrections).includes('outside-secret'), 'no path/body/hash of outside material')
+    assert.ok(ruleInstruction(w.plugin, '先列大纲'), 'the clean current correction still saves')
+  } finally { w.plugin.dispose() }
+})
+
+test('CS7 old candidate rows without new fields stay valid; emoji/overlong context is bounded safely', () => {
+  const engine = new RebuildEngine({ stateRoot: root() })
+  const first = engine.recordCorrectionCandidate({ sessionId: 'cs7', turnId: '1',
+    userText: '不对，以后写文档要先列大纲。',
+    context: [{ role: 'user', turn: 1, text: '😀'.repeat(200), source: 'events' }] })
+  assert.equal(first.ok, true)
+  let rows = engine.store.read().corrections
+  assert.equal([...rows[0].context[0].text].length, 200)
+  assert.ok(rows[0].context[0].text.length <= 512)
+  const second = engine.recordCorrectionCandidate({ sessionId: 'cs7', turnId: '2',
+    userText: '不对，以后写文档要先列大纲。',
+    context: [{ role: 'user', turn: 2, text: 'x'.repeat(600), source: 'events' }] })
+  assert.equal(second.ok, true)
+  rows = engine.store.read().corrections
+  assert.equal(rows[1].context, undefined, 'overlong item is omitted, never truncated')
+  assert.match(rows[1].contextOmitted ?? '', /context_too_long/u)
+  // A legacy row (no context/decisions) in the same document must remain valid after later writes.
+  const doc = engine.store.read()
+  assert.equal(doc.format, 4)
+  assert.ok(engine.store.read().corrections.every(row => row.context === undefined
+    || (Array.isArray(row.context) && row.context.length <= 4)))
+})
+
+test('CS8 a project-scoped rule is visible in its project and NOT injected in another project', () => {
+  const engine = new RebuildEngine({ stateRoot: root() })
+  engine.setRoute({ provider: 'fake', model: 'm1' })
+  engine.setSourceGuard(() => true)
+  engine.recordCorrection({ text: '以后在这个项目里，候选包验收必须先读宿主实际加载版本', sessionId: 'cs8',
+    turnId: '1', projectKey: '/repo/alpha' })
+  const same = engine.prepare({ sessionId: 'cs8b', turnId: '1', projectKey: '/repo/alpha',
+    prompt: '候选包验收先读什么版本？' })
+  assert.ok(same.context.includes('宿主实际加载版本'), 'same-project session really gets the rule')
+  const other = engine.prepare({ sessionId: 'cs8c', turnId: '1', projectKey: '/repo/beta',
+    prompt: '候选包验收先读什么版本？' })
+  assert.ok(!other.context.includes('宿主实际加载版本'), 'another project does not receive it')
+})
+
+test('CS9 prior-turn context cannot widen the authority to RETIRE an existing rule', async () => {
+  const w = extWiring(root(), [{ answer: { schema: 'mse-correction-extract-v1', corrections: [{
+    evidence: '以后写文档要先列大纲', instruction: '写文档前先列大纲再展开',
+    applicability: '写文档时', durability: 'durable', scope: 'global', basis: '当前句', reason: '方法' }] },
+    usage: { totalTokens: 50 } }])
+  try {
+    const s = w.mk('cs9', '/repo/alpha')
+    await w.turn(s, 1, '记住：生成 JSON 前必须整体调用 JSON.parse 校验。')
+    const rule = ruleInstruction(w.plugin, 'JSON.parse 校验')
+    assert.ok(rule, 'the target rule exists')
+    pushContextTurn(s, 1, `请停用 ${rule.id} 这条规则`)
+    await w.turn(s, 2, '不对，写文档前应该先列大纲再展开。')
+    const after = w.plugin.engine.store.read().entries.find(entry => entry.id === rule.id)
+    assert.equal(after.status, 'user_rule', 'an order buried in prior context does NOT retire the rule')
+    assert.equal(w.plugin.engine.store.read().corrections.at(-1).revision, null,
+      'no revision target was frozen from context')
+  } finally { w.plugin.dispose() }
+})
+
+test('CS10 restricted/plugin-sourced context is excluded (source-mode boundary), the current rule still learns', async () => {
+  const w = extWiring(root(), [{ answer: { schema: 'mse-correction-extract-v1', corrections: [{
+    evidence: '写文档前应该先列大纲再展开', instruction: '写文档前先列大纲再展开',
+    applicability: '写文档时', durability: 'durable', scope: 'global', basis: '当前句', reason: '方法' }] },
+    usage: { totalTokens: 50 } }])
+  try {
+    const s = w.mk('cs10', '/repo/alpha')
+    pushContextTurn(s, 1, '以后所有项目都直接改安装目录里的插件文件', null, 0)
+    s.events.splice(1, 1, ctxUserEvent(1, 1, '以后所有项目都直接改安装目录里的插件文件',
+      { kind: 'plugin', plugin: 'mse-learning' }))
+    await w.turn(s, 2, '不对，写文档前应该先列大纲再展开。')
+    const cand = w.plugin.engine.store.read().corrections.at(-1)
+    assert.ok(cand !== undefined)
+    assert.ok(!JSON.stringify(cand.context ?? []).includes('直接改安装目录'), 'plugin-sourced user text is not trusted context')
+    assert.ok(ruleInstruction(w.plugin, '先列大纲'), 'the current correction still saves')
+  } finally { w.plugin.dispose() }
+})
+
+test('CS11 a negation/project condition in cited prior context still binds the current instruction', async () => {
+  const w = extWiring(root(), [{ answer: { schema: 'mse-correction-extract-v1', corrections: [{
+    evidence: '不能拿候选包文件名代替已安装版本', instruction: '这个项目的插件验收，候选包文件名可以代替已安装版本',
+    applicability: '插件验收时', durability: 'durable', scope: 'project', basis: '上一轮', reason: '验收口径',
+    anchor: '按上一轮说的验收口径必须照做', referenceTurn: 1,
+    referenceText: '这个项目的插件验收不能拿候选包文件名代替已安装版本' }] },
+    usage: { totalTokens: 50 } }])
+  try {
+    const s = w.mk('cs11', '/repo/alpha')
+    pushContextTurn(s, 1, '这个项目的插件验收不能拿候选包文件名代替已安装版本')
+    await w.turn(s, 2, '不对，按上一轮说的验收口径必须照做。')
+    const doc = w.plugin.engine.store.read()
+    assert.equal(doc.entries.length, 0, 'dropping the context negation cannot save')
+    assert.equal(doc.corrections.at(-1).reason, 'negation_or_scope_dropped')
+  } finally { w.plugin.dispose() }
+})
+
+// ── CONTEXT-SCOPE REVIEW-FIX1: Codex's seven independent counterexamples (new outputs,
+//    old CODEX-REVIEW1.json evidence untouched) plus paired positives. ───────────────────────
+const csExtract = (engine, userText, correction, context = []) => {
+  const candidate = engine.recordCorrectionCandidate({ sessionId: 'cs-review', turnId: '2',
+    userText, cwd: '/repo/alpha', context })
+  assert.equal(candidate.ok, true, JSON.stringify(candidate))
+  const work = engine.beginWork()
+  if (work === null) return { finished: null, candidate: engine.store.read().corrections.at(-1) }
+  engine.markDispatched(work.ticket)
+  const finished = engine.finishWork({ ticket: work.ticket, usage: { total: 10 },
+    result: { schema: 'mse-correction-extract-v1', corrections: [correction] } })
+  return { finished, candidate: engine.store.read().corrections.at(-1) }
+}
+const csBasic = { durability: 'durable', scope: 'global', basis: '普通工作方法', reason: '具体纠正' }
+
+test('CS12 an ordinary rule with NO scope passphrase saves global and is recalled in another project', () => {
+  const engine = new RebuildEngine({ stateRoot: root() })
+  engine.setRoute({ provider: 'fake', model: 'm1' }); engine.setSourceGuard(() => true)
+  const first = engine.recordCorrectionCandidate({ sessionId: 'cs12', turnId: '1',
+    userText: '不对，插件版本应该读取实际加载信息。', cwd: '/repo/alpha' })
+  assert.equal(first.ok, true)
+  const work = engine.beginWork(); engine.markDispatched(work.ticket)
+  const finished = engine.finishWork({ ticket: work.ticket, usage: { total: 10 },
+    result: { schema: 'mse-correction-extract-v1', corrections: [{ ...csBasic,
+      evidence: '插件版本应该读取实际加载信息', instruction: '插件版本应该读取实际加载信息',
+      applicability: '核对插件版本时' }] } })
+  assert.equal(finished.saved?.length, 1, JSON.stringify(finished))
+  const row = engine.store.read().entries.find(entry => entry.instruction.includes('实际加载信息'))
+  assert.equal(row.visibility, 'global')
+  const other = engine.prepare({ sessionId: 'cs12b', turnId: '1', projectKey: '/repo/beta',
+    prompt: '插件版本读取什么信息？' })
+  assert.ok(other.context.includes('实际加载信息'), 'global rule reaches another formal workspace')
+})
+
+test('CS13 mixed message WITHOUT 记住/以后/所有 still learns only the independent durable sentence', async () => {
+  const w = extWiring(root(), [{ answer: { schema: 'mse-correction-extract-v1', corrections: [{
+    ...csBasic, evidence: '验收必须读取宿主实际加载的插件版本',
+    instruction: '验收必须读取宿主实际加载的插件版本', applicability: '插件验收时' }] },
+    usage: { totalTokens: 50 } }])
+  try {
+    const s = w.mk('cs13', '/repo/alpha')
+    await w.turn(s, 1, '这次先别安装。你又把候选包文件名当已安装版本了，验收必须读取宿主实际加载的插件版本。')
+    const doc = w.plugin.engine.store.read()
+    const saved = ruleInstruction(w.plugin, '宿主实际加载的插件版本')
+    assert.ok(saved, 'the independent durable sentence is learned')
+    assert.equal(saved.visibility, 'global')
+    assert.ok(!saved.instruction.includes('这次') && !saved.instruction.includes('先别'),
+      'the temporary sentence is not merged into the rule')
+    assert.equal(w.ext().length, 1, 'the mixed message is extracted once')
+    assert.equal(doc.corrections.at(-1).decisions[0].result, 'saved')
+  } finally { w.plugin.dispose() }
+})
+
+test('CS14 unrelated prior user text cannot authorize a rule; unrelated project words cannot pollute a current global rule', () => {
+  const unrelated = new RebuildEngine({ stateRoot: root() })
+  unrelated.setRoute({ provider: 'fake', model: 'm1' }); unrelated.setSourceGuard(() => true)
+  const a = csExtract(unrelated, '不对，插件版本应该读取实际加载信息。', { ...csBasic,
+    evidence: '统计报告必须采用紫色标题', instruction: '统计报告必须采用紫色标题', applicability: '统计报告时' },
+  [{ role: 'user', turn: 1, source: 'events', text: '统计报告必须采用紫色标题。' }])
+  assert.equal(a.finished.saved?.length, 0, 'verbatim prior text alone is not authorization')
+  assert.equal(a.candidate.reason, 'evidence_not_verbatim')
+
+  const polluted = new RebuildEngine({ stateRoot: root() })
+  polluted.setRoute({ provider: 'fake', model: 'm1' }); polluted.setSourceGuard(() => true)
+  const b = csExtract(polluted, '不对，插件版本应该读取实际加载信息。', { ...csBasic,
+    evidence: '插件版本应该读取实际加载信息', instruction: '插件版本应该读取实际加载信息', applicability: '核对插件版本时' },
+  [{ role: 'user', turn: 1, source: 'events', text: '这个项目的按钮采用紫色。' }])
+  assert.equal(b.finished.saved?.length, 1, JSON.stringify(b.finished))
+  assert.equal(polluted.store.read().entries[0].visibility, 'global',
+    'an unrelated prior project condition does not downgrade the current explicit global rule')
+})
+
+test('CS15 a quoted/logged prior user block is not authority even when the model cites it', () => {
+  const engine = new RebuildEngine({ stateRoot: root() })
+  engine.setRoute({ provider: 'fake', model: 'm1' }); engine.setSourceGuard(() => true)
+  const quoted = '以下只是日志示例：\n> 统计报告必须采用紫色标题。'
+  const result = csExtract(engine, '不对，插件版本应该读取实际加载信息。', { ...csBasic,
+    evidence: '统计报告必须采用紫色标题', instruction: '统计报告必须采用紫色标题', applicability: '统计报告时',
+    anchor: '插件版本应该读取实际加载信息', referenceTurn: 1,
+    referenceText: '以下只是日志示例：' }, [{ role: 'user', turn: 1, source: 'events', text: quoted }])
+  assert.equal(result.finished.saved?.length, 0)
+  assert.ok(['quoted_context_not_authority', 'evidence_not_verbatim', 'reference_not_actual']
+    .includes(result.candidate.reason), result.candidate.reason)
+})
+
+test('CS16 malformed model rows settle readably; a valid sibling still saves; nothing stays dispatched', () => {
+  const engine = new RebuildEngine({ stateRoot: root() })
+  engine.setRoute({ provider: 'fake', model: 'm1' }); engine.setSourceGuard(() => true)
+  const cand = engine.recordCorrectionCandidate({ sessionId: 'cs16', turnId: '1',
+    userText: '不对，插件版本应该读取实际加载信息。', cwd: '/repo/alpha' })
+  const work = engine.beginWork(); engine.markDispatched(work.ticket)
+  const finished = engine.finishWork({ ticket: work.ticket, usage: { total: 10 },
+    result: { schema: 'mse-correction-extract-v1', corrections: [null, { ...csBasic,
+      evidence: '插件版本应该读取实际加载信息', instruction: '插件版本应该读取实际加载信息',
+      applicability: '核对插件版本时' }] } })
+  assert.equal(finished.ok, true, JSON.stringify(finished))
+  assert.equal(finished.saved?.length, 1, 'the valid row still saves')
+  const doc = engine.store.read()
+  const row = doc.corrections.find(c => c.id === cand.id)
+  assert.equal(row.status, 'saved')
+  assert.equal(doc.corrections.filter(c => c.status === 'dispatched').length, 0)
+  assert.equal(doc.requests.filter(r => !r.settled).length, 0)
+  assert.ok(row.decisions.some(d => d.reason === 'invalid_result' && d.result === 'ignored'))
+  assert.ok(engine.statusView().corrections.recentDecisions.some(r => r.decisions.some(d => d.reason === 'invalid_result')))
+})
+
+test('CS17 assistant external material is omitted whole and never reaches the candidate or provider text', async () => {
+  const w = extWiring(root(), [{ answer: { schema: 'mse-correction-extract-v1', corrections: [{
+    ...csBasic, evidence: '写文档前应该先列大纲再展开', instruction: '写文档前先列大纲再展开',
+    applicability: '写文档时' }] }, usage: { totalTokens: 50 } }])
+  try {
+    const s = w.mk('cs17', '/repo/alpha')
+    pushContextTurn(s, 1, '这个项目的文档要先列大纲',
+      '临时文件 /tmp/assistant-secret-notes.txt 里说要先写正文')
+    await w.turn(s, 2, '不对，写文档前应该先列大纲再展开。')
+    const doc = w.plugin.engine.store.read()
+    const cand = doc.corrections.at(-1)
+    assert.ok(cand.context.every(row => !row.text.includes('assistant-secret')),
+      'assistant outside material never persists')
+    assert.match(cand.contextOmitted ?? '', /context_material_outside/u)
+    assert.ok(!JSON.stringify(doc).includes('assistant-secret'))
+    assert.ok(!JSON.stringify(w.ext().at(-1)).includes('assistant-secret'), 'provider material is clean too')
+    assert.ok(ruleInstruction(w.plugin, '先列大纲'))
+  } finally { w.plugin.dispose() }
+})
+
+test('CS18 the existing UI corrections area really reads the new bounded decision audit', () => {
+  const engine = new RebuildEngine({ stateRoot: root() })
+  engine.setRoute({ provider: 'fake', model: 'm1' }); engine.setSourceGuard(() => true)
+  const { candidate } = csExtract(engine, '不对，这次先按下面要求处理，所有按钮必须改成蓝色。', { ...csBasic,
+    evidence: '所有按钮必须改成蓝色', instruction: '所有按钮必须改成蓝色', applicability: '界面设计时' })
+  assert.equal(candidate.status, 'ignored', 'temporary prefix dominates the full sentence')
+  assert.equal(candidate.reason, 'temporary_scope')
+  const view = engine.statusView()
+  assert.ok(Array.isArray(view.corrections.recentDecisions) && view.corrections.recentDecisions.length > 0)
+  const decision = view.corrections.recentDecisions[0].decisions[0]
+  assert.equal(decision.durability, 'one_off'); assert.equal(decision.result, 'ignored')
+  assert.equal(decision.reason, 'temporary_scope')
+  const client = readFileSync(new URL('./client.js', import.meta.url), 'utf8')
+  assert.ok(client.includes('recentDecisions') && client.includes('corrContextOmitted'),
+    'the existing corrections status region consumes the new read-only field')
+  assert.ok(client.includes('basisTextOf(decision.basis)') && client.includes('REASON_ZH[decision.reason]'),
+    'the basis and rejection reason really render through the Chinese vocabulary')
+  assert.ok(client.includes('临时限定，不长期保存') && client.includes('引用第'),
+    'fixed codes and prior-turn basis have Chinese display text')
+})
+
+test('CS19 FIX2: a syntactic citation to an unrelated prior turn is refused; a governing temp prefix survives periods and newlines', () => {
+  const engine = new RebuildEngine({ stateRoot: root() })
+  engine.setRoute({ provider: 'fake', model: 'm1' }); engine.setSourceGuard(() => true)
+  const unrelated = csExtract(engine, '不对，插件版本应该读取实际加载信息。', { ...csBasic,
+    anchor: '不对，插件版本应该读取实际加载信息。', referenceTurn: 1,
+    referenceText: '统计报告必须采用紫色标题。', evidence: '统计报告必须采用紫色标题',
+    instruction: '统计报告必须采用紫色标题', applicability: '统计报告时' },
+  [{ role: 'user', turn: 1, source: 'events', text: '统计报告必须采用紫色标题。' }])
+  assert.equal(unrelated.finished.saved?.length, 0)
+  assert.ok(['reference_not_actual', 'reference_not_related'].includes(unrelated.candidate.reason),
+    unrelated.candidate.reason)
+
+  for (const text of ['不对，这次先按以下要求处理。所有按钮必须改成蓝色。',
+    '不对，这次先按以下要求处理。\n所有按钮必须改成蓝色。']) {
+    const temp = new RebuildEngine({ stateRoot: root() })
+    temp.setRoute({ provider: 'fake', model: 'm1' }); temp.setSourceGuard(() => true)
+    temp.recordCorrectionCandidate({ sessionId: 'cs19t', turnId: '1', userText: text, cwd: '/repo/alpha' })
+    const work = temp.beginWork()
+    assert.equal(work, null, 'a governing temp prefix is refused before extraction')
+    const row = temp.store.read().corrections.at(-1)
+    assert.equal(row.status, 'ignored'); assert.equal(row.reason, 'temporary_scope')
+  }
+})
+
+test('CS20 FIX2: context selects the newest TWO real ended turns first; assistant must be source.kind=model', async () => {
+  const w = extWiring(root(), [{ answer: { schema: 'mse-correction-extract-v1', corrections: [{
+    ...csBasic, evidence: '插件验收必须读取实际加载版本', instruction: '插件验收必须读取实际加载版本',
+    applicability: '插件验收时' }] }, usage: { totalTokens: 50 } }])
+  try {
+    const s = w.mk('cs20', '/repo/alpha')
+    pushContextTurn(s, 1, '第一轮：插件验收要读取旧版本文档', null, 0)
+    pushContextTurn(s, 2, '第二轮：插件验收要读取实际加载版本', null, 4)
+    // assistant-shaped event with a NON-model source must not be trusted context.
+    s.events.push({ type: 'assistant/message', seq: s.seq, data: { turn: 2, step: 1,
+      message: { role: 'assistant', source: { kind: 'plugin', plugin: 'other' },
+        content: [{ type: 'text', text: 'assistant-non-model-secret' }] } } })
+    pushContextTurn(s, 3, '第三轮：插件验收要读取实际加载版本并核对', '模型助手发言', 9)
+    await w.turn(s, 4, '不对，插件验收必须读取实际加载版本。')
+    const cand = w.plugin.engine.store.read().corrections.at(-1)
+    const turns = [...new Set((cand.context ?? []).map(row => row.turn))].sort()
+    assert.deepEqual(turns, [2, 3], 'only the newest two ended turns are selected, turn 1 is not backfilled')
+    assert.ok(cand.context.every(row => row.turn !== 1))
+    const assistants = cand.context.filter(row => row.role === 'assistant')
+    assert.equal(assistants.length, 1, 'the model-sourced assistant from turn 3 is the only assistant kept')
+    assert.equal(assistants[0].turn, 3)
+    assert.ok(!cand.context.some(row => row.text.includes('assistant-non-model-secret')),
+      'a role-only/plugin-sourced assistant is never context')
+  } finally { w.plugin.dispose() }
+})
+
+test('CS21 FIX3: citation authority must live in the ANCHOR sentence, not another sentence of the message', () => {
+  const text = '上一轮说的标题格式已经处理完了。不对，插件版本应该读取实际加载信息。'
+  const context = [{ role: 'user', turn: 1, source: 'events', text: '插件统计报告必须采用紫色标题。' }]
+  const engine = new RebuildEngine({ stateRoot: root() })
+  engine.setRoute({ provider: 'fake', model: 'm1' }); engine.setSourceGuard(() => true)
+  const historical = csExtract(engine, text, { ...csBasic,
+    anchor: '插件版本应该读取实际加载信息', referenceTurn: 1,
+    referenceText: '插件统计报告必须采用紫色标题', evidence: '插件统计报告必须采用紫色标题',
+    instruction: '插件统计报告必须采用紫色标题', applicability: '插件统计报告时',
+    basis: '前轮引用', reason: '具体纠正' }, context)
+  assert.equal(historical.finished.saved?.length, 0,
+    'a prior-turn word in a DIFFERENT sentence never authorizes this anchor')
+  assert.equal(historical.candidate.reason, 'reference_not_actual')
+
+  const clean = new RebuildEngine({ stateRoot: root() })
+  clean.setRoute({ provider: 'fake', model: 'm1' }); clean.setSourceGuard(() => true)
+  const plain = csExtract(clean, text, { ...csBasic,
+    evidence: '插件版本应该读取实际加载信息', instruction: '插件版本应该读取实际加载信息',
+    applicability: '核对插件版本时' }, context)
+  assert.equal(plain.finished.saved?.length, 1,
+    'the CURRENT complete rule with no citation still saves despite an unrelated prior-state sentence')
+  assert.equal(clean.store.read().entries[0].visibility, 'global')
 })

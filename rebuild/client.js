@@ -71,6 +71,11 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     version: '版本', scope: '范围', scopeGlobal: '全局', scopeScoped: '仅本项目',
     fixSteps: '修复步骤', checkMethod: '检查办法', injectedCount: '注入', recurrenceCount: '复发',
     evidenceHash: '证据指纹', updatedAt: '更新于', applicabilityLine: '适用情形',
+    versionWindowLabel: '当前版窗口', coverageComplete: '完整（该版建立后全程）',
+    coverageSinceUpgrade: '仅升级后（此前版本归属未知）',
+    windowInjected: '本版注入', windowChecks: '本版检查通过/失败',
+    recentRevisionLabel: '最近修订原因', recentRevisionNone: '暂无修订',
+    modeGuard: '警示', modeMethod: '方法', modeLegacy: '旧格式回执',
     recallSection: '注入记录', recallHint: '每次注入都有凭据：提供了哪些经验的哪个版本，以及回合结局。',
     offeredVersions: '提供版本', outcomeUnknown: '未判定', outcomeCompleted: '完成', outcomeAborted: '中止',
     outcomeVerified: '检查通过', outcomeFailed: '存在失败', outcomeCancelled: '已取消',
@@ -92,6 +97,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     correctionsFullTitle: '保存规则说明',
     correctionsFull: '明确表达长期意图且非临时任务要求的纠正才直接长期保存；普通纠正先入持久审计队列，再经提取门做原话核对、否定保留与范围核对，确认可复用才长期保存——「别再」不是无条件全局保存；一次性调整和不确定的只留回合事实，忽略原因可读，不会伪装成已保存。',
     saved: '已保存', pendingCorr: '待处理', dispatchedCorr: '提取中', ignoredReasons: '忽略原因',
+    correctionsDecision: '最近决定', corrDurable: '长期', corrOneOff: '临时', corrUncertain: '长期性不明',
+    corrGlobal: '全局', corrProject: '项目', corrScopeUnknown: '范围不明',
+    corrSaved: '保存', corrIgnored: '忽略', corrContextOmitted: '上下文省略',
     existingSection: '现存经验', existingCount: '现存规则与经验', existingInjected: '注入合计',
     existingRecurrences: '复发合计', existingScopeNote: '按当前现存经验统计，不是全历史总量。',
     goLessons: '查看经验列表',
@@ -107,6 +115,12 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
   const TYPE_ZH = { rule: zh.typeRule, lesson: zh.typeLesson, digest: zh.typeDigest }
   const STATUS_ZH = { user_rule: zh.statusActive, pending: '待验证', check_passed: zh.statusActive,
     needs_revision: '需修订', superseded: zh.statusSuperseded }
+  // EVOLUTION016: fixed revision-reason vocabulary for the EXISTING entry detail rows.
+  const REVISION_REASON_ZH = { matched_recurrence: '同类任务再次失败', matched_recurrence_late: '旧版晚到同类失败',
+    check_failed: '检查未通过', check_failed_late: '旧版晚到检查未通过', check_passed: '检查通过',
+    check_passed_late: '旧版晚到检查通过', legacy_superseded_partial: '升级前旧快照（部分资料）',
+    user_correction: '用户纠正', retired: '停用' }
+  const revisionReasonText = reason => REVISION_REASON_ZH[reason] ?? String(reason ?? '—')
   const REASON_ZH = { no_correction: '不是可复用纠正', one_off: '一次性调整，不升级为长期规则',
     uncertain: '不确定，不强行升级', generic_advice: '通用空话被拒绝',
     negation_or_scope_dropped: '否定或项目条件被改写，已拒绝', evidence_not_verbatim: '证据非原话，已拒绝',
@@ -125,7 +139,33 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     store_unavailable: '学习库暂时不可读写（已跳过本次审计写入，不影响当前步骤）',
     turn_facts_rejected: '回合事实写入被既有字段边界拒绝，不影响当前回合',
     temp_workspace_excluded: '临时工作区未采集',
-    user_correction: '用户纠正停用' }
+    user_correction: '用户纠正停用',
+    temporary_scope: '临时限定，不长期保存', model_uncertain: '长期性不确定，未保存',
+    scope_uncertain: '范围不明，未保存', anchor_not_current: '当前原话锚点缺失，已拒绝',
+    reference_not_found: '引用的前文不存在，已拒绝', reference_not_actual: '当前并未真正指代前文，已拒绝',
+    reference_not_related: '引用的前文与当前对象无关，已拒绝',
+    reference_not_provided: '当前指代前文但未提供有效引用，已拒绝',
+    quoted_context_not_authority: '引用/日志前文不是授权，已拒绝',
+    context_material_outside: '上下文引用外部文件，整条省略',
+    context_too_long: '上下文单条过长，整条省略',
+    context_total_exceeded: '上下文合计超限，整条省略',
+    context_overflow: '上下文条数超限，整条省略',
+    context_invalid: '上下文来源不明，整条省略',
+    context_no_turn_boundary: '上下文缺少真实回合边界，整条省略',
+    context_current_turn: '上下文属于当前回合，未作为前文' }
+  // Readable basis vocabulary for the existing corrections status line. Unknown text (including
+  // any model-provided basis) stays verbatim, bounded elsewhere by statusView.
+  const BASIS_ZH = { current_message: '当前消息', scope_conservative_project: '范围保守按项目',
+    legacy_intent: '旧意图格式', model_one_off: '模型判一次性', model_uncertain: '模型长期性不明',
+    legacy_uncertain: '旧格式不确定', temporary_sentence: '临时句', invalid_row: '异常模型行',
+    project_without_attributed_cwd: '项目归属不明', scope_uncertain_no_project: '范围不明且无项目',
+    invalid_rows: '异常模型行' }
+  const basisTextOf = basis => String(basis ?? '').split(';').filter(Boolean).map(part => {
+    const turn = part.match(/^context_turn_(.+)$/u)
+    return turn === null ? (BASIS_ZH[part] ?? part) : `引用第${turn[1]}轮`
+  }).join('；')
+  const contextOmittedTextOf = value => String(value ?? '').split(',').filter(Boolean)
+    .map(code => REASON_ZH[code] ?? code).join('；')
   const WAIT_ZH = { paused: '已暂停', in_flight: '已有一次后台复盘在进行', busy: '前台任务进行中，稍后再试',
     done_today: '今天已总结', no_activity: '空白日已跳过', no_route: '还没有可用的模型路由',
     digest_sources_unverified: '当日事实来源无法核验，已安全跳过',
@@ -525,6 +565,18 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
               [dict.updatedAt, atText(entry.updatedAt)],
               entry.evidenceHash ? [dict.evidenceHash, String(entry.evidenceHash).slice(0, 12)] : null,
               entry.applicability ? [dict.applicabilityLine, entry.applicability] : null,
+              // EVOLUTION016: appended rows inside the SAME detail disclosure — no new page,
+              // no duplicated metadata column, no invented numbers.
+              [dict.versionWindowLabel, `${entry.methodStats?.version ?? entry.version} · `
+                + (entry.methodStats?.coverage === 'since_upgrade'
+                  ? dict.coverageSinceUpgrade : dict.coverageComplete)],
+              [dict.windowInjected, `${entry.methodStats?.injected ?? 0} · `
+                + `${dict.recurrenceCount} ${entry.methodStats?.recurrences ?? 0} · `
+                + `${dict.windowChecks} ${entry.methodStats?.checkPasses ?? 0}/${entry.methodStats?.checkFails ?? 0}`],
+              entry.recentRevision
+                ? [dict.recentRevisionLabel, `v${entry.recentRevision.version} · `
+                  + `${revisionReasonText(entry.recentRevision.reason)} · ${atText(entry.recentRevision.at)}`]
+                : [dict.recentRevisionLabel, dict.recentRevisionNone],
             ], { left: true }),
             Array.isArray(entry.steps) && entry.steps.length > 0
               ? h('p', { key: 's', className: 'mse-hint' },
@@ -534,6 +586,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           ]), { id: `e-${entry.id}`, open: openEntry === entry.id,
             onToggle: open => setOpenEntry(open ? entry.id : null), stackMeta: true,
             meta: [TYPE_ZH[entry.type] ?? entry.type, STATUS_ZH[entry.status] ?? entry.status,
+              entry.guard ? dict.modeGuard : null,
               entry.visibility === 'scoped' ? dict.scopeScoped : dict.scopeGlobal,
               `v${entry.version}`, `${dict.injectedCount} ${entry.injected}`] })),
     ])
@@ -549,7 +602,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           definition('d', item.offered.map(o => {
             const known = entries.find(entry => entry.id === o.id)
             return [known ? `${dict.summaryLabel} v${o.version}` : `${dict.historicalEntry} v${o.version}`,
-              known === undefined ? o.id : `${summaryText(known.instruction)}｜${o.id}`]
+              (known === undefined ? o.id : `${summaryText(known.instruction)}｜${o.id}`)
+                + (o.mode === 'guard' ? `｜${dict.modeGuard}` : '')
+                + (o.mode === null ? `｜${dict.modeLegacy}` : '')]
           }), { left: true }),
           { id: `r-${item.at}`,
             meta: [item.settled ? dict.settledYes : dict.settledNo,
@@ -622,6 +677,32 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         : h('p', { key: 'ig', className: 'mse-hint' },
           `${dict.ignoredReasons}：${(corrections.ignoredRecent ?? [])
             .map(r => `${REASON_ZH[r.reason] ?? r.reason}（${atText(r.at)}）`).join('、')}`),
+      (corrections?.recentDecisions ?? []).length === 0 ? null
+        // Real React children: the decision <span>s must NEVER be interpolated into a
+        // template string (that is the rc.3 [object Object] defect). The text prefix and the
+        // separators are strings; every decision is an element child.
+        : h('p', { key: 'cd', className: 'mse-hint' }, [
+          `${dict.correctionsDecision}：`,
+          ...(corrections.recentDecisions ?? []).flatMap((row, rowIndex) => [
+            ...(rowIndex === 0 ? [] : [' ｜ ']),
+            ...row.decisions.flatMap((decision, decisionIndex) => [
+              ...(decisionIndex === 0 ? [] : ['；']),
+              h('span', {
+                key: `${row.at}-${rowIndex}-${decision.basis ?? ''}-${decision.reason ?? ''}`,
+                title: decision.basis ?? '' }, [
+                decision.durability === 'durable' ? dict.corrDurable
+                  : decision.durability === 'one_off' ? dict.corrOneOff : dict.corrUncertain,
+                decision.scope === 'global' ? dict.corrGlobal
+                  : decision.scope === 'project' ? dict.corrProject : dict.corrScopeUnknown,
+                decision.result === 'saved' ? dict.corrSaved : dict.corrIgnored,
+                decision.basis === null ? '' : basisTextOf(decision.basis),
+                decision.reason === null ? '' : (REASON_ZH[decision.reason] ?? decision.reason),
+                row.contextOmitted === null ? ''
+                  : `${dict.corrContextOmitted}:${contextOmittedTextOf(row.contextOmitted)}`,
+              ].filter(Boolean).join('/')),
+            ]),
+          ]),
+        ]),
       h('div', { key: 'secCol', className: 'mse-section-title' }, dict.collectionSection),
       disclosure('coll-scope', dict.collectionScopeTitle,
         view?.collection === undefined ? dict.loading

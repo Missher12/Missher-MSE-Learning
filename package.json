@@ -1,6 +1,6 @@
 {
   "name": "@missher/dsh-mse-learning",
-  "version": "0.15.0-rebuild.24",
+  "version": "0.16.0-rc.4",
   "description": "MSE learning (rebuilt slim chain): trusted user/tool facts → bounded recall → evidence-bound lessons → daily digest. An upgrade of the mse-learning bundle.",
   "type": "module",
   "private": true,
@@ -22,8 +22,10 @@
     "rebuild/config.mjs",
     "rebuild/dsh.mjs",
     "rebuild/engine.mjs",
+    "rebuild/evolution.mjs",
     "rebuild/llm.mjs",
     "rebuild/memory.mjs",
+    "rebuild/recall.mjs",
     "rebuild/remote.mjs",
     "rebuild/root.mjs",
     "rebuild/time.mjs",

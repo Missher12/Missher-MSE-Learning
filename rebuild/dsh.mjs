@@ -279,6 +279,108 @@ export function apply(ctx, config = {}) {
     return null
   }
 
+  // CONTEXT-SCOPE-016 FIX1: REAL rc.4 event shapes. A user/message event is FLAT
+  // ({role,content,source,id}) and carries NO turn; its turn is owned by the enclosing
+  // turn/start…turn/end range. assistant/message is nested ({turn,step,message}). A message whose
+  // turn boundary is outside the bounded window is omitted (never a fabricated/null turn).
+  // Context is reference material only: user source must be the person, plugin/tool/reasoning/
+  // title/quoted log text is not authority. Newlines/fences are preserved so quoted semantics
+  // survive; only non-printing controls are normalised.
+  const CONTEXT_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu
+  const contextText = message => textsOf(message).join('\n').replace(CONTEXT_CONTROL, ' ').trim()
+  const collectCorrectionContext = (session, messages, lastTrusted, turn, roots) => {
+    const items = []
+    const reasons = []
+    const seen = new Set()
+    let units = 0
+    const push = (role, turnValue, text, source) => {
+      if (!Number.isSafeInteger(turnValue)) { reasons.push('context_no_turn_boundary'); return false }
+      if (turnValue >= turn) { reasons.push('context_current_turn'); return false }
+      if (text === '') return false
+      if (seen.has(`${role}\u0000${text}`)) return false
+      // The FULL text is screened for outside material BEFORE any length bound/omission:
+      // bounding must not hide a path or quote marker from the material gate.
+      if (textMentionsOutside(text, roots, cwdOf(session))) {
+        reasons.push('context_material_outside'); return false
+      }
+      if (items.length >= 4) { reasons.push('context_overflow'); return false }
+      if (text.length > 512) { reasons.push('context_too_long'); return false }
+      if (units + text.length > 1536) { reasons.push('context_total_exceeded'); return false }
+      items.push({ role, turn: turnValue, text, source })
+      seen.add(`${role}\u0000${text}`)
+      units += text.length
+      return true
+    }
+    const endedTurns = new Set()
+    let selectedTurns = new Set()
+    let sawEventLog = false
+    if (session !== undefined && Number.isSafeInteger(session?.seq) && typeof session?.eventAt === 'function') {
+      sawEventLog = true
+      const from = Math.max(0, session.seq - 200)
+      const found = []
+      let openTurn = null
+      for (let i = from; i < session.seq; i += 1) {
+        const event = session.eventAt(i)
+        if (event === undefined) continue
+        if (event.type === 'turn/start') {
+          openTurn = Number.isSafeInteger(event.data?.turn) ? event.data.turn : null
+          continue
+        }
+        if (event.type === 'turn/end') {
+          const ended = event.data?.turn
+          if (Number.isSafeInteger(ended)) { endedTurns.add(ended); if (openTurn === ended) openTurn = null }
+          continue
+        }
+        if (event.type === 'user/message') {
+          // FLAT data IS the message; turn comes from the real enclosing range only.
+          const message = event.data
+          if (message?.role !== 'user') continue
+          if (message?.source?.kind !== 'user' || isMseSource(message.source)) continue
+          const text = contextText(message)
+          if (text === '') continue
+          found.push({ role: 'user', turn: openTurn, text, seq: i })
+          continue
+        }
+        if (event.type === 'assistant/message') {
+          const message = event.data?.message
+          if (message?.role !== 'assistant') continue
+          if (message?.source?.kind !== 'model') continue
+          const text = contextText(message)
+          if (text === '') continue
+          const t = Number.isSafeInteger(event.data?.turn) ? event.data.turn : openTurn
+          found.push({ role: 'assistant', turn: t, text, seq: i })
+        }
+      }
+      // FIRST select the newest two REAL ended turns; trust/material screening happens only
+      // INSIDE that selected set. A turn with no trusted message still occupies its slot.
+      selectedTurns = new Set([...endedTurns].filter(ended => ended < turn)
+        .sort((a, b) => b - a).slice(0, 2))
+      const ordered = found.filter(row => Number.isSafeInteger(row.turn)
+        && selectedTurns.has(row.turn)).sort((a, b) => a.seq - b.seq)
+      for (const row of ordered.slice().reverse()) push(row.role, row.turn, row.text, 'events')
+      items.reverse()
+    }
+    // payload-message fallback is allowed ONLY with checkable role/source/turn AND a real
+    // turn/end for that turn. No null-turn fallback is ever presented as completed context.
+    if (items.length < 4 && Array.isArray(messages)) {
+      const lastIndex = lastTrusted === undefined ? -1 : messages.lastIndexOf(lastTrusted)
+      const stop = lastIndex < 0 ? messages.length : lastIndex
+      for (let i = stop - 1; i >= 0 && items.length < 4; i -= 1) {
+        const message = messages[i]
+        if (message?.role !== 'user' && message?.role !== 'assistant') continue
+        if (message.role === 'user' && (message?.source?.kind !== 'user' || isMseSource(message.source))) continue
+        if (message.role === 'assistant' && message?.source?.kind !== 'model') continue
+        const messageTurn = Number.isSafeInteger(message?.turn) ? message.turn : null
+        if (messageTurn === null || !sawEventLog || !selectedTurns.has(messageTurn)) {
+          reasons.push('context_no_turn_boundary')
+          continue
+        }
+        push(message.role, messageTurn, contextText(message), 'messages')
+      }
+    }
+    return { items, reasons: [...new Set(reasons)] }
+  }
+
   // ── trusted user facts + recall injection ──────────────────────────────────────────────────
   disposers.push(ctx.on('agent/pre-step', async (payload, next) => {
     const session = payload?.agent?.session
@@ -386,6 +488,8 @@ export function apply(ctx, config = {}) {
           // brief that cannot be proven inside → conservatively not collected (reason+count
           // only — no path, body or content hash persists).
           const cwdHere = cwdOf(session)
+          const ctxCollected = collectCorrectionContext(session, messages,
+            trusted[trusted.length - 1], turn, wsRoots)
           if (textMentionsOutside(material, wsRoots, cwdHere)
             || (assistantBrief !== null && textMentionsOutside(assistantBrief, wsRoots, cwdHere))) {
             engine.noteCollectionSkip('material_outside_reference', wsRoots.length)
@@ -396,7 +500,8 @@ export function apply(ctx, config = {}) {
             // counter and the agent's next step returns normally. Unknown errors still propagate.
             try {
               engine.recordCorrectionCandidate({ sessionId, turnId: String(turn), userText: material,
-                assistantBrief, cwd: cwdHere ?? null, referenceText: revises ? lastText : null })
+                assistantBrief, cwd: cwdHere ?? null, referenceText: revises ? lastText : null,
+                context: ctxCollected.items, contextSkip: ctxCollected.reasons })
             } catch (error) {
               const code = typeof error?.code === 'string' ? error.code : ''
               // Expected data/bound refusals and host store refusals are readable skips: the
