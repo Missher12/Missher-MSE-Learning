@@ -37,7 +37,8 @@ const sources = () => publicFiles(root).map(relative => ({
 const artifacts = [packed.filename].map(name => ({ name, sha256: digest(join(dist, name)), bytes: statSync(join(dist, name)).size }))
 const baseCommit = process.env.MSE_SOURCE_COMMIT ?? run('git', ['rev-parse', 'HEAD']).trim()
 if (!/^[a-f0-9]{40}$/u.test(baseCommit)) throw new Error('invalid_source_commit')
+const sourceDirty = run('git', ['status', '--porcelain']).trim().length > 0
 const manifest = { version: pkg.version, targets: ['dsh'], generatedAt: new Date().toISOString(),
-  baseCommit, sourceState: 'uncommitted candidate', artifacts, sources: sources() }
+  baseCommit, sourceState: sourceDirty ? 'uncommitted candidate' : 'clean commit', artifacts, sources: sources() }
 writeFileSync(join(dist, 'candidate-manifest.json'), JSON.stringify(manifest, null, 2) + '\n')
 console.log(JSON.stringify({ version: pkg.version, artifacts }, null, 2))
