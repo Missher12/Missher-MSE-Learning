@@ -1,6 +1,6 @@
 # MSE Learning
 
-DSH plugin for global standing corrections, evidence-linked failure lessons and daily consolidation. Current local candidate: **0.16.0-rc.5** (version/documentation sync only; runtime code is unchanged from the verified **0.16.0-rc.4**, historical). The actual installed host version is read from the host load info and the corresponding receipt.
+DSH plugin for global standing corrections, evidence-linked failure lessons and daily consolidation. Current release: **0.16.0** (promoted from the 0.16.0-rc.5 candidate; version/documentation only — runtime code is unchanged from the verified **0.16.0-rc.4**). The actual installed host version is read from the host load info and the corresponding receipt.
 
 Ordinary user corrections no longer require a remember keyword. Suspected corrections enter a bounded, source-bound extraction after the turn; concrete reusable rules persist and recall in later related sessions/projects. Negations and project limits are retained; one-off requests, questions and quoted logs are not automatically promoted. The status page shows saved, pending and ignored extraction results. This uses the existing learning model route and switches, not a model call for every message.
 

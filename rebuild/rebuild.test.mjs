@@ -5436,7 +5436,7 @@ test('E6b the replay CLI is offline-only, writes nothing and is not part of the 
   } finally { rmSync(work, { recursive: true, force: true }) }
   // The developer CLI and the replay fixture are public SOURCE but NOT runtime package files.
   const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'))
-  assert.equal(pkg.version, '0.16.0-rc.3')
+  assert.equal(pkg.version, '0.16.0')
   assert.ok(pkg.files.includes('rebuild/recall.mjs'))
   assert.ok(pkg.files.includes('rebuild/evolution.mjs'))
   assert.equal(pkg.files.includes('scripts/replay-recall.mjs'), false)

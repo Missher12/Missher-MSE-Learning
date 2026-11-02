@@ -1,6 +1,6 @@
 {
   "name": "@missher/dsh-mse-learning",
-  "version": "0.16.0-rc.5",
+  "version": "0.16.0",
   "description": "MSE learning (rebuilt slim chain): trusted user/tool facts → bounded recall → evidence-bound lessons → daily digest. An upgrade of the mse-learning bundle.",
   "type": "module",
   "private": true,
