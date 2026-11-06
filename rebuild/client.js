@@ -47,7 +47,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       'MseRebuildControlRequest', 'MseRebuildControlResult')) }
 
   const zh = {
-    settingsTitle: '自我进化',
+    settingsTitle: '自我进化', runtimeGroup: '运行设置',
     tabOverview: '常规', tabLessons: '经验', tabRecall: '召回', tabTasks: '任务', tabUsage: '学习状态',
     refresh: '刷新', refreshing: '读取中…', loading: '读取中…',
     statusUnreadable: '状态不可读', loadFailed: '读取失败',
@@ -213,12 +213,12 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details{display:flex;flex-direction:column;width:100%;min-width:0;color:var(--dsw-alias-label-primary);font-size:14px;line-height:22px}
 .mse-details *{box-sizing:border-box}
 .mse-details p{margin:0}
-.mse-details .mse-heading{display:flex;align-items:center;gap:10px;margin-bottom:20px;flex-wrap:wrap;min-width:0}
-.mse-details h1{margin:0;font-size:16px;line-height:24px;font-weight:500}
+.mse-details .mse-heading { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; flex-wrap: wrap; min-width: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+.mse-details h1{margin:0;font-size:20px;line-height:28px;font-weight:600}
 .mse-details .mse-status{font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary);display:inline-flex;align-items:center;gap:6px;min-width:0}
 .mse-details .mse-heading-action{margin-left:auto}
 .mse-details .mse-pane{display:flex;flex-direction:column;min-width:0}
-.mse-details .mse-row{display:flex;gap:20px;align-items:center;padding:16px 0;border-bottom:0.5px solid var(--dsw-alias-border-l2);min-width:0}
+.mse-details .mse-row { display: flex; gap: 20px; align-items: center; padding: 10px 0; border-bottom: 0.5px solid var(--dsw-alias-border-l2); min-width: 0; }
 .mse-details .mse-row-top{align-items:flex-start}
 .mse-details .mse-row-stacked{display:block}
 .mse-details .mse-row-stacked .mse-row-side{display:flex;flex:initial;width:100%;justify-content:flex-start;flex-wrap:wrap;gap:8px 18px;max-width:100%;margin-top:8px;white-space:normal;overflow-wrap:anywhere}
@@ -228,7 +228,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-hint{font-size:13px;color:var(--dsw-alias-label-secondary);line-height:22px;margin-top:4px;overflow-wrap:anywhere}
 .mse-details .mse-row-side{flex:none;min-width:0;display:flex;align-items:center;justify-content:flex-end;gap:8px;font-size:13px}
 .mse-details .mse-unit{color:var(--dsw-alias-label-tertiary);font-size:12px}
-.mse-details .mse-section-title{margin:24px 0 8px;font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary);font-weight:500;display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0}
+.mse-details .mse-section-title { margin: 28px 0 8px; font-size: 16px; line-height: 24px; color: var(--dsw-alias-label-primary); font-weight: 600; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
 .mse-details .mse-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;padding:16px 0 20px;border-bottom:0.5px solid var(--dsw-alias-border-l2)}
 .mse-details .mse-metrics>div{padding:12px 14px;background:var(--dsw-alias-bg-module-platform);border-radius:8px;min-width:0;overflow-wrap:anywhere}
 .mse-details .mse-metrics-2{grid-template-columns:repeat(2,minmax(0,1fr))}
@@ -257,13 +257,13 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-definition.mse-left dd{text-align:left}
 .mse-details .mse-picker{display:inline-flex;flex:none;min-width:0;max-width:100%}
 .mse-details .mse-picker-trigger{max-width:100%;justify-content:space-between;gap:8px}
-.mse-details .mse-picker-label{flex:1 1 auto;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;text-align:left}
+.mse-details .mse-picker-label { flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; text-align: center; }
 .mse-details .mse-picker-chevrons{flex:none;color:var(--dsw-alias-label-tertiary)}
 .mse-details .mse-error{color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:20px;overflow-wrap:anywhere}
 .mse-details .mse-notice{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px;min-height:20px;overflow-wrap:anywhere}
 .mse-details .mse-inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-width:0}
 @media(max-width:620px){
-.mse-details .mse-row{gap:12px}
+.mse-details .mse-row { gap: 12px; padding: 10px 0; }
 .mse-details .mse-metrics{gap:8px}
 .mse-details .mse-metrics>div{padding:10px}
 .mse-details .mse-disclosure>summary{flex-wrap:wrap;gap:8px}
@@ -271,6 +271,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-meta{order:3;justify-content:flex-start;flex:1 1 100%}
 .mse-details .mse-definition{grid-template-columns:minmax(70px,auto) minmax(0,1fr);gap:8px 12px}
 }
+.mse-details .mse-picker-trigger { position: relative; justify-content: center; padding-inline: 28px; }
+.mse-details .mse-picker-chevrons { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); }
+.mse-details input:not([type=checkbox]) { text-align: center; line-height: 30px; }
 `
 
   /** The page's shared primitives — the confirmed design's own shapes (original client). */
@@ -381,7 +384,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
   function MsePanel(props) {
     const locale = typeof props.useLocale === 'function'
       ? props.useLocale(snapshot => snapshot.active) : props.locale
-    const dict = locale === 'en' ? { ...zh, settingsTitle: 'Self-evolution' } : zh
+    const dict = locale === 'en' ? { ...zh, settingsTitle: 'Self-evolution', runtimeGroup: 'Runtime settings' } : zh
     const call = props.call
     const control = props.control
     const form = props.form
@@ -485,6 +488,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           : controlState.paused === true ? dict.effectivePaused : dict.effectiveRunning),
         metric(dict.lastDoneDay, view?.daily?.lastDoneDay ?? '—'),
       ]),
+      h('h2', { key: 'runtime-group', className: 'mse-section-title' }, dict.runtimeGroup),
       row('enabled', dict.learning, dict.learningHint,
         h(Switch, { key: 'sw', checked: enabled, onChange: next => void mutateSetting('enabled', next) })),
       row('pause', dict.pauseControl, dict.pauseHint,
@@ -498,7 +502,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         [h(Input, { key: 'i', value: wakeDraft, placeholder: '600000', onChange: setWakeDraft }),
           h(Button, { key: 'b', variant: 'outline', size: 'sm', onClick: saveWake }, dict.wakeSave)]),
       saveState?.kind === 'error' ? h('p', { key: 'err', className: 'mse-error' }, saveState.detail) : null,
-      h('div', { key: 'sec', className: 'mse-section-title' }, dict.dailySection),
+      h('h2', { key: 'sec', className: 'mse-section-title' }, dict.dailySection),
       h('p', { key: 'dh', className: 'mse-hint' }, dict.dailyHint),
       view === null ? null : row('daily',
         `${dict.waitReasonLine}：${WAIT_ZH[view.daily?.waitReason ?? null] ?? view.daily?.waitReason ?? '—'}`,
@@ -513,7 +517,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         ? row('summary', `${dict.lastSummaryLine} ${view.daily.lastSummary.day}`, view.daily.lastSummary.summary,
           null, { stacked: true })
         : null,
-      h('div', { key: 'secm', className: 'mse-section-title' }, dict.moreSection),
+      h('h2', { key: 'secm', className: 'mse-section-title' }, dict.moreSection),
       disclosure('more-how', dict.moreHowTitle, h('p', { className: 'mse-hint' }, dict.moreHow),
         { id: 'more-how' }),
       disclosure('more-save', dict.moreSaveTitle, h('p', { className: 'mse-hint' }, dict.moreSave),
@@ -529,7 +533,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const shown = entries.filter(entry => (filter.type === '' || entry.type === filter.type)
       && (filter.status === '' || (STATUS_ZH[entry.status] ?? entry.status) === filter.status))
     const lessonsPanel = h(React.Fragment, { key: 'lessons' }, [
-      h('div', { key: 'sec', className: 'mse-section-title' }, [
+      h('h2', { key: 'sec', className: 'mse-section-title' }, [
         h('span', { key: 't' }, dict.entriesSection),
         h('div', { key: 'f', className: 'mse-inline' }, [
           h(Picker, { key: 'type', label: dict.filterType, prefix: dict.filterType,
@@ -594,7 +598,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     // ── 召回 ──────────────────────────────────────────────────────────────────────────────
     const recall = view?.recall ?? []
     const recallPanel = h(React.Fragment, { key: 'recall' }, [
-      h('div', { key: 'sec', className: 'mse-section-title' }, dict.recallSection),
+      h('h2', { key: 'sec', className: 'mse-section-title' }, dict.recallSection),
       h('p', { key: 'rh', className: 'mse-hint' }, dict.recallHint),
       view === null ? null : recall.length === 0 ? h('p', { key: 'nr', className: 'mse-hint' }, dict.noRecall)
         : recall.map(item => disclosure(`r-${item.at}`,
@@ -615,7 +619,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     // ── 任务 ──────────────────────────────────────────────────────────────────────────────
     const tasks = view?.tasks ?? []
     const tasksPanel = h(React.Fragment, { key: 'tasks' }, [
-      h('div', { key: 'sec', className: 'mse-section-title' }, dict.tasksSection),
+      h('h2', { key: 'sec', className: 'mse-section-title' }, dict.tasksSection),
       h('p', { key: 'th', className: 'mse-hint' }, dict.tasksHint),
       h('div', { key: 'm', className: 'mse-metrics mse-metrics-2' }, [
         metric(dict.inFlightNow, String((view?.inFlight ?? []).length)),
@@ -663,7 +667,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const injectedTotal = entries.reduce((total, entry) => total + (entry.injected ?? 0), 0)
     const recurrenceTotal = entries.reduce((total, entry) => total + (entry.recurrences ?? 0), 0)
     const usagePanel = h(React.Fragment, { key: 'usage' }, [
-      h('div', { key: 'sec', className: 'mse-section-title' }, dict.correctionsSection),
+      h('h2', { key: 'sec', className: 'mse-section-title' }, dict.correctionsSection),
       corrections === null ? h('p', { key: 'cl', className: 'mse-hint' }, dict.loading)
         : h('div', { key: 'm', className: 'mse-metrics' }, [
           metric(dict.saved, String(corrections.saved)),
@@ -703,7 +707,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
             ]),
           ]),
         ]),
-      h('div', { key: 'secCol', className: 'mse-section-title' }, dict.collectionSection),
+      h('h2', { key: 'secCol', className: 'mse-section-title' }, dict.collectionSection),
       disclosure('coll-scope', dict.collectionScopeTitle,
         view?.collection === undefined ? dict.loading
           : `${dict.collectionWorkspaces}：${view.collection.workspaces ?? dict.collectionUnknown}`
@@ -711,7 +715,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
               : `；${dict.collectionSkipped}：${view.collection.skipped
                 .map(r => `${REASON_ZH[r.reason] ?? r.reason}×${r.count}`).join('、')}`),
         { id: 'coll-scope' }),
-      h('div', { key: 'secRev', className: 'mse-section-title' }, dict.revisionsSection),
+      h('h2', { key: 'secRev', className: 'mse-section-title' }, dict.revisionsSection),
       view?.revisions === undefined ? h('p', { key: 'rvl', className: 'mse-hint' }, dict.loading)
         : view.revisions.length === 0
           ? h('p', { key: 'rvn', className: 'mse-hint' }, dict.revisionNone)
@@ -731,13 +735,13 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       row('go-lessons', dict.goLessons, null,
         h(Button, { key: 'b', variant: 'outline', size: 'sm', onClick: () => setTab('lessons') },
           dict.tabLessons)),
-      h('div', { key: 'sec1', className: 'mse-section-title' }, dict.existingSection),
+      h('h2', { key: 'sec1', className: 'mse-section-title' }, dict.existingSection),
       h('div', { key: 'ex', className: 'mse-metrics mse-metrics-2' }, [
         metric(dict.existingCount, String(entries.length)),
         metric(`${dict.existingInjected}／${dict.existingRecurrences}`, `${injectedTotal}／${recurrenceTotal}`),
       ]),
       h('p', { key: 'exn', className: 'mse-hint' }, dict.existingScopeNote),
-      h('div', { key: 'sec2', className: 'mse-section-title' }, dict.dailyState),
+      h('h2', { key: 'sec2', className: 'mse-section-title' }, dict.dailyState),
       view === null ? null : h('div', { key: 'daily', className: 'mse-row mse-row-stacked' }, [
         h('div', { key: 't', className: 'mse-row-main' }, [
           definition('d', [
@@ -748,7 +752,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
               || dict.none],
           ], { left: true })]),
       ]),
-      h('div', { key: 'sec3', className: 'mse-section-title' }, dict.usageAuditSection),
+      h('h2', { key: 'sec3', className: 'mse-section-title' }, dict.usageAuditSection),
       h('p', { key: 'un', className: 'mse-hint' }, dict.usageAuditNote),
       usage === null ? null : h('div', { key: 'm2', className: 'mse-metrics' }, [
         metric(dict.usageCalls, String(sum('calls'))),

@@ -93,6 +93,14 @@ export function apply(ctx, config = {}) {
     throw new Error('mse-learning(rebuild): the host must provide dshHomePath')
   }
   const engine = new RebuildEngine({ stateRoot, now: () => Date.now() })
+  const safeStoreAction = (reason, action) => {
+    try { return action() } catch (error) {
+      if (!['state_unavailable', 'invalid_memory', 'invalid_store', 'capacity', 'ENOSPC', 'EIO',
+        'EACCES', 'EROFS'].includes(error?.code)) throw error
+      engine.noteCollectionSkip(reason)
+      return null
+    }
+  }
   // Settings arrive either as plain values (embedded/test host) or as volatile schemastery
   // fields with .get() (the real Cordis config resolution). Both are read the same way.
   const setting = (name, fallback) => {
@@ -532,7 +540,7 @@ export function apply(ctx, config = {}) {
     if (agentRoute !== undefined) engine.observeRoute({ sessionId, route: agentRoute })
     if (decision?.kind !== 'enter') return decision
     const prepared = engine.prepare({ sessionId, turnId: String(turn),
-      projectKey: cwdOf(session), prompt: userText })
+      projectKey: cwdOf(session), prompt: userText, strategyEligible: userText !== '' && inWorkspace })
     if (prepared.context !== '') {
       decision.messages = [...decision.messages, createUserMessage({
         content: [{ type: 'text',
@@ -570,7 +578,7 @@ export function apply(ctx, config = {}) {
     // readable, and work continues once the registry is back (see wakeNow's guard).
     if (roots === null) return false
     return roots.some(root => root.sessionIds.has(candidateSessionId))
-  })
+  }, () => (workspaceRoots() ?? []).flatMap(root => [...root.sessionIds]))
   engine.setMaterialGuard((text, rowCwd) => {
     const roots = workspaceRoots()
     if (roots === null) return false // same closed posture as the source guard
@@ -651,7 +659,8 @@ export function apply(ctx, config = {}) {
       || result.value?.aborted === true
       || (result.isError === true && ['ABORTED', 'ABORTED_BEFORE_DISPATCH'].includes(result.error?.info?.code))
     if (cancelled) {
-      engine.recordCancellation({ sessionId, turnId, callId: exec.callId })
+      safeStoreAction('tool_state_unavailable', () =>
+        engine.recordCancellation({ sessionId, turnId, callId: exec.callId }))
       return
     }
     const failureCode = result.value?.timedOut === true ? 'tool_timeout'
@@ -684,10 +693,10 @@ ${result.error?.message ?? ''}`
       return
     }
     turnHasFailure.set(`${sessionId}\u0000${turnId}`, true)
-    engine.observeToolFailure({ sessionId, turnId, projectKey: cwdOf(session), callId: exec.callId,
-      toolName: exec.name, failureCode, exitCode: result.value?.exitCode ?? null,
-      stderr: result.value?.stderr?.text ?? null, error: result.error?.message ?? null,
-      command: commandText === '' ? null : commandText })
+    safeStoreAction('tool_state_unavailable', () => engine.observeToolFailure({ sessionId, turnId,
+      projectKey: cwdOf(session), callId: exec.callId, toolName: exec.name, failureCode,
+      exitCode: result.value?.exitCode ?? null, stderr: result.value?.stderr?.text ?? null,
+      error: result.error?.message ?? null, command: commandText === '' ? null : commandText }))
   }))
 
   // ── turn facts and settlement (persistent identity; idempotent) ────────────────────────────
@@ -802,10 +811,11 @@ ${result.error?.message ?? ''}`
       if (report.status === 'not_applicable') continue
       const offers = engine.jsonRelevantOffers({ sessionId, turnId: String(turn) })
       if (offers.length > 0) {
-        engine.recordCheck({ checkId: report.checkId, passed: report.status === 'pass',
+        safeStoreAction('checker_state_unavailable', () => engine.recordCheck({
+          checkId: report.checkId, passed: report.status === 'pass',
           evidence: { reason: report.reason, bytes: report.bytes ?? null, file: check.file },
           sessionId, turnId: String(turn), entryId: offers[0].id, entryVersion: offers[0].version,
-          eventId: `fs-check:${check.callId}:${check.file}` })
+          eventId: `fs-check:${check.callId}:${check.file}` }))
       }
       if (report.status === 'fail' || checkSeen === null) {
         checkSeen = { file: check.file, status: report.status, reason: report.reason }
@@ -813,12 +823,12 @@ ${result.error?.message ?? ''}`
     }
     const outcome = cancelled ? 'cancelled' : failed ? 'failed'
       : checkSeen !== null ? (checkSeen.status === 'pass' ? 'verified' : 'failed') : 'unknown'
-    engine.complete({ sessionId, turnId: String(turn), outcome,
+    safeStoreAction('turn_state_unavailable', () => engine.complete({ sessionId, turnId: String(turn), outcome,
       evidence: outcome === 'failed' ? (failed ? '本回合存在真实工具失败记录'
         : `产物检查未通过：${checkSeen.file}（${checkSeen.reason}）`)
         : outcome === 'cancelled' ? '回合被取消'
           : outcome === 'verified' ? `产物检查通过：${checkSeen.file}（${checkSeen.reason}）`
-            : '回合完成，无客观检查记录' })
+            : '回合完成，无客观检查记录' }))
     void engine.syncDigest()
     // Soon-after-source-turn processing over the SAME running slot: wake() holds when busy or
     // paused; the candidate stays a persistent todo until the next idle chance — no new timer.

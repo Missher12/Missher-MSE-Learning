@@ -1,0 +1,65 @@
+{
+  "about": "Synthetic controls for the offline error-concept normalization candidate. Separate from the 34-case corpus; not blind or production data.",
+  "cases": [
+    {
+      "id": "norm-positive-error-object",
+      "source": "synthetic_control",
+      "prompt": "YAML 配置缩进报错，先帮我把格式修对",
+      "scope": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "environment": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "entries": [
+        {"id":"mem_norm_positive_exact","type":"rule","status":"user_rule","instruction":"先检查列表层级和缩进宽度，再解析整份文件","applicability":"修复缩进层级错误时","exclusions":"","visibility":"global","originScope":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","originEnvironment":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","originSession":null,"lesson":null,"problemSignature":null,"version":1,"parentVersion":null,"superseded":null,"injected":0,"recurrences":0,"createdAt":100,"updatedAt":100,"lastInjectedAt":null,"evidenceHash":null,"methodStats":null,"factDigest":null,"digestDay":null,"importedFrom":null},
+        {"id":"mem_norm_positive_broad","type":"rule","status":"user_rule","instruction":"生成 YAML 时先解析再写出，避免手工拼接","applicability":"生成 YAML 时","exclusions":"","visibility":"global","originScope":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","originEnvironment":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","originSession":null,"lesson":null,"problemSignature":null,"version":1,"parentVersion":null,"superseded":null,"injected":0,"recurrences":0,"createdAt":200,"updatedAt":200,"lastInjectedAt":null,"evidenceHash":null,"methodStats":null,"factDigest":null,"digestDay":null,"importedFrom":null},
+        {"id":"mem_norm_positive_login","type":"rule","status":"user_rule","instruction":"先检查登录接口返回","applicability":"修复登录接口错误时","exclusions":"","visibility":"global","originScope":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","originEnvironment":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","originSession":null,"lesson":null,"problemSignature":null,"version":1,"parentVersion":null,"superseded":null,"injected":0,"recurrences":0,"createdAt":300,"updatedAt":300,"lastInjectedAt":null,"evidenceHash":null,"methodStats":null,"factDigest":null,"digestDay":null,"importedFrom":null}
+      ],
+      "expect": {"relevant":["mem_norm_positive_exact"],"excluded":["mem_norm_positive_broad","mem_norm_positive_login"],"guards":[]}
+    },
+    {
+      "id": "norm-cross-format",
+      "source": "synthetic_control",
+      "prompt": "JSON 配置缩进报错，先修格式",
+      "scope": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "environment": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "entries": [
+        {"id":"mem_norm_json_fix","type":"rule","status":"user_rule","instruction":"先检查 JSON 缩进和层级","applicability":"修复 JSON 缩进错误时","exclusions":"","visibility":"global","originScope":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","originEnvironment":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","originSession":null,"lesson":null,"problemSignature":null,"version":1,"parentVersion":null,"superseded":null,"injected":0,"recurrences":0,"createdAt":100,"updatedAt":100,"lastInjectedAt":null,"evidenceHash":null,"methodStats":null,"factDigest":null,"digestDay":null,"importedFrom":null},
+        {"id":"mem_norm_yaml_fix","type":"rule","status":"user_rule","instruction":"先检查 YAML 缩进和层级","applicability":"修复 YAML 缩进错误时","exclusions":"","visibility":"global","originScope":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","originEnvironment":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","originSession":null,"lesson":null,"problemSignature":null,"version":1,"parentVersion":null,"superseded":null,"injected":0,"recurrences":0,"createdAt":200,"updatedAt":200,"lastInjectedAt":null,"evidenceHash":null,"methodStats":null,"factDigest":null,"digestDay":null,"importedFrom":null}
+      ],
+      "expect": {"relevant":["mem_norm_json_fix"],"excluded":["mem_norm_yaml_fix"],"guards":[]}
+    },
+    {
+      "id": "norm-bare-error",
+      "source": "synthetic_control",
+      "prompt": "错误",
+      "scope": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "environment": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "entries": [
+        {"id":"mem_norm_bare_yaml","type":"rule","status":"user_rule","instruction":"生成 YAML 时先解析再写出","applicability":"生成 YAML 时","exclusions":"","visibility":"global","originScope":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","originEnvironment":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","originSession":null,"lesson":null,"problemSignature":null,"version":1,"parentVersion":null,"superseded":null,"injected":0,"recurrences":0,"createdAt":100,"updatedAt":100,"lastInjectedAt":null,"evidenceHash":null,"methodStats":null,"factDigest":null,"digestDay":null,"importedFrom":null}
+      ],
+      "expect": {"relevant":[],"excluded":["mem_norm_bare_yaml"],"guards":[]}
+    },
+    {
+      "id": "norm-other-task",
+      "source": "synthetic_control",
+      "prompt": "登录接口报错，先修超时",
+      "scope": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "environment": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "entries": [
+        {"id":"mem_norm_other_indent","type":"rule","status":"user_rule","instruction":"先检查列表层级和缩进宽度","applicability":"修复缩进层级错误时","exclusions":"","visibility":"global","originScope":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","originEnvironment":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","originSession":null,"lesson":null,"problemSignature":null,"version":1,"parentVersion":null,"superseded":null,"injected":0,"recurrences":0,"createdAt":100,"updatedAt":100,"lastInjectedAt":null,"evidenceHash":null,"methodStats":null,"factDigest":null,"digestDay":null,"importedFrom":null}
+      ],
+      "expect": {"relevant":[],"excluded":["mem_norm_other_indent"],"guards":[]}
+    },
+    {
+      "id": "norm-scope-retired",
+      "source": "synthetic_control",
+      "prompt": "YAML 配置缩进报错",
+      "scope": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "environment": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "entries": [
+        {"id":"mem_norm_scope_global","type":"rule","status":"user_rule","instruction":"先检查缩进层级","applicability":"修复缩进层级错误时","exclusions":"","visibility":"global","originScope":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","originEnvironment":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","originSession":null,"lesson":null,"problemSignature":null,"version":1,"parentVersion":null,"superseded":null,"injected":0,"recurrences":0,"createdAt":100,"updatedAt":100,"lastInjectedAt":null,"evidenceHash":null,"methodStats":null,"factDigest":null,"digestDay":null,"importedFrom":null},
+        {"id":"mem_norm_scope_other","type":"rule","status":"user_rule","instruction":"先检查缩进层级","applicability":"修复缩进层级错误时","exclusions":"","visibility":"scoped","originScope":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","originEnvironment":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","originSession":null,"lesson":null,"problemSignature":null,"version":1,"parentVersion":null,"superseded":null,"injected":0,"recurrences":0,"createdAt":200,"updatedAt":200,"lastInjectedAt":null,"evidenceHash":null,"methodStats":null,"factDigest":null,"digestDay":null,"importedFrom":null},
+        {"id":"mem_norm_scope_retired","type":"rule","status":"retired","instruction":"先检查缩进层级","applicability":"修复缩进层级错误时","exclusions":"","visibility":"global","originScope":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","originEnvironment":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","originSession":null,"lesson":null,"problemSignature":null,"version":1,"parentVersion":null,"superseded":null,"injected":0,"recurrences":0,"createdAt":300,"updatedAt":300,"lastInjectedAt":null,"evidenceHash":null,"methodStats":null,"factDigest":null,"digestDay":null,"importedFrom":null}
+      ],
+      "expect": {"relevant":["mem_norm_scope_global"],"excluded":["mem_norm_scope_other","mem_norm_scope_retired"],"guards":[]}
+    }
+  ]
+}

@@ -2,7 +2,7 @@
  * mse-rebuild engine — one direct chain, no old-core state machines.
  *
  *   observe (user correction | real tool fact | cancellation | turn fact)
- *     → prepare (recall ≤2 entries / 768 B per turn, same-turn dedup, condition-aware)
+ *     → prepare (0.16.1: ≤2 methods + ≤1 guard, total ≤3 / 768 B per turn, same-turn dedup)
  *     → complete (persistent per-turn settlement: outcome + evidence hash, idempotent)
  *     → reflect / revise (structured lesson over FROZEN capsules; recurrence attributed to the
  *        CURRENT turn's injected versions + signature; a rewording with the same steps/check is
@@ -21,20 +21,25 @@
  * pause / route change / dispose never commit.
  */
 import { createHash, randomUUID } from 'node:crypto'
-import { check, MAX_STORE_BYTES } from '../src/store.mjs'
+import { check, LearningError, MAX_STORE_BYTES } from '../src/store.mjs'
 import { analyze } from '../src/recall.mjs'
 import { sanitizeDiagnosticText, buildFailureCapsule, SENSITIVE_PATTERN, AUTHORITY_PATTERN } from '../src/failure-evidence.mjs'
 import { validateFailureLessonOutput, evidenceTokenHashes } from '../src/failure-lessons.mjs'
 import { observeInState, abstainInState, linkCandidateInState,
   interruptInState, REFLECTABLE_KINDS, INDEPENDENT_THRESHOLD } from '../src/problems.mjs'
 import { MemoryStore, importOldLessons, entryIdFor, digestOf, memoryOf, ROLLBACK,
-  boundedUnits, upgradeDocFormat } from './memory.mjs'
+  boundedUnits, upgradeDocFormat, RECALL_STRATEGY_LIMIT, ADAPTIVE_RECALL_POLICY_LIMIT,
+  ADAPTIVE_RECALL_PROBE_LIMIT, ADAPTIVE_RECALL_DECISION_LIMIT } from './memory.mjs'
 import { mechanismKey, resolveMethodVersion, versionWindow, ensureMethodStats, archiveVersion,
   selectHistory, renderHistoryPrompt, historyCapacity, methodNeedsGuard, guardSummary,
   historyAdmission, historyRowPreview, methodAttribution, creditWindow, editionSources,
   sourceSnapshot }
   from './evolution.mjs'
-import { recallSelection } from './recall.mjs'
+import { selectRecall, selectRecallErrorLog, normalizedView, NORMALIZATION_RULE } from './recall.mjs'
+import { RECALL_QUALIFICATION } from './recall-qualification.mjs'
+import { addAdaptiveCandidate, adaptivePolicyMatches, adaptiveQueryFeatures, adaptiveQueryKey,
+  synthesizeAdaptivePolicy } from './adaptive-recall.mjs'
+import { replayAdaptivePolicy } from './adaptive-replay.mjs'
 import { localDayKey } from './time.mjs'
 
 export const DEFAULT_CONTEXT_BYTES = 768
@@ -47,7 +52,7 @@ const DIGEST_LEDGER = 1024
 // bound (the live route truncated at 2048); digest output is bounded by the same JSON contract.
 const REFLECT_MAX_TOKENS = 8192
 const DIGEST_MAX_TOKENS = 4096
-export const MAX_LESSONS_PER_TURN = 2
+export const MAX_LESSONS_PER_TURN = 3 // 0.16.1: up to 2 methods + 1 guard
 const hash = text => createHash('sha256').update(text).digest('hex')
 const isPlainObject = value => value !== null && typeof value === 'object'
   && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
@@ -56,6 +61,475 @@ const scopeOf = projectKey => hash(JSON.stringify(projectKey === undefined || pr
   ? ['instance'] : ['project', String(projectKey)]))
 const environmentOf = value => hash(String(value ?? 'default'))
 const turnKeyOf = (sessionId, turnId) => hash(JSON.stringify([String(sessionId), String(turnId)]))
+const sessionKeyOf = sessionId => digestOf(String(sessionId))
+const strategyScopeOf = (scope, environment) => digestOf([scope, environment])
+const storageFailure = error => error instanceof LearningError
+  || ['state_unavailable', 'invalid_memory', 'invalid_store', 'capacity', 'ENOSPC', 'EIO', 'EACCES',
+    'EROFS'].includes(error?.code)
+const recallOfferKey = row => `${row.id}\u0000${row.version}\u0000${row.mode ?? 'method'}`
+const recallStrategyIdentity = row => `${row.scope}\u0000${row.qualification}\u0000${row.id}\u0000${row.version}`
+const strategyMethodMaterial = entry => JSON.stringify({ applicability: entry.applicability,
+  instruction: entry.instruction, failurePattern: entry.lesson?.failurePattern ?? null,
+  rootCause: entry.lesson?.rootCause ?? null, repairSteps: entry.lesson?.repairSteps ?? null,
+  verification: entry.lesson?.verification ?? null })
+const strategyFailureMaterial = capsule => JSON.stringify({ message: capsule.message ?? null,
+  command: capsule.command ?? null, toolName: capsule.toolName ?? null,
+  failureClass: capsule.failureClass ?? null })
+const strategyRowExists = (rows, row) => rows.some(item => item.turnKey === row.turnKey
+  && recallStrategyIdentity(item) === recallStrategyIdentity(row))
+const eligibleStrategyMethod = (doc, offer) => {
+  if (offer?.mode !== 'method') return false
+  const entry = doc.entries.find(row => row.id === offer.id && row.version === offer.version)
+  return entry?.type === 'lesson' && entry.status !== 'retired'
+    && typeof entry.lesson?.problemId === 'string' && /^[a-f0-9]{64}$/u.test(entry.lesson.problemId)
+}
+const methodMatchesNativeFailure = (doc, offer, problemId, signature) => {
+  if (offer?.mode !== 'method') return false
+  const target = resolveMethodVersion(doc, offer.id, offer.version)
+  return target !== null && (target.record.lesson?.problemId === problemId
+    || (target.kind === 'current' && target.record.problemSignature === signature))
+}
+const adaptivePolicyTarget = (doc, policy) => {
+  const entry = doc.entries.find(row => row.id === policy?.entryId && row.version === policy?.version)
+  return entry?.type === 'lesson' && entry.status !== 'retired'
+    && entry.lesson?.problemId === policy.objective ? entry : null
+}
+const adaptiveEntryVisible = (entry, projectScope, environment) => entry.visibility === 'global'
+  || (entry.originScope === projectScope && entry.originEnvironment === environment)
+function matchingCurrentMethods(doc, { problemId, signature, projectScope, environment, now }) {
+  return doc.entries.filter(entry => entry.type === 'lesson' && entry.status !== 'retired'
+    && entry.lesson !== null && entry.lesson !== undefined
+    && adaptiveEntryVisible(entry, projectScope, environment) && !methodNeedsGuard(entry, now)
+    && (entry.lesson.problemId === problemId || entry.problemSignature === signature))
+}
+function pruneAdaptiveState(doc) {
+  const adaptive = doc.recallStrategy.adaptive
+  adaptive.policies = adaptive.policies.filter(policy => policy.qualification === RECALL_QUALIFICATION.id
+    && adaptivePolicyTarget(doc, policy) !== null)
+  adaptive.probes = adaptive.probes.filter(probe => {
+    const receipt = doc.receipts.find(row => row.turnKey === probe.turnKey)
+    const fact = doc.turnFacts.find(row => row.turnKey === probe.turnKey)
+    return receipt?.settled !== true && (fact?.outcome === null || fact?.outcome === undefined)
+  }).slice(-ADAPTIVE_RECALL_PROBE_LIMIT)
+  adaptive.decisions = adaptive.decisions.slice(-ADAPTIVE_RECALL_DECISION_LIMIT)
+}
+function adaptiveDecision(adaptive, row) {
+  if (adaptive.decisions.some(item => item.turnKey === row.turnKey
+    && item.policyId === row.policyId && item.result === row.result && item.reason === row.reason)) return
+  adaptive.decisions.push(row)
+  if (adaptive.decisions.length > ADAPTIVE_RECALL_DECISION_LIMIT) {
+    adaptive.decisions = adaptive.decisions.slice(-ADAPTIVE_RECALL_DECISION_LIMIT)
+  }
+}
+function stageAdaptiveSignal(probe, signal) {
+  if (probe.pending.some(row => row.policyId === signal.policyId && row.kind === signal.kind
+    && row.problemId === signal.problemId && row.signature === signal.signature)) return true
+  if (probe.pending.length >= 8) return false
+  probe.pending.push(signal)
+  return true
+}
+function adaptiveEditionAdmitted(entry, sourceAdmit) {
+  const origins = editionSources(entry)
+  return origins.length > 0 && origins.every(id => sourceAdmit(id) === true)
+}
+function adaptivePolicySourcesAdmitted(doc, policy, sourceAdmit) {
+  const target = adaptivePolicyTarget(doc, policy)
+  if (!target || !adaptiveEditionAdmitted(target, sourceAdmit)) return false
+  const evidence = policy.samples.filter(sample => ['discovery_hit', 'holdout_hit',
+    'negative_control', 'negative'].includes(sample.result))
+  return evidence.length > 0 && evidence.every(sample => {
+    if (sourceAdmit.byDigest) return sourceAdmit.byDigest(sample.session)
+    const fact = doc.turnFacts.find(row => row.turnKey === sample.turnKey)
+    return typeof fact?.sessionId === 'string' && fact.sessionId !== ''
+      && sessionKeyOf(fact.sessionId) === sample.session && sourceAdmit(fact.sessionId) === true
+  })
+}
+function findAdaptiveCapsule(doc, probe, problemId, signature, sessionId) {
+  if (problemId === null || problemId === undefined) return null
+  const problem = doc.problemLoop?.problems.find(row => row.id === problemId)
+  return problem?.capsules?.find(capsule => capsule.turnKey === probe.turnKey
+    && capsule.originSessionId === sessionId && capsule.signature === signature) ?? null
+}
+const matchedMethodStillAdmitted = (doc, row, { turnKey, sessionId, sourceAdmit, materialAdmit }) => {
+  if (row.mode !== 'matched' || typeof row.problemId !== 'string') return false
+  const target = resolveMethodVersion(doc, row.id, row.version)
+  if (target?.kind !== 'current' || !eligibleStrategyMethod(doc,
+    { id: row.id, version: row.version, mode: 'method' })) return false
+  const problem = doc.problemLoop?.problems.find(item => item.id === row.problemId)
+  if (problem === undefined) return false
+  const capsule = (problem.capsules ?? []).find(item => item.turnKey === turnKey
+    && item.originSessionId === sessionId)
+  if (capsule === undefined || (target.record.problemSignature !== capsule.signature
+    && target.record.lesson.problemId !== problem.id)) return false
+  return sourceAdmit(sessionId) === true
+    && materialAdmit(strategyMethodMaterial(target.record)) === true
+    && materialAdmit(strategyFailureMaterial(capsule)) === true
+}
+const approvedStrategyMethod = (rows, scope, offer) => rows.some(row => row.mode === 'approved'
+  && row.scope === scope && row.qualification === RECALL_QUALIFICATION.id
+  && row.id === offer.id && row.version === offer.version)
+const isolatedStrategyMethod = (rows, scope, offer) => rows.some(row => row.mode === 'isolated'
+  && row.scope === scope && row.qualification === RECALL_QUALIFICATION.id
+  && row.id === offer.id && row.version === offer.version)
+
+function recallStrategyStatusView(doc, sourceAdmit = () => false) {
+  const current = new Map(doc.entries.filter(entry => entry.type === 'lesson'
+    && entry.status !== 'retired' && typeof entry.lesson?.problemId === 'string'
+    && /^[a-f0-9]{64}$/u.test(entry.lesson.problemId)).map(entry => [entry.id, entry.version]))
+  const rows = doc.recallStrategy.rows.filter(row => row.qualification === RECALL_QUALIFICATION.id
+    && current.get(row.id) === row.version)
+  const modes = ['shadow', 'matched', 'active', 'approved', 'isolated']
+  const counts = Object.fromEntries(modes.map(mode => [mode,
+    rows.filter(row => row.mode === mode).length]))
+  const adaptive = doc.recallStrategy.adaptive.policies.filter(policy =>
+    policy.qualification === RECALL_QUALIFICATION.id && adaptivePolicyTarget(doc, policy) !== null)
+  const adaptiveCounts = Object.fromEntries(['observing', 'approved', 'isolated'].map(mode =>
+    [mode, adaptive.filter(policy => policy.mode === mode).length]))
+  return { generation: doc.recallStrategy.generation, counts,
+    recent: rows.slice(-8).reverse().map(({ id, version, mode, generation, reason }) =>
+      ({ id, version, mode, generation, reason })),
+    adaptive: { generation: doc.recallStrategy.adaptive.generation, counts: adaptiveCounts,
+      recent: adaptive.slice(-8).reverse().map(policy => ({ id: policy.id, entryId: policy.entryId,
+        version: policy.version, mode: policy.mode, features: policy.features,
+        positives: policy.positives, negativeControls: policy.negativeControls,
+        rejections: policy.rejections, reason: policy.reason,
+        sourceAdmitted: adaptivePolicySourcesAdmitted(doc, policy, sourceAdmit),
+        replay: replayAdaptivePolicy(policy) })) } }
+}
+
+function appendRecallStrategyRows(doc, additions) {
+  if (additions.length === 0) return true
+  const state = doc.recallStrategy
+  state.rows = state.rows.filter(row => {
+    if (row.qualification !== RECALL_QUALIFICATION.id) return false
+    if (row.mode === 'approved' || row.mode === 'isolated') {
+      const entry = doc.entries.find(item => item.id === row.id)
+      return entry?.type === 'lesson' && entry.status !== 'retired'
+        && entry.version === row.version
+        && typeof entry.lesson?.problemId === 'string'
+        && /^[a-f0-9]{64}$/u.test(entry.lesson.problemId)
+    }
+    const receipt = doc.receipts.find(item => item.turnKey === row.turnKey)
+    const fact = doc.turnFacts.find(item => item.turnKey === row.turnKey)
+    return receipt?.settled !== true && (fact?.outcome === null || fact?.outcome === undefined)
+  })
+  const unique = additions.filter(row => !strategyRowExists(state.rows, row))
+  if (state.rows.length + unique.length > RECALL_STRATEGY_LIMIT) return false
+  state.rows.push(...unique)
+  return true
+}
+
+function settleRecallStrategy(doc, { turnKey, sessionId, outcome, receipt,
+  allowStrategy = true, reconfirmMatched = () => true }) {
+  const state = doc.recallStrategy
+  const session = sessionKeyOf(sessionId)
+  const current = state.rows.filter(row => row.turnKey === turnKey && row.session === session)
+  const settledFailure = outcome === 'failed'
+    && (receipt === undefined || (receipt?.settled === true && receipt.outcome === 'failed'))
+  if (settledFailure && allowStrategy) {
+    for (const row of current.filter(item => item.mode === 'matched')) {
+      if (!reconfirmMatched(row)) continue
+      if (state.rows.some(item => item.mode === 'approved'
+        && recallStrategyIdentity(item) === recallStrategyIdentity(row))) continue
+      if (state.rows.some(item => item.mode === 'isolated'
+        && recallStrategyIdentity(item) === recallStrategyIdentity(row))) continue
+      state.generation += 1
+      row.mode = 'approved'
+      delete row.problemId
+      row.generation = state.generation
+      row.reason = 'same_turn_native_failure_match'
+    }
+
+    const active = current.filter(row => row.mode === 'active' && receipt?.offered?.some(offer =>
+      offer.id === row.id && offer.version === row.version && offer.mode === 'method'))
+    for (const row of active) {
+      const feedback = receipt.methodFeedback ?? []
+      const recurrence = feedback.some(item => item.entryId === row.id && item.version === row.version
+        && item.kind === 'recurrence' && item.voided !== true)
+      const checkerFailure = feedback.some(item => item.entryId === row.id && item.version === row.version
+        && item.kind === 'check_fail' && item.checkId === 'json-file-parses-v1'
+        && item.voided !== true)
+      if (!recurrence && !checkerFailure) continue
+      if (state.rows.some(item => item.mode === 'isolated'
+        && recallStrategyIdentity(item) === recallStrategyIdentity(row))) continue
+      state.rows = state.rows.filter(item => recallStrategyIdentity(item) !== recallStrategyIdentity(row))
+      state.generation += 1
+      state.rows.push({ ...row, mode: 'isolated', generation: state.generation,
+        reason: checkerFailure ? 'native_checker_failure' : 'same_signature_recurrence' })
+    }
+  }
+  // Transient shadow/active evidence is only useful until the real turn settles. Keep durable
+  // approvals and isolations; no prompt, path, command or failure body is retained here.
+  state.rows = state.rows.filter(row => !(row.turnKey === turnKey && row.session === session
+    && (row.mode === 'shadow' || row.mode === 'matched' || row.mode === 'active')))
+}
+
+function settleAdaptiveRecall(doc, { turnKey, sessionId, outcome, receipt, allowStrategy,
+  sourceAdmit, materialAdmit, now }) {
+  const adaptive = doc.recallStrategy.adaptive
+  const probe = adaptive.probes.find(row => row.turnKey === turnKey
+    && row.session === sessionKeyOf(sessionId))
+  if (probe === undefined) return
+  const decision = (policyId, entryId, version, result, reason) => adaptiveDecision(adaptive,
+    { turnKey, scope: probe.scope, policyId, entryId, version, result, reason, at: now })
+  if (outcome !== 'failed' || !allowStrategy) {
+    const reason = !allowStrategy ? 'strategy_disabled' : 'cancelled_or_unknown'
+    for (const signal of probe.pending) {
+      decision(signal.policyId, signal.entryId, signal.version, 'unknown', reason)
+    }
+    adaptive.probes = adaptive.probes.filter(row => row.turnKey !== turnKey)
+    return
+  }
+  if (receipt !== undefined && (receipt.settled !== true || receipt.outcome !== 'failed')) {
+    adaptive.probes = adaptive.probes.filter(row => row.turnKey !== turnKey)
+    return
+  }
+  if (sourceAdmit(sessionId) !== true) {
+    for (const signal of probe.pending) {
+      decision(signal.policyId, signal.entryId, signal.version, 'unknown', 'source_revoked')
+    }
+    adaptive.probes = adaptive.probes.filter(row => row.turnKey !== turnKey)
+    return
+  }
+  if (materialAdmit(JSON.stringify(probe.features)) !== true) {
+    for (const signal of probe.pending) {
+      decision(signal.policyId, signal.entryId, signal.version, 'unknown', 'material_revoked')
+    }
+    adaptive.probes = adaptive.probes.filter(row => row.turnKey !== turnKey)
+    return
+  }
+
+  // A query is not a labelled example for one method if two unrelated operations failed
+  // in its turn. Inspect all host capsules, not just the subset that generated signals.
+  const failures = doc.turnFacts.find(row => row.turnKey === turnKey)?.failures ?? 0
+  if (failures > 1 && probe.pending.length) {
+    const identities = new Set()
+    let seen = 0
+    for (const p of doc.problemLoop.problems) {
+      for (const c of p.capsules ?? []) if (c.turnKey === turnKey && c.originSessionId === sessionId) {
+        seen++
+        identities.add(p.id + ':' + (c.signature ?? ''))
+      }
+    }
+    if (identities.size !== 1 || seen < failures) {
+      for (const signal of probe.pending)
+        decision(signal.policyId, signal.entryId, signal.version, 'unknown', 'ambiguous_native_failure')
+      adaptive.probes = adaptive.probes.filter(row => row.turnKey !== turnKey)
+      return
+    }
+  }
+
+  const workspaceMatches = signal => doc.entries.filter(entry => entry.type === 'lesson'
+    && entry.status !== 'retired' && entry.lesson !== null && entry.lesson !== undefined
+    && adaptiveEntryVisible(entry, probe.projectScope, probe.environment)
+    && ((signal.problemId !== null && entry.lesson.problemId === signal.problemId)
+      || (signal.signature !== null && entry.problemSignature === signal.signature)))
+  const signalGroups = new Map()
+  for (const signal of probe.pending) {
+    const rows = signalGroups.get(signal.policyId) ?? []
+    rows.push(signal)
+    signalGroups.set(signal.policyId, rows)
+  }
+  for (const [policyId, signals] of signalGroups) {
+    const rejected = signals.find(signal => ['negative', 'recurrence', 'checker_failure'].includes(signal.kind))
+    const signal = rejected ?? signals[0]
+    let policy = adaptive.policies.find(row => row.id === policyId)
+    let target = policy === undefined ? doc.entries.find(row => row.id === signal.entryId
+      && row.version === signal.version) : adaptivePolicyTarget(doc, policy)
+    const commonValid = target?.type === 'lesson' && target.status !== 'retired'
+      && target.version === signal.version && target.lesson?.problemId === signal.objective
+      && materialAdmit(strategyMethodMaterial(target)) === true
+      && editionSources(target).length > 0
+      && editionSources(target).every(source => sourceAdmit(source) === true)
+      && probe.scope === strategyScopeOf(probe.projectScope, probe.environment)
+    if (!commonValid) {
+      decision(policyId, signal.entryId, signal.version, 'unknown', 'policy_stale')
+      continue
+    }
+    const nativeSignal = ['discovery', 'holdout', 'negative', 'negative_control', 'recurrence']
+      .includes(signal.kind)
+    const capsule = nativeSignal ? findAdaptiveCapsule(doc, probe, signal.problemId,
+      signal.signature, sessionId) : null
+    if (nativeSignal && (capsule === null
+      || materialAdmit(strategyFailureMaterial(capsule)) !== true)) {
+      decision(policyId, signal.entryId, signal.version, 'unknown', 'material_revoked')
+      continue
+    }
+    const matches = nativeSignal ? workspaceMatches(signal) : []
+    const exact = matches.length === 1 && matches[0].id === signal.entryId
+      && matches[0].version === signal.version
+    const methodFeedback = receipt?.methodFeedback ?? []
+    if (!adaptiveEditionAdmitted(target, sourceAdmit) || nativeSignal && matches.some(entry => !adaptiveEditionAdmitted(entry, sourceAdmit))) {
+      decision(policyId, signal.entryId, signal.version, 'unknown', 'source_revoked')
+      continue
+    }
+    if (signal.kind === 'discovery') {
+      if (!exact || probe.offered.some(row => row.id === signal.entryId
+        && row.version === signal.version && row.mode === 'method')
+        || probe.baselineOffers.some(row => row.id === signal.entryId
+          && row.version === signal.version && row.mode === 'method')) {
+        decision(policyId, signal.entryId, signal.version, 'rejected', 'baseline_explains_failure')
+        continue
+      }
+      if (policy !== undefined || adaptive.policies.some(row => row.scope === probe.scope
+        && row.entryId === signal.entryId && row.version === signal.version)) {
+        decision(policyId, signal.entryId, signal.version, 'rejected', 'already_tracked')
+        continue
+      }
+      const generated = synthesizeAdaptivePolicy({ scope: probe.scope,
+        qualification: RECALL_QUALIFICATION.id, entry: target, queryFeatures: probe.features,
+        turnKey, session: probe.session, queryKey: probe.query, now })
+      if (generated === null || generated.id !== policyId
+        || generated.features.length !== signal.features.length
+        || generated.features.some((id, index) => id !== signal.features[index])) {
+        decision(policyId, signal.entryId, signal.version, 'feature_refused', 'insufficient_safe_features')
+        continue
+      }
+      generated.samples[0].reason = 'unique_native_method_match'
+      if (adaptive.policies.length >= ADAPTIVE_RECALL_POLICY_LIMIT) {
+        decision(policyId, signal.entryId, signal.version, 'rejected', 'candidate_not_additive')
+        continue
+      }
+      adaptive.policies.push(generated)
+      decision(policyId, signal.entryId, signal.version, 'created', 'unique_native_method_match')
+      continue
+    }
+
+    if (policy === undefined || policy.mode === 'isolated'
+      || policy.scope !== probe.scope || policy.qualification !== RECALL_QUALIFICATION.id) {
+      decision(policyId, signal.entryId, signal.version, 'unknown', 'policy_stale')
+      continue
+    }
+    if (!adaptivePolicySourcesAdmitted(doc, policy, sourceAdmit)) {
+      decision(policyId, policy.entryId, policy.version, 'unknown', 'source_revoked')
+      continue
+    }
+    if (signal.kind === 'checker_failure') {
+      const checkerFailure = methodFeedback.some(row => row.entryId === policy.entryId
+        && row.version === policy.version && row.kind === 'check_fail' && row.voided !== true)
+      const active = probe.activePolicies.includes(policy.id)
+      if (!checkerFailure || !active || policy.mode !== 'approved') {
+        decision(policyId, signal.entryId, signal.version, 'unknown', 'policy_stale')
+        continue
+      }
+      policy.mode = 'isolated'
+      policy.generation = ++adaptive.generation
+      policy.rejections += 1
+      policy.reason = 'native_checker_failure'
+      policy.updatedAt = now
+      policy.samples = [...policy.samples, { turnKey, session: probe.session, query: probe.query,
+        result: 'checker_failure', reason: 'native_checker_failure', at: now }].slice(-8)
+      decision(policy.id, policy.entryId, policy.version, 'isolated', 'native_checker_failure')
+      continue
+    }
+    if (signal.kind === 'recurrence') {
+      const recurrence = methodFeedback.some(row => row.entryId === policy.entryId
+        && row.version === policy.version && row.kind === 'recurrence' && row.voided !== true)
+      const active = probe.activePolicies.includes(policy.id)
+      if (!recurrence || !active || policy.mode !== 'approved' || !exact) {
+        decision(policyId, signal.entryId, signal.version, 'unknown', 'policy_stale')
+        continue
+      }
+      policy.mode = 'isolated'
+      policy.generation = ++adaptive.generation
+      policy.rejections += 1
+      policy.reason = 'native_recurrence'
+      policy.updatedAt = now
+      policy.samples = [...policy.samples, { turnKey, session: probe.session, query: probe.query,
+        result: 'recurrence', reason: 'same_signature_recurrence', at: now }].slice(-8)
+      decision(policy.id, policy.entryId, policy.version, 'isolated', 'same_signature_recurrence')
+      continue
+    }
+    if (signal.kind === 'negative') {
+      const triggered = probe.shadowPolicies.includes(policy.id) || probe.activePolicies.includes(policy.id)
+      const competing = matches.length === 1 && (matches[0].id !== policy.entryId
+        || matches[0].version !== policy.version)
+      const comparison = probe.comparisons.find(row => row.policyId === policy.id)
+      if (!triggered || !competing || !adaptivePolicyMatches(policy, probe.features)
+        || comparison?.canAdd !== true || comparison.baselineHasTarget || policy.mode === 'isolated') {
+        decision(policyId, signal.entryId, signal.version, 'unknown', 'policy_stale')
+        continue
+      }
+      policy.mode = 'isolated'
+      policy.generation = ++adaptive.generation
+      policy.rejections += 1
+      policy.reason = 'competing_method_failure'
+      policy.updatedAt = now
+      policy.samples = [...policy.samples, { turnKey, session: probe.session, query: probe.query,
+        result: 'negative', reason: 'competing_method_failure', at: now,
+        replay: { features: probe.features, baselineHasTarget: comparison.baselineHasTarget,
+          canAdd: comparison.canAdd, expected: false } }].slice(-8)
+      decision(policy.id, policy.entryId, policy.version, 'isolated', 'competing_method_failure')
+      continue
+    }
+
+    if (signal.kind === 'holdout') {
+      const shadow = probe.shadowPolicies.includes(policy.id)
+      const comparison = probe.comparisons.find(row => row.policyId === policy.id)
+      const independent = policy.samples.every(row => row.session !== probe.session
+        && row.query !== probe.query)
+      if (!shadow || !exact || !independent || comparison?.canAdd !== true
+        || comparison.baselineHasTarget || !adaptivePolicyMatches(policy, probe.features)
+        || policy.mode !== 'observing') {
+        decision(policyId, policy.entryId, policy.version, 'rejected', 'same_session_or_query')
+        continue
+      }
+      policy.positives += 1
+      policy.updatedAt = now
+      policy.samples = [...policy.samples, { turnKey, session: probe.session, query: probe.query,
+        result: 'holdout_hit', reason: 'independent_same_objective', at: now,
+        replay: { features: probe.features, baselineHasTarget: comparison.baselineHasTarget,
+          canAdd: comparison.canAdd, expected: true } }].slice(-8)
+      policy.reason = policy.negativeControls > 0 ? 'holdout_approved' : 'awaiting_negative_control'
+      decision(policy.id, policy.entryId, policy.version, 'holdout_hit', 'independent_same_objective')
+      const replay = replayAdaptivePolicy(policy)
+      if (policy.positives >= 2 && policy.negativeControls >= 1 && replay.approved === true
+        && adaptivePolicySourcesAdmitted(doc, policy, sourceAdmit)) {
+        policy.mode = 'approved'
+        policy.generation = ++adaptive.generation
+        policy.reason = 'holdout_approved'
+        decision(policy.id, policy.entryId, policy.version, 'approved', 'independent_same_objective')
+      }
+      continue
+    }
+
+    if (signal.kind === 'negative_control') {
+      const control = probe.controlPolicies.includes(policy.id)
+      const comparison = probe.comparisons.find(row => row.policyId === policy.id)
+      const competing = matches.length === 1 && (matches[0].id !== policy.entryId
+        || matches[0].version !== policy.version)
+      const independent = policy.samples.every(row => row.session !== probe.session
+        && row.query !== probe.query)
+      const noLoss = probe.baselineOffers.every(row => probe.offered.some(actual =>
+        actual.id === row.id && actual.version === row.version && actual.mode === row.mode))
+      if (!control || !competing || !independent || !noLoss || comparison?.canAdd !== true
+        || comparison.baselineHasTarget || adaptivePolicyMatches(policy, probe.features)
+        || policy.mode !== 'observing') {
+        decision(policyId, policy.entryId, policy.version, 'rejected', 'same_session_or_query')
+        continue
+      }
+      policy.negativeControls += 1
+      policy.updatedAt = now
+      policy.samples = [...policy.samples, { turnKey, session: probe.session, query: probe.query,
+        result: 'negative_control', reason: 'independent_unmatched_objective', at: now,
+        replay: { features: probe.features, baselineHasTarget: comparison.baselineHasTarget,
+          canAdd: comparison.canAdd, expected: false } }].slice(-8)
+      policy.reason = policy.positives >= 2 ? 'holdout_approved' : 'awaiting_independent_holdout'
+      decision(policy.id, policy.entryId, policy.version, 'negative_control',
+        'independent_unmatched_objective')
+      const replay = replayAdaptivePolicy(policy)
+      if (policy.positives >= 2 && policy.negativeControls >= 1 && replay.approved === true
+        && adaptivePolicySourcesAdmitted(doc, policy, sourceAdmit)) {
+        policy.mode = 'approved'
+        policy.generation = ++adaptive.generation
+        policy.reason = 'holdout_approved'
+        decision(policy.id, policy.entryId, policy.version, 'approved',
+          'independent_unmatched_objective')
+      }
+    }
+  }
+  adaptive.probes = adaptive.probes.filter(row => row.turnKey !== turnKey)
+}
 // Natural-correction extraction contract (unchanged): the model SUGGESTS, the engine verifies.
 // NATURAL-GATE-FIX: a prohibition is a NEGATOR WORD, never a bare 「别」 cut out of 分别/区别/
 // 类别/识别/特别/别的/别人. Node's built-in ICU word segmentation (no dependency) keeps those
@@ -1058,8 +1532,24 @@ export class RebuildEngine {
   }
 
   /** The host injects its workspace attribution as a permission predicate over session ids. */
-  setSourceGuard(fn) {
+  setSourceGuard(fn, registeredSessions = null) {
     this.sourceGuard = typeof fn === 'function' ? fn : null
+    this.adaptiveSourceSessions = typeof registeredSessions === 'function' ? registeredSessions : null
+  }
+
+  // One current registry snapshot per operation. Durable proposals keep session digests, not
+  // paths or transcript text; attribution does not expire when the bounded turnFacts log rotates.
+  #adaptiveSourceGuard() {
+    let ids, checked = new Map()
+    const admit = id => {
+      if (!checked.has(id)) checked.set(id, this.sourceGuard !== null && this.#sourceOk(id) === true)
+      return checked.get(id)
+    }
+    if (this.adaptiveSourceSessions) admit.byDigest = key => {
+      if (!ids) ids = new Map(Array.from(this.adaptiveSourceSessions() ?? [], id => [sessionKeyOf(id), id]))
+      return ids.has(key) && admit(ids.get(key))
+    }
+    return admit
   }
 
   /** Evidence admitted for provider input: EACH capsule must carry its own immutable origin
@@ -1203,6 +1693,9 @@ export class RebuildEngine {
         // mode: 'method'|'guard'; null = a legacy receipt written before this field existed.
         offered: row.offered.map(x => ({ id: x.id, version: x.version, mode: x.mode ?? null })),
       })),
+      // Read-only, bounded policy decisions only. Scope, session, turn, qualification and failure
+      // proof identities stay private in the store and never enter the status surface.
+      recallStrategy: recallStrategyStatusView(doc, this.#adaptiveSourceGuard()),
       tasks: doc.requests.slice(-20).reverse().map(row => ({
         ticket: row.ticket, kind: row.kind, at: row.at, settled: row.settled,
         terminal: row.terminal ?? null, dispatchedAt: row.dispatchedAt ?? null,
@@ -1382,19 +1875,138 @@ export class RebuildEngine {
         ...(capsule === null ? {} : { failure: capsule }),
       })
       this.#fact(doc, turnKeyOf(sessionId, turnId), sessionId).failures += 1
+      const turnKey = turnKeyOf(sessionId, turnId)
+      const receipt = doc.receipts.find(row => row.turnKey === turnKey)
+      const turnFact = doc.turnFacts.find(row => row.turnKey === turnKey)
+      const strategyScope = strategyScopeOf(scopeOf(projectKey), environmentOf(environmentId))
+      if (out.ok && out.duplicate !== true && capsule !== null && typeof out.id === 'string'
+        && !this.#blockedNow(doc) && this.#sourceOk(sessionId) && receipt?.settled !== true
+        && (turnFact?.outcome === null || turnFact?.outcome === undefined)) {
+        const baselineExplains = (receipt?.offered ?? []).some(offer =>
+          methodMatchesNativeFailure(doc, offer, out.id, capsule.signature))
+        const adaptive = doc.recallStrategy.adaptive
+        const probe = adaptive.probes.find(row => row.turnKey === turnKey
+          && row.scope === strategyScope && row.session === sessionKeyOf(sessionId))
+        if (this.sourceGuard !== null && probe !== undefined
+          && this.#materialOk(JSON.stringify(probe.features), null)
+          && this.#materialOk(strategyFailureMaterial(capsule), null)) {
+          const targets = matchingCurrentMethods(doc, { problemId: out.id, signature: capsule.signature,
+            projectScope: scopeOf(projectKey), environment: environmentOf(environmentId), now: observedAt })
+          const unique = targets.length === 1 ? targets[0] : null
+          const adaptiveSourceAdmit = this.#adaptiveSourceGuard()
+          if (unique !== null && this.#materialOk(strategyMethodMaterial(unique), null)
+            && editionSources(unique).length > 0
+            && editionSources(unique).every(adaptiveSourceAdmit)) {
+            const policyIds = [...new Set([...probe.shadowPolicies, ...probe.activePolicies])]
+            for (const policyId of policyIds) {
+              const policy = adaptive.policies.find(row => row.id === policyId
+                && row.scope === strategyScope && row.qualification === RECALL_QUALIFICATION.id)
+              const candidate = policy === undefined ? null : adaptivePolicyTarget(doc, policy)
+              if (candidate === null || !adaptivePolicyMatches(policy, probe.features)
+                || this.#materialOk(strategyMethodMaterial(candidate), null) !== true
+                || !adaptivePolicySourcesAdmitted(doc, policy, adaptiveSourceAdmit)) continue
+              if (candidate.id === unique.id && candidate.version === unique.version) {
+                if (probe.activePolicies.includes(policyId)) {
+                  stageAdaptiveSignal(probe, { policyId, kind: 'recurrence', entryId: policy.entryId,
+                    version: policy.version, objective: policy.objective, problemId: out.id,
+                    signature: capsule.signature, features: policy.features,
+                    reason: 'same_signature_recurrence', at: observedAt })
+                } else if (policy.mode === 'observing'
+                  && !probe.offered.some(row => row.id === policy.entryId
+                    && row.version === policy.version && row.mode === 'method')) {
+                  stageAdaptiveSignal(probe, { policyId, kind: 'holdout', entryId: policy.entryId,
+                    version: policy.version, objective: policy.objective, problemId: out.id,
+                    signature: capsule.signature, features: policy.features,
+                    reason: 'independent_same_objective', at: observedAt })
+                }
+              } else {
+                stageAdaptiveSignal(probe, { policyId, kind: 'negative', entryId: policy.entryId,
+                  version: policy.version, objective: policy.objective, problemId: out.id,
+                  signature: capsule.signature, features: policy.features,
+                  reason: 'competing_method_failure', at: observedAt })
+              }
+            }
+            for (const policyId of probe.controlPolicies) {
+              const policy = adaptive.policies.find(row => row.id === policyId
+                && row.mode === 'observing' && row.scope === strategyScope
+                && row.qualification === RECALL_QUALIFICATION.id)
+              if (policy === undefined || adaptivePolicyMatches(policy, probe.features)
+                || unique.id === policy.entryId && unique.version === policy.version) continue
+              const candidate = adaptivePolicyTarget(doc, policy)
+              if (candidate === null || this.#materialOk(strategyMethodMaterial(candidate), null) !== true
+                || !adaptivePolicySourcesAdmitted(doc, policy, adaptiveSourceAdmit)) continue
+              stageAdaptiveSignal(probe, { policyId, kind: 'negative_control', entryId: policy.entryId,
+                version: policy.version, objective: policy.objective, problemId: out.id,
+                signature: capsule.signature, features: policy.features,
+                reason: 'independent_unmatched_objective', at: observedAt })
+            }
+
+            const alreadyOffered = probe.offered.some(offer => offer.id === unique.id
+              && offer.version === unique.version && offer.mode === 'method')
+            const fixedTracked = doc.recallStrategy.rows.some(row => row.turnKey === turnKey
+              && row.scope === strategyScope && row.id === unique.id && row.version === unique.version
+              && ['shadow', 'matched', 'active', 'approved', 'isolated'].includes(row.mode))
+            const adaptiveTracked = adaptive.policies.some(row => row.scope === strategyScope
+              && row.entryId === unique.id && row.version === unique.version)
+            if (!baselineExplains && !alreadyOffered && !fixedTracked && !adaptiveTracked) {
+              const generated = synthesizeAdaptivePolicy({ scope: strategyScope,
+                qualification: RECALL_QUALIFICATION.id, entry: unique, queryFeatures: probe.features,
+                turnKey, session: probe.session, queryKey: probe.query, now: observedAt })
+              if (generated === null) {
+                adaptiveDecision(adaptive, { turnKey, scope: strategyScope, policyId: null,
+                  entryId: unique.id, version: unique.version, result: 'feature_refused',
+                  reason: 'insufficient_safe_features', at: observedAt })
+              } else {
+                stageAdaptiveSignal(probe, { policyId: generated.id, kind: 'discovery',
+                  entryId: unique.id, version: unique.version, objective: generated.objective,
+                  problemId: out.id, signature: capsule.signature, features: generated.features,
+                  reason: 'unique_native_method_match', at: observedAt })
+              }
+            }
+          } else if (targets.length > 1) {
+            adaptiveDecision(adaptive, { turnKey, scope: strategyScope, policyId: null,
+              entryId: null, version: null, result: 'rejected', reason: 'ambiguous_native_failure',
+              at: observedAt })
+          }
+        }
+        const matches = []
+        for (const row of doc.recallStrategy.rows) {
+          if (row.mode !== 'shadow' || row.turnKey !== turnKey || row.scope !== strategyScope
+            || row.session !== sessionKeyOf(sessionId)
+            || row.qualification !== RECALL_QUALIFICATION.id) continue
+          if (receipt?.offered?.some(offer => offer.id === row.id && offer.version === row.version
+            && offer.mode === 'method')) continue
+          const target = resolveMethodVersion(doc, row.id, row.version)
+          if (target?.kind !== 'current' || target.record.lesson === null
+            || target.record.lesson === undefined) continue
+          if (!this.#materialOk(strategyMethodMaterial(target.record), null)
+            || !this.#materialOk(strategyFailureMaterial(capsule), null)) continue
+          const signatureMatches = target.kind === 'current'
+            && target.record.problemSignature === capsule.signature
+          const problemMatches = target.record.lesson.problemId === out.id
+          if (signatureMatches || problemMatches) matches.push(row)
+        }
+        // A failure already explained by the actual baseline receipt proves no candidate-only gain.
+        // Shared signatures or problem ids across several shadow versions are ambiguous as well.
+        if (!baselineExplains && matches.length === 1) {
+          matches[0].mode = 'matched'
+          matches[0].problemId = out.id
+          matches[0].reason = 'same_turn_native_failure_match'
+        }
+      }
       // Recurrence is attributed to the CURRENT turn's persisted receipt — the exact versions that
       // were injected here — and to a signature/lesson match. A lesson injected in some older
       // turn, or one this failure has nothing to do with, never counts. Cross-project recurrences
       // count; the origin attribution on the entry stays untouched.
       if (out.ok && out.duplicate !== true && capsule !== null && out.problem !== undefined) {
-        const receipt = doc.receipts.find(row => row.turnKey === turnKeyOf(sessionId, turnId))
-        if (receipt !== undefined) {
-          const feedback = receipt.methodFeedback ?? (receipt.methodFeedback = [])
-          for (const offered of receipt.offered) {
+        const currentReceipt = doc.receipts.find(row => row.turnKey === turnKey)
+        if (currentReceipt !== undefined) {
+          const feedback = currentReceipt.methodFeedback ?? (currentReceipt.methodFeedback = [])
+          for (const offered of currentReceipt.offered) {
             // REVIEW-FIX2: the SAME attribution judgment as the checker entries. A cancelled
             // terminal refuses method credit even on the FIRST late tool failure (there is no
             // feedback row to rely on); guard/partial/missing editions are never credited.
-            const attribution = methodAttribution(doc, receipt, offered.id, offered.version)
+            const attribution = methodAttribution(doc, currentReceipt, offered.id, offered.version)
             if (!attribution.admitted) continue
             const target = attribution.target
             const entry = doc.entries.find(row => row.id === offered.id)
@@ -1522,6 +2134,23 @@ export class RebuildEngine {
         row.evidenceHash = evidenceHash
       }
       feedback.push({ entryId, version: offered.version, kind, checkId, at: this.now() })
+      if (passed === false && !this.#blockedNow(doc) && this.sourceGuard !== null
+        && this.#sourceOk(sessionId)) {
+        const adaptive = doc.recallStrategy.adaptive
+        const probe = adaptive.probes.find(row => row.turnKey === turnKey
+          && row.session === sessionKeyOf(sessionId))
+        if (probe !== undefined) {
+          for (const policyId of probe.activePolicies) {
+            const policy = adaptive.policies.find(row => row.id === policyId
+              && row.scope === probe.scope && row.entryId === entryId && row.version === offered.version
+              && row.mode === 'approved' && adaptivePolicyTarget(doc, row) !== null)
+            if (policy === undefined || this.#materialOk(strategyMethodMaterial(entry), null) !== true) continue
+            stageAdaptiveSignal(probe, { policyId, kind: 'checker_failure', entryId: policy.entryId,
+              version: policy.version, objective: policy.objective, problemId: null, signature: null,
+              features: policy.features, reason: 'native_checker_failure', at: this.now() })
+          }
+        }
+      }
       auditCheck(offered.version)
       return { ok: true, settled: true, outcome: passed ? 'check_passed' : 'needs_revision',
         entryId, entryVersion: offered.version, evidenceHash, versionScope: target.kind }
@@ -1554,41 +2183,165 @@ export class RebuildEngine {
   }
 
   // ── recall ──────────────────────────────────────────────────────────────────────────────────
-  prepare({ sessionId, turnId, projectKey, environmentId = null, prompt }) {
+  prepare({ sessionId, turnId, projectKey, environmentId = null, prompt, strategyEligible = false }, adaptiveEligible = true) {
     check(typeof prompt === 'string' && prompt.length <= 32_768, 'invalid_prompt')
     const scope = scopeOf(projectKey)
     const environment = environmentOf(environmentId)
     const turnKey = turnKeyOf(sessionId, turnId)
-    return this.store.transaction(doc => {
-      if (doc.turnUsage.some(row => row.turnKey === turnKey)) {
-        return { ok: true, context: '', reason: 'same_turn_dedup' }
-      }
-      // EVOLUTION016 (Task6): the EXACT previous ranking/packing now lives in the pure recall
-      // module; the engine only persists the receipt and the version-window counters.
-      const { lines, bytes, offered } = recallSelection(doc.entries, { prompt, scope, environment,
-        maxBytes: this.maxContextBytes, maxEntries: MAX_LESSONS_PER_TURN, now: this.now(),
-        // REVIEW-FIX2: the concrete failure context in a guard is material-admitted like every
-        // other line that travels to a provider.
-        guardAdmit: text => this.#materialOk(text, null) })
-      if (offered.length > 0) {
-        doc.receipts.push({ id: turnKey, turnKey, at: this.now(), bytes, offered, settled: false,
-          outcome: null, evidenceHash: null, source: null })
-        if (doc.receipts.length > 256) doc.receipts = doc.receipts.slice(-256)
-        doc.turnUsage.push({ turnKey, at: this.now() })
-        if (doc.turnUsage.length > 128) doc.turnUsage = doc.turnUsage.slice(-128)
-        for (const row of offered) {
-          const entry = doc.entries.find(item => item.id === row.id)
-          if (entry === undefined) continue
-          entry.injected += 1
-          entry.lastInjectedAt = this.now()
-          // The version window counts only METHOD injections of the CURRENT edition.
-          if (row.mode !== 'guard' && row.version === entry.version) {
-            ensureMethodStats(entry, this.now()).injected += 1
+    let strategyWriteAttempted = false
+    let adaptiveWriteAttempted = false
+    try {
+      return this.store.transaction(doc => {
+        const hasStrategyTurn = doc.recallStrategy.rows.some(row => row.turnKey === turnKey
+          && ['shadow', 'matched', 'active'].includes(row.mode))
+        const hasAdaptiveProbe = doc.recallStrategy.adaptive.probes.some(row => row.turnKey === turnKey)
+        if (doc.turnUsage.some(row => row.turnKey === turnKey) || hasStrategyTurn || hasAdaptiveProbe) {
+          return { ok: true, context: '', reason: 'same_turn_dedup' }
+        }
+        const now = this.now()
+        const selectorOptions = { prompt, scope, environment, maxBytes: this.maxContextBytes, now,
+          guardAdmit: text => this.#materialOk(text, null) }
+        const baseline = selectRecall(doc.entries, selectorOptions)
+        let selected = baseline
+        const admitted = strategyEligible === true && typeof sessionId === 'string'
+          && sessionId !== '' && !this.#blockedNow(doc) && this.#sourceOk(sessionId)
+        const adaptiveAdmitted = adaptiveEligible && admitted && this.sourceGuard !== null
+          && this.#sourceOk(sessionId) === true
+        const adaptive = doc.recallStrategy.adaptive
+        if (adaptiveAdmitted) {
+          const beforePrune = JSON.stringify(adaptive)
+          pruneAdaptiveState(doc)
+          if (JSON.stringify(adaptive) !== beforePrune) adaptiveWriteAttempted = true
+        }
+        if (admitted && normalizedView(prompt).semantic.includes(NORMALIZATION_RULE.conceptId)) {
+          const strategyScope = strategyScopeOf(scope, environment)
+          const strategy = doc.recallStrategy
+          const candidate = selectRecallErrorLog(doc.entries, selectorOptions)
+          const baselineOffers = new Set(baseline.offered.map(recallOfferKey))
+          const differences = candidate.offered.filter(row => row.mode === 'method'
+            && !baselineOffers.has(recallOfferKey(row)))
+          const eligible = differences.filter(row => {
+            if (!eligibleStrategyMethod(doc, row)) return false
+            const entry = doc.entries.find(item => item.id === row.id && item.version === row.version)
+            return entry !== undefined && this.#materialOk(strategyMethodMaterial(entry), null)
+          })
+          const unqualified = eligible.length !== differences.length
+          const unapproved = eligible.filter(row => !approvedStrategyMethod(strategy.rows, strategyScope, row)
+            && !isolatedStrategyMethod(strategy.rows, strategyScope, row))
+          const baselineGuards = baseline.offered.filter(row => row.mode === 'guard')
+          const candidateGuards = new Set(candidate.offered.filter(row => row.mode === 'guard')
+            .map(recallOfferKey))
+          const preservesBaselineGuards = baselineGuards.every(row => candidateGuards.has(recallOfferKey(row)))
+          const allApproved = differences.length > 0 && !unqualified
+            && preservesBaselineGuards
+            && eligible.every(row => approvedStrategyMethod(strategy.rows, strategyScope, row)
+              && !isolatedStrategyMethod(strategy.rows, strategyScope, row))
+          const mode = allApproved ? 'active' : 'shadow'
+          const tracked = allApproved ? eligible : unapproved
+          if (tracked.length > 0) {
+            const rows = tracked.map(row => ({ turnKey, scope: strategyScope,
+              session: sessionKeyOf(sessionId), qualification: RECALL_QUALIFICATION.id,
+              id: row.id, version: row.version, mode, generation: strategy.generation,
+              reason: 'candidate_difference' }))
+            if (appendRecallStrategyRows(doc, rows)) {
+              strategyWriteAttempted = true
+              if (allApproved) selected = candidate
+            }
           }
         }
+        if (adaptiveAdmitted && this.#materialOk(prompt, null) === true
+          && adaptive.probes.length < ADAPTIVE_RECALL_PROBE_LIMIT) {
+          const strategyScope = strategyScopeOf(scope, environment)
+          const queryFeatures = adaptiveQueryFeatures(prompt)
+          const session = sessionKeyOf(sessionId)
+          const query = adaptiveQueryKey(prompt)
+          const baselineOffers = selected.offered.map(row => ({ id: row.id,
+            version: row.version, mode: row.mode }))
+          const shadowPolicies = []
+          const controlPolicies = []
+          const activePolicies = []
+          const comparisons = []
+          const sourceAdmit = this.#adaptiveSourceGuard()
+          const scopedPolicies = adaptive.policies.filter(policy => policy.scope === strategyScope
+            && policy.qualification === RECALL_QUALIFICATION.id
+            && ['observing', 'approved'].includes(policy.mode)
+            && adaptivePolicyTarget(doc, policy) !== null
+            && adaptivePolicySourcesAdmitted(doc, policy, sourceAdmit))
+            .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
+          for (const policy of scopedPolicies) {
+            const entry = adaptivePolicyTarget(doc, policy)
+            if (!adaptiveEntryVisible(entry, scope, environment)
+              || this.#materialOk(strategyMethodMaterial(entry), null) !== true
+              || editionSources(entry).length === 0
+              || !editionSources(entry).every(id => this.sourceGuard !== null
+                && this.#sourceOk(id) === true)) continue
+            const matches = adaptivePolicyMatches(policy, queryFeatures)
+            const incumbent = selected
+            const baselineHasTarget = incumbent.offered.some(row => row.id === policy.entryId
+              && row.version === policy.version && row.mode === 'method')
+            const comparison = addAdaptiveCandidate(incumbent, entry, { maxBytes: this.maxContextBytes,
+              now, guardAdmit: text => this.#materialOk(text, null), prompt })
+            if (comparisons.length < 8) comparisons.push({ policyId: policy.id,
+              baselineHasTarget, canAdd: comparison.ok })
+            if (!matches) {
+              if (policy.mode === 'observing' && comparison.ok && controlPolicies.length < 8) {
+                controlPolicies.push(policy.id)
+              }
+              continue
+            }
+            if (!comparison.ok) continue
+            if (policy.mode === 'approved') {
+              if (activePolicies.length === 0) {
+                selected = comparison.selection
+                activePolicies.push(policy.id)
+              }
+            } else if (shadowPolicies.length < 8) shadowPolicies.push(policy.id)
+          }
+          adaptive.probes.push({ turnKey, scope: strategyScope, projectScope: scope, environment,
+            session, query, features: queryFeatures, baselineOffers, offered: selected.offered.map(row =>
+              ({ id: row.id, version: row.version, mode: row.mode })), shadowPolicies,
+            controlPolicies: controlPolicies.slice(0, 8), activePolicies, comparisons,
+            pending: [], at: now })
+          adaptiveWriteAttempted = true
+        }
+        const { lines, bytes, offered } = selected
+        if (offered.length > 0) {
+          doc.receipts.push({ id: turnKey, turnKey, at: this.now(), bytes, offered, settled: false,
+            outcome: null, evidenceHash: null, source: null })
+          if (doc.receipts.length > 256) doc.receipts = doc.receipts.slice(-256)
+          doc.turnUsage.push({ turnKey, at: this.now() })
+          if (doc.turnUsage.length > 128) doc.turnUsage = doc.turnUsage.slice(-128)
+          for (const row of offered) {
+            const entry = doc.entries.find(item => item.id === row.id)
+            if (entry === undefined) continue
+            entry.injected += 1
+            entry.lastInjectedAt = this.now()
+            // The version window counts only METHOD injections of the CURRENT edition.
+            if (row.mode !== 'guard' && row.version === entry.version) {
+              ensureMethodStats(entry, this.now()).injected += 1
+            }
+          }
+        }
+        return { ok: true, context: lines.join(''), bytes, offered, turnKey }
+      })
+    } catch (error) {
+      if (!storageFailure(error)) throw error
+      // The optional strategy journal is the only new write in this turn. MemoryStore has not
+      // committed when it reports `capacity`; retry just the established baseline transaction so
+      // its normal receipt and injection counters survive without expanding the store bound.
+      if (error?.code === 'capacity' && (adaptiveWriteAttempted || strategyWriteAttempted)) {
+        // Drop the new journal first, so a previously approved incumbent method can still fit.
+        const fallback = this.prepare({ sessionId, turnId, projectKey, environmentId, prompt,
+          strategyEligible: adaptiveWriteAttempted && strategyEligible }, false)
+        if (fallback.ok === true) {
+          this.noteCollectionSkip('recall_strategy_capacity')
+          return fallback
+        }
+        return fallback
       }
-      return { ok: true, context: lines.join(''), bytes, offered, turnKey }
-    })
+      this.noteCollectionSkip('recall_state_unavailable')
+      return { ok: false, context: '', bytes: 0, offered: [], reason: 'recall_state_unavailable' }
+    }
   }
 
   /** Turn settlement with a PERSISTENT event identity: idempotent across crash/retry. Every
@@ -1600,52 +2353,74 @@ export class RebuildEngine {
     const turnKey = turnKeyOf(sessionId, turnId)
     const brief = safeBrief(typeof evidence === 'string' ? evidence : JSON.stringify(evidence ?? ''))
     const evidenceHash = digestOf({ outcome, brief, at: this.now() })
-    return this.store.transaction(doc => {
-      const fact = this.#fact(doc, turnKey, sessionId)
-      if (fact.outcome === null) {
-        fact.outcome = outcome
-        fact.evidenceBrief = brief
-        fact.evidenceHash = evidenceHash
-        // DAILY21: the day boundary uses the SETTLEMENT time — a turn that started before a
-        // digest boundary but settled after it is a late fact, not a silently finished one.
-        fact.settledAt = this.now()
-      }
-      const receipt = doc.receipts.find(row => row.id === turnKey)
-      if (receipt === undefined) return { ok: true, settledFact: true }
-      if (receipt.settled === true) return { ok: true, duplicate: true }
-      // A CANCELLED turn is evidence about the turn, never about a method: the recurrence that a
-      // real tool failure recorded inside it is rolled back with its receipt proof (the host
-      // already drops the turn's pending checkers the same way).
-      if (outcome === 'cancelled' && Array.isArray(receipt.methodFeedback)) {
-        for (const row of receipt.methodFeedback.filter(item => item.kind === 'recurrence')) {
-          const target = resolveMethodVersion(doc, row.entryId, row.version)
-          if (target === null) continue
-          const current = doc.entries.find(entry => entry.id === row.entryId)
-          if (target.kind === 'current') {
-            const window = ensureMethodStats(current, this.now())
-            window.recurrences = Math.max(0, window.recurrences - 1)
-            current.recurrences = Math.max(0, current.recurrences - 1)
-            if (current.status === 'needs_revision' && window.recurrences === 0
-              && window.checkFails === 0 && current.evidenceHash === null) current.status = 'pending'
-            current.updatedAt = this.now()
-          } else {
-            const stats = target.record.stats
-            if (stats !== null && stats !== undefined) {
-              stats.recurrences = Math.max(0, stats.recurrences - 1)
-            }
-            if (current !== undefined) current.recurrences = Math.max(0, current.recurrences - 1)
-          }
-          // The proof row is KEPT (voided): the same turn can never be counted a second time
-          // after this rollback, and the real event stays auditable.
-          row.voided = true
+    try {
+      return this.store.transaction(doc => {
+        const fact = this.#fact(doc, turnKey, sessionId)
+        if (fact.outcome === null) {
+          fact.outcome = outcome
+          fact.evidenceBrief = brief
+          fact.evidenceHash = evidenceHash
+          // DAILY21: the day boundary uses the SETTLEMENT time — a turn that started before a
+          // digest boundary but settled after it is a late fact, not a silently finished one.
+          fact.settledAt = this.now()
         }
-      }
-      receipt.settled = true
-      receipt.outcome = outcome
-      receipt.evidenceHash = evidenceHash
-      receipt.source = hex64(routeId ?? '') ? { routeId } : null
-      return { ok: true, settled: true }
-    })
+        const strategyOutcome = fact.outcome === outcome ? fact.outcome : null
+        const receipt = doc.receipts.find(row => row.id === turnKey)
+        const allowStrategy = !this.#blockedNow(doc)
+        const reconfirmMatched = row => matchedMethodStillAdmitted(doc, row, { turnKey, sessionId,
+          sourceAdmit: id => this.#sourceOk(id), materialAdmit: text => this.#materialOk(text, null) })
+        if (receipt === undefined) {
+          settleRecallStrategy(doc, { turnKey, sessionId, outcome: strategyOutcome, receipt,
+            allowStrategy, reconfirmMatched })
+          settleAdaptiveRecall(doc, { turnKey, sessionId, outcome: strategyOutcome, receipt,
+            allowStrategy, sourceAdmit: this.#adaptiveSourceGuard(),
+            materialAdmit: text => this.#materialOk(text, null), now: this.now() })
+          return { ok: true, settledFact: true }
+        }
+        if (receipt.settled === true) return { ok: true, duplicate: true }
+        // A CANCELLED turn is evidence about the turn, never about a method: the recurrence that a
+        // real tool failure recorded inside it is rolled back with its receipt proof (the host
+        // already drops the turn's pending checkers the same way).
+        if (outcome === 'cancelled' && Array.isArray(receipt.methodFeedback)) {
+          for (const row of receipt.methodFeedback.filter(item => item.kind === 'recurrence')) {
+            const target = resolveMethodVersion(doc, row.entryId, row.version)
+            if (target === null) continue
+            const current = doc.entries.find(entry => entry.id === row.entryId)
+            if (target.kind === 'current') {
+              const window = ensureMethodStats(current, this.now())
+              window.recurrences = Math.max(0, window.recurrences - 1)
+              current.recurrences = Math.max(0, current.recurrences - 1)
+              if (current.status === 'needs_revision' && window.recurrences === 0
+                && window.checkFails === 0 && current.evidenceHash === null) current.status = 'pending'
+              current.updatedAt = this.now()
+            } else {
+              const stats = target.record.stats
+              if (stats !== null && stats !== undefined) {
+                stats.recurrences = Math.max(0, stats.recurrences - 1)
+              }
+              if (current !== undefined) current.recurrences = Math.max(0, current.recurrences - 1)
+            }
+            // The proof row is KEPT (voided): the same turn can never be counted a second time
+            // after this rollback, and the real event stays auditable.
+            row.voided = true
+          }
+        }
+        receipt.settled = true
+        receipt.outcome = outcome
+        receipt.evidenceHash = evidenceHash
+        receipt.source = hex64(routeId ?? '') ? { routeId } : null
+        settleRecallStrategy(doc, { turnKey, sessionId, outcome: strategyOutcome, receipt,
+          allowStrategy, reconfirmMatched })
+        settleAdaptiveRecall(doc, { turnKey, sessionId, outcome: strategyOutcome, receipt,
+          allowStrategy, sourceAdmit: this.#adaptiveSourceGuard(),
+          materialAdmit: text => this.#materialOk(text, null), now: this.now() })
+        return { ok: true, settled: true }
+      })
+    } catch (error) {
+      if (!storageFailure(error)) throw error
+      this.noteCollectionSkip('recall_state_unavailable')
+      return { ok: false, reason: 'recall_state_unavailable' }
+    }
   }
 
   // ── reflection & revision (single slot, frozen facts, attempt gate) ────────────────────────

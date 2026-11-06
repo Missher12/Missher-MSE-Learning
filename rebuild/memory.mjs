@@ -49,6 +49,32 @@ export const METHOD_HISTORY_STATUSES = ['pending', 'check_passed', 'needs_revisi
   'legacy_partial']
 export const METHOD_FEEDBACK_KINDS = ['recurrence', 'check_pass', 'check_fail']
 export const OFFER_MODES = ['method', 'guard']
+export const RECALL_STRATEGY_LIMIT = 128
+export const ADAPTIVE_RECALL_POLICY_LIMIT = 128
+export const ADAPTIVE_RECALL_PROBE_LIMIT = 128
+export const ADAPTIVE_RECALL_DECISION_LIMIT = 128
+const RECALL_STRATEGY_ROW_MODES = ['shadow', 'matched', 'active', 'approved', 'isolated']
+const RECALL_STRATEGY_REASONS = ['candidate_difference', 'same_turn_native_failure_match',
+  'native_checker_failure', 'same_signature_recurrence']
+const ADAPTIVE_POLICY_MODES = ['observing', 'approved', 'isolated']
+const ADAPTIVE_POLICY_REASONS = ['awaiting_independent_holdout', 'holdout_approved',
+  'awaiting_negative_control', 'competing_method_failure', 'native_recurrence',
+  'native_checker_failure']
+const ADAPTIVE_SAMPLE_RESULTS = ['discovery_hit', 'holdout_hit', 'negative', 'recurrence',
+  'checker_failure', 'negative_control', 'unknown']
+const ADAPTIVE_SAMPLE_REASONS = ['unique_native_method_match', 'independent_same_objective',
+  'same_session_or_query', 'competing_method_failure', 'same_signature_recurrence',
+  'native_checker_failure', 'cancelled_or_unknown', 'source_revoked', 'material_revoked',
+  'policy_stale', 'independent_unmatched_objective', 'strategy_disabled']
+const ADAPTIVE_DECISION_RESULTS = ['created', 'holdout_hit', 'negative_control', 'approved',
+  'rejected', 'isolated', 'unknown', 'feature_refused']
+const ADAPTIVE_DECISION_REASONS = ['unique_native_method_match', 'independent_same_objective',
+  'same_session_or_query', 'competing_method_failure', 'same_signature_recurrence',
+  'native_checker_failure', 'cancelled_or_unknown', 'source_revoked', 'material_revoked',
+  'policy_stale', 'insufficient_safe_features', 'already_tracked', 'candidate_not_additive',
+  'ambiguous_native_failure', 'baseline_explains_failure', 'stale_probe', 'probe_capacity',
+  'independent_unmatched_objective', 'awaiting_negative_control', 'strategy_disabled']
+const safeAdaptiveFeature = value => typeof value === 'string' && /^[a-z][a-z0-9]{0,15}$/u.test(value)
 export const ENTRY_LIMIT = 256
 export const RECEIPT_LIMIT = 256
 export const REQUEST_LIMIT = 96
@@ -412,9 +438,129 @@ const checkEventValid = row => isPlainObject(row)
   && hex64(row.id) && Number.isFinite(row.at) && boundedLabel(row.checkId, 128) && hex64(row.turnKey)
   && entryHex(row.entryId) && Number.isSafeInteger(row.entryVersion) && typeof row.passed === 'boolean'
 
+const recallStrategyRowValid = row => isPlainObject(row)
+  && Object.keys(row).every(key => ['turnKey', 'scope', 'session', 'qualification', 'id', 'version',
+    'mode', 'generation', 'reason', 'problemId'].includes(key))
+  && hex64(row.turnKey) && hex64(row.scope) && hex64(row.session) && hex64(row.qualification)
+  && entryHex(row.id)
+  && Number.isSafeInteger(row.version) && row.version >= 1
+  && RECALL_STRATEGY_ROW_MODES.includes(row.mode)
+  && (row.mode === 'matched' ? hex64(row.problemId) : row.problemId === undefined)
+  && Number.isSafeInteger(row.generation) && row.generation >= 0
+  && RECALL_STRATEGY_REASONS.includes(row.reason)
+const adaptiveSampleValid = row => isPlainObject(row)
+  && Object.keys(row).every(key => ['turnKey', 'session', 'query', 'result', 'reason', 'at', 'replay'].includes(key))
+  && hex64(row.turnKey) && hex64(row.session) && hex64(row.query)
+  && ADAPTIVE_SAMPLE_RESULTS.includes(row.result) && ADAPTIVE_SAMPLE_REASONS.includes(row.reason)
+  && (row.replay === undefined || (isPlainObject(row.replay)
+    && Object.keys(row.replay).every(key => ['features', 'baselineHasTarget', 'canAdd', 'expected'].includes(key))
+    && Array.isArray(row.replay.features) && row.replay.features.length <= 8
+    && row.replay.features.every(safeAdaptiveFeature)
+    && new Set(row.replay.features).size === row.replay.features.length
+    && typeof row.replay.baselineHasTarget === 'boolean' && typeof row.replay.canAdd === 'boolean'
+    && typeof row.replay.expected === 'boolean'))
+  && Number.isFinite(row.at)
+const adaptivePolicyValid = row => isPlainObject(row)
+  && Object.keys(row).every(key => ['id', 'schema', 'scope', 'qualification', 'entryId', 'version',
+    'objective', 'features', 'mode', 'generation', 'positives', 'negativeControls', 'rejections', 'firstSession',
+    'firstQuery', 'reason', 'createdAt', 'updatedAt', 'samples'].includes(key))
+  && hex64(row.id) && row.schema === 'mse-adaptive-recall-v1'
+  && hex64(row.scope) && hex64(row.qualification) && entryHex(row.entryId)
+  && Number.isSafeInteger(row.version) && row.version >= 1 && hex64(row.objective)
+  && Array.isArray(row.features) && row.features.length >= 1 && row.features.length <= 4
+  && row.features.every(safeAdaptiveFeature) && new Set(row.features).size === row.features.length
+  && ADAPTIVE_POLICY_MODES.includes(row.mode)
+  && Number.isSafeInteger(row.generation) && row.generation >= 0
+  && Number.isSafeInteger(row.positives) && row.positives >= 1 && row.positives <= 1_000_000
+  && Number.isSafeInteger(row.negativeControls) && row.negativeControls >= 0
+  && row.negativeControls <= 1_000_000
+  && Number.isSafeInteger(row.rejections) && row.rejections >= 0 && row.rejections <= 1_000_000
+  && hex64(row.firstSession) && hex64(row.firstQuery)
+  && ADAPTIVE_POLICY_REASONS.includes(row.reason)
+  && Number.isFinite(row.createdAt) && Number.isFinite(row.updatedAt)
+  && Array.isArray(row.samples) && row.samples.length >= 1 && row.samples.length <= 8
+  && row.samples.every(adaptiveSampleValid)
+  && new Set(row.samples.map(sample => sample.turnKey)).size === row.samples.length
+  && Buffer.byteLength(JSON.stringify(row), 'utf8') <= 4096
+const adaptiveOfferValid = row => isPlainObject(row)
+  && Object.keys(row).every(key => ['id', 'version', 'mode'].includes(key))
+  && entryHex(row.id) && Number.isSafeInteger(row.version) && row.version >= 1
+  && ['method', 'guard'].includes(row.mode)
+const adaptiveComparisonValid = row => isPlainObject(row)
+  && Object.keys(row).every(key => ['policyId', 'baselineHasTarget', 'canAdd'].includes(key))
+  && hex64(row.policyId) && typeof row.baselineHasTarget === 'boolean' && typeof row.canAdd === 'boolean'
+const adaptiveSignalValid = row => isPlainObject(row)
+  && Object.keys(row).every(key => ['policyId', 'kind', 'entryId', 'version', 'objective',
+    'problemId', 'signature', 'features', 'reason', 'at'].includes(key))
+  && hex64(row.policyId)
+  && ['discovery', 'holdout', 'negative', 'negative_control', 'recurrence', 'checker_failure'].includes(row.kind)
+  && entryHex(row.entryId) && Number.isSafeInteger(row.version) && row.version >= 1
+  && hex64(row.objective)
+  && (row.problemId === null || hex64(row.problemId))
+  && (row.signature === null || hex64(row.signature))
+  && Array.isArray(row.features) && row.features.length <= 4
+  && row.features.every(safeAdaptiveFeature) && new Set(row.features).size === row.features.length
+  && ADAPTIVE_DECISION_REASONS.includes(row.reason) && Number.isFinite(row.at)
+const adaptiveProbeValid = row => isPlainObject(row)
+  && Object.keys(row).every(key => ['turnKey', 'scope', 'projectScope', 'environment', 'session',
+    'query', 'features', 'baselineOffers', 'offered', 'shadowPolicies', 'controlPolicies',
+    'activePolicies', 'comparisons', 'pending', 'at'].includes(key))
+  && hex64(row.turnKey) && hex64(row.scope) && hex64(row.projectScope) && hex64(row.environment)
+  && hex64(row.session) && hex64(row.query)
+  && Array.isArray(row.features) && row.features.length <= 8
+  && row.features.every(safeAdaptiveFeature) && new Set(row.features).size === row.features.length
+  && Array.isArray(row.baselineOffers) && row.baselineOffers.length <= 3
+  && row.baselineOffers.every(adaptiveOfferValid)
+  && Array.isArray(row.offered) && row.offered.length <= 3 && row.offered.every(adaptiveOfferValid)
+  && Array.isArray(row.shadowPolicies) && row.shadowPolicies.length <= 8
+  && row.shadowPolicies.every(hex64) && new Set(row.shadowPolicies).size === row.shadowPolicies.length
+  && Array.isArray(row.controlPolicies) && row.controlPolicies.length <= 8
+  && row.controlPolicies.every(hex64) && new Set(row.controlPolicies).size === row.controlPolicies.length
+  && Array.isArray(row.activePolicies) && row.activePolicies.length <= 1
+  && row.activePolicies.every(hex64) && new Set(row.activePolicies).size === row.activePolicies.length
+  && Array.isArray(row.comparisons) && row.comparisons.length <= 8
+  && row.comparisons.every(adaptiveComparisonValid)
+  && new Set(row.comparisons.map(item => item.policyId)).size === row.comparisons.length
+  && Array.isArray(row.pending) && row.pending.length <= 8 && row.pending.every(adaptiveSignalValid)
+  && Number.isFinite(row.at)
+  && Buffer.byteLength(JSON.stringify(row), 'utf8') <= 4096
+const adaptiveDecisionValid = row => isPlainObject(row)
+  && Object.keys(row).every(key => ['turnKey', 'scope', 'policyId', 'entryId', 'version',
+    'result', 'reason', 'at'].includes(key))
+  && hex64(row.turnKey) && hex64(row.scope)
+  && (row.policyId === null || hex64(row.policyId))
+  && (row.entryId === null || entryHex(row.entryId))
+  && (row.version === null || (Number.isSafeInteger(row.version) && row.version >= 1))
+  && ADAPTIVE_DECISION_RESULTS.includes(row.result)
+  && ADAPTIVE_DECISION_REASONS.includes(row.reason) && Number.isFinite(row.at)
+const adaptiveStateValid = state => isPlainObject(state)
+  && Object.keys(state).every(key => ['generation', 'policies', 'probes', 'decisions'].includes(key))
+  && Number.isSafeInteger(state.generation) && state.generation >= 0
+  && Array.isArray(state.policies) && state.policies.length <= ADAPTIVE_RECALL_POLICY_LIMIT
+  && state.policies.every(adaptivePolicyValid)
+  && new Set(state.policies.map(row => row.id)).size === state.policies.length
+  && Array.isArray(state.probes) && state.probes.length <= ADAPTIVE_RECALL_PROBE_LIMIT
+  && state.probes.every(adaptiveProbeValid)
+  && new Set(state.probes.map(row => row.turnKey)).size === state.probes.length
+  && Array.isArray(state.decisions) && state.decisions.length <= ADAPTIVE_RECALL_DECISION_LIMIT
+  && state.decisions.every(adaptiveDecisionValid)
+  && Buffer.byteLength(JSON.stringify(state), 'utf8') <= 512_000
+const defaultAdaptiveRecall = () => ({ generation: 0, policies: [], probes: [], decisions: [] })
+const recallStrategyValid = state => isPlainObject(state)
+  && Object.keys(state).every(key => ['generation', 'rows', 'adaptive'].includes(key))
+  && Number.isSafeInteger(state.generation) && state.generation >= 0
+  && Array.isArray(state.rows) && state.rows.length <= RECALL_STRATEGY_LIMIT
+  && state.rows.every(recallStrategyRowValid)
+  && new Set(state.rows.map(row => `${row.turnKey}\u0000${row.scope}\u0000${row.qualification}`
+    + `\u0000${row.id}\u0000${row.version}`)).size
+    === state.rows.length
+  && (state.adaptive === undefined || adaptiveStateValid(state.adaptive))
+const defaultRecallStrategy = () => ({ generation: 0, rows: [], adaptive: defaultAdaptiveRecall() })
+
 export function createDoc() {
   return { format: MEMORY_FORMAT, updatedAt: 0, entries: [], receipts: [], requests: [], turnFacts: [],
     materials: [], checkEvents: [], routes: [], corrections: [], methodHistory: [],
+    recallStrategy: defaultRecallStrategy(),
     controls: { userPaused: false },
     digest: { lastDoneDay: null, backlog: [], lastRunAt: null, waitReason: null, days: [] },
     turnUsage: [], problemLoop: undefined }
@@ -439,6 +585,9 @@ export function validateDoc(doc) {
   }
   if (!Array.isArray(doc.checkEvents) || doc.checkEvents.length > 128
     || !doc.checkEvents.every(checkEventValid)) throw new LearningError('invalid_memory')
+  if (doc.recallStrategy === undefined) doc.recallStrategy = defaultRecallStrategy()
+  if (doc.recallStrategy.adaptive === undefined) doc.recallStrategy.adaptive = defaultAdaptiveRecall()
+  if (!recallStrategyValid(doc.recallStrategy)) throw new LearningError('invalid_memory')
   // EVOLUTION016: the archived method ledger. Absent in a format3 library (defaulted, never
   // written on a pure read); bounded by count, by unique (entryId,version) and by row bytes.
   if (doc.methodHistory === undefined) doc.methodHistory = []
@@ -558,6 +707,11 @@ export class MemoryStore {
     if (out === ROLLBACK) return { ok: false, rolledBack: true }
     validateDoc(doc)
     doc.updatedAt = Date.now()
+    // An empty optional ledger is losslessly reconstructed on read. Do not charge an old,
+    // nearly-full library for carrying no policies: even pausing must remain writable.
+    const adaptive = doc.recallStrategy.adaptive
+    if (adaptive?.generation === 0 && !adaptive.policies.length && !adaptive.probes.length
+      && !adaptive.decisions.length) delete doc.recallStrategy.adaptive
     const body = JSON.stringify(doc)
     check(Buffer.byteLength(body) <= MAX_STORE_BYTES, 'capacity')
     const temporary = `${this.path}.${process.pid}.tmp`

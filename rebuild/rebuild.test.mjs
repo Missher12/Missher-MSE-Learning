@@ -5436,7 +5436,9 @@ test('E6b the replay CLI is offline-only, writes nothing and is not part of the 
   } finally { rmSync(work, { recursive: true, force: true }) }
   // The developer CLI and the replay fixture are public SOURCE but NOT runtime package files.
   const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'))
-  assert.equal(pkg.version, '0.16.0')
+  assert.equal(pkg.version, '1.0.0')
+  assert.ok(pkg.files.includes('rebuild/adaptive-recall.mjs'))
+  assert.ok(pkg.files.includes('rebuild/adaptive-replay.mjs'))
   assert.ok(pkg.files.includes('rebuild/recall.mjs'))
   assert.ok(pkg.files.includes('rebuild/evolution.mjs'))
   assert.equal(pkg.files.includes('scripts/replay-recall.mjs'), false)
@@ -5838,7 +5840,7 @@ test('E8c a multi-source birth keeps its whole snapshot; a revision cannot lend 
   assert.deepEqual(entry(), before, 'no half transaction on the blocked edition')
 })
 
-test('E8d guard names the concrete failure; two guards each stay identifiable inside 2×768 B', () => {
+test('E8d guard names the concrete failure; the 0.16.1 policy appends at most one guard per turn', () => {
   const { engine, entryId, entry, fail } = e16Lifecycle()
   e7Prepare(engine, 't3')
   fail('fx-8d', 't3', 's5')
@@ -5858,11 +5860,10 @@ test('E8d guard names the concrete failure; two guards each stay identifiable in
     return true
   })
   const recalled = engine.prepare({ sessionId: 's5', turnId: 't6', projectKey: 'p1', prompt: e16Prompt })
-  assert.equal(recalled.offered.length, 2)
-  assert.equal(recalled.offered.every(offer => offer.mode === 'guard'), true)
+  assert.equal(recalled.offered.length, 1, 'one guard slot under the explicit 0.16.1 policy')
+  assert.equal(recalled.offered[0].mode, 'guard')
   assert.match(recalled.context, /具体失败模式/u)
-  assert.match(recalled.context, /SyntaxError/u)
-  assert.match(recalled.context, /ENOENT/u)
+  assert.match(recalled.context, /ENOENT/u, 'the selected warning keeps its complete concrete failure fact')
   assert.doesNotMatch(recalled.context, /用 JSON\.parse 预校验再写入/u, 'old repair steps are never replayed')
   assert.doesNotMatch(recalled.context, /未通过/u, 'no checker failure is invented')
   assert.ok(Buffer.byteLength(recalled.context, 'utf8') <= 768)
@@ -6509,4 +6510,153 @@ test('CS21 FIX3: citation authority must live in the ANCHOR sentence, not anothe
   assert.equal(plain.finished.saved?.length, 1,
     'the CURRENT complete rule with no citation still saves despite an unrelated prior-state sentence')
   assert.equal(clean.store.read().entries[0].visibility, 'global')
+})
+
+test('RSI real pre-step: two scoped approvals, exact rollback, and a late old-version failure', async () => {
+  const dir = root()
+  const w = extWiring(dir, [])
+  try {
+    const session = w.mk('rsi-real-entry', dir)
+    const seedProblem = (label, toolName, errorText) => {
+      const seeded = w.plugin.engine.observeToolFailure({ sessionId: session.id, turnId: `seed-${label}`,
+        projectKey: dir, callId: `seed-${label}`, toolName, failureCode: 'tool_error_flag',
+        exitCode: null, error: errorText, command: JSON.stringify({ path: dir }) })
+      const problem = w.plugin.engine.store.read().problemLoop.problems.find(row => row.id === seeded.id)
+      assert.ok(problem?.signature)
+      return { id: problem.id, signature: problem.signature }
+    }
+    const problemA = seedProblem('a-v1', 'list', 'A list-directory failure')
+    const problemB = seedProblem('b-v1', 'read', 'B permission failure')
+    const evidenceA = e16Hex('rsi-runtime-evidence-a')
+    const evidenceB = e16Hex('rsi-runtime-evidence-b')
+    const method = ({ label, id, problem, evidence, instruction, applicability, failurePattern }) => ({
+      id, type: 'lesson', status: 'pending', instruction, applicability, exclusions: '',
+      visibility: 'global', originScope: e16Hex('rsi-runtime-scope'),
+      originEnvironment: e16Hex('rsi-runtime-environment'), originSession: null,
+      lesson: { problemId: problem.id, evidenceIds: [evidence], evidenceRevision: 0,
+        failurePattern, rootCause: { summary: `${label} 的原生工具问题`, basis: 'hypothesis',
+          evidenceIds: [evidence] }, repairSteps: ['检查具体状态', '再按结果修复'],
+        verification: { check: '重新运行对应的原生检查', expected: '问题已经修复' } },
+      problemSignature: problem.signature, version: 1, parentVersion: null, superseded: null,
+      injected: 0, recurrences: 0, createdAt: 1, updatedAt: 1, lastInjectedAt: null,
+      evidenceHash: null, factDigest: null, digestDay: null, importedFrom: null,
+      sourceDigest: null, methodStats: null,
+    })
+    const cases = await import('../scripts/rsi/replay.mjs')
+    const source = cases.loadDefaultCases().find(row => row.id === 'rsi-02-indent-error-exact')
+    const targetA = source.entries.find(row => row.id === 'mem_rsi_indent_levels')
+    const baselineA = source.entries.slice(0, 2).map((entry, index) => ({
+      ...structuredClone(entry), id: e16Id(`rsi-runtime-base-${index}`),
+      originScope: e16Hex('rsi-runtime-scope'), originEnvironment: e16Hex('rsi-runtime-environment'),
+      visibility: 'global',
+    }))
+    const methodA = method({ label: 'A', id: e16Id('rsi-runtime-method-a'), problem: problemA,
+      evidence: evidenceA, instruction: targetA.instruction, applicability: targetA.applicability,
+      failurePattern: '列表层级处理失败' })
+    const methodB = method({ label: 'B', id: e16Id('rsi-runtime-method-b'), problem: problemB,
+      evidence: evidenceB, instruction: '先检查细节再按现有步骤处理问题', applicability: '处理错误时',
+      failurePattern: '处理问题时出现失败' })
+    w.plugin.engine.store.transaction(doc => { doc.entries.push(...baselineA, methodA, methodB); return true })
+
+    const preStep = async (turn, text) => {
+      await w.emit('session/event', session, { type: 'turn/start', data: { turn } })
+      const [decision] = await w.emit('agent/pre-step', {
+        agent: { session }, step: 1, turn,
+        messages: [{ id: `rsi-user-${turn}`, role: 'user', source: { kind: 'user' },
+          content: [{ type: 'text', text }] }],
+      }, async payload => ({ kind: 'enter', messages: payload.messages }))
+      return decision
+    }
+    const nativeFailure = async (turn, callId, toolName, errorText) => {
+      const args = { path: dir }
+      session.events.push({ type: 'tool/call', seq: session.seq,
+        data: { turn, step: 1, callId, name: toolName, arguments: args } })
+      await w.emit('tools/result', { agent: { session }, callId, rootCallId: callId, name: toolName,
+        arguments: args, signal: new AbortController().signal },
+      { isError: true, error: { message: errorText }, content: [] })
+    }
+    const endTurn = async (turn, reason = 'completed') => {
+      await w.emit('session/event', session, { type: 'turn/end',
+        data: { turn, reason: { kind: reason } } })
+      await w.plugin.wake()
+    }
+    const realReceipt = turn => w.plugin.engine.store.read().receipts
+      .find(row => row.turnKey === createHash('sha256')
+        .update(JSON.stringify([String(session.id), String(turn)])).digest('hex'))
+    const baselineDecision = await preStep(1, source.prompt)
+    assert.ok(!JSON.stringify(baselineDecision.messages).includes(methodA.instruction),
+      'the first positive is shadow only; the real prompt stays baseline')
+    assert.ok(!realReceipt(1).offered.some(row => row.id === methodA.id))
+    assert.equal(w.plugin.engine.store.read().entries.find(row => row.id === methodA.id).injected, 0)
+    await nativeFailure(1, 'rsi-a-shadow-failure', 'list', 'A list-directory failure')
+    await endTurn(1)
+    assert.ok(w.plugin.engine.store.read().recallStrategy.rows.some(row => row.id === methodA.id
+      && row.version === 1 && row.mode === 'approved' && row.generation === 1))
+
+    const promptB = '处理报错'
+    const baselineB = await preStep(2, promptB)
+    assert.ok(!JSON.stringify(baselineB.messages).includes(methodB.instruction))
+    assert.ok(!realReceipt(2).offered.some(row => row.id === methodB.id))
+    await nativeFailure(2, 'rsi-b-shadow-failure', 'read', 'B permission failure')
+    await endTurn(2)
+    let state = w.plugin.engine.store.read().recallStrategy
+    assert.equal(state.generation, 2)
+    assert.ok(state.rows.some(row => row.id === methodB.id && row.version === 1
+      && row.mode === 'approved' && row.generation === 2))
+
+    const activeA = await preStep(3, source.prompt)
+    assert.ok(JSON.stringify(activeA.messages).includes(methodA.instruction))
+    assert.ok(realReceipt(3).offered.some(row => row.id === methodA.id && row.mode === 'method'))
+    await nativeFailure(3, 'rsi-a-active-failure', 'list', 'A list-directory failure')
+    await endTurn(3)
+    state = w.plugin.engine.store.read().recallStrategy
+    assert.equal(state.generation, 3)
+    assert.ok(state.rows.some(row => row.id === methodA.id && row.version === 1
+      && row.mode === 'isolated' && row.reason === 'same_signature_recurrence'))
+    assert.ok(state.rows.some(row => row.id === methodB.id && row.version === 1
+      && row.mode === 'approved'), 'rolling back A leaves B approved')
+
+    const activeB = await preStep(4, promptB)
+    assert.ok(JSON.stringify(activeB.messages).includes(methodB.instruction),
+      'the independently approved B method remains recallable after A rolls back')
+    assert.ok(realReceipt(4).offered.some(row => row.id === methodB.id && row.mode === 'method'))
+    await endTurn(4)
+
+    const problemA2 = seedProblem('a-v2', 'list', 'A revised list-directory failure')
+    w.plugin.engine.store.transaction(doc => {
+      const entry = doc.entries.find(row => row.id === methodA.id)
+      const archived = archiveVersion(doc, entry, { now: 1_800_000_000_000, reason: 'native_revision' })
+      assert.equal(archived.ok, true)
+      entry.version = 2
+      entry.parentVersion = 1
+      entry.status = 'pending'
+      entry.problemSignature = problemA2.signature
+      entry.lesson.problemId = problemA2.id
+      entry.lesson.evidenceIds = [e16Hex('rsi-runtime-evidence-a-v2')]
+      entry.lesson.rootCause.evidenceIds = [...entry.lesson.evidenceIds]
+      entry.lesson.failurePattern = '更新后的列表层级处理失败'
+      entry.methodStats = null
+      entry.recurrences = 0
+      return true
+    })
+    const baselineA2 = await preStep(5, source.prompt)
+    assert.ok(!JSON.stringify(baselineA2.messages).includes(methodA.instruction),
+      'version 2 has no inherited approval')
+    assert.ok(!realReceipt(5).offered.some(row => row.id === methodA.id && row.version === 2))
+    const generationsBeforeLate = w.plugin.engine.store.read().recallStrategy.generation
+    await nativeFailure(3, 'rsi-a-active-failure', 'list', 'A list-directory failure')
+    state = w.plugin.engine.store.read().recallStrategy
+    assert.equal(state.generation, generationsBeforeLate)
+    assert.ok(state.rows.some(row => row.id === methodA.id && row.version === 2
+      && row.mode === 'shadow'), 'a late version-1 event cannot approve or isolate version 2')
+    await endTurn(5)
+
+    await preStep(6, source.prompt)
+    await nativeFailure(6, 'rsi-a-v2-failure', 'list', 'A revised list-directory failure')
+    await endTurn(6)
+    state = w.plugin.engine.store.read().recallStrategy
+    assert.ok(state.rows.some(row => row.id === methodA.id && row.version === 2
+      && row.mode === 'approved' && row.generation === 4),
+    'the new version receives its own approval generation from fresh native evidence')
+  } finally { w.plugin.dispose() }
 })

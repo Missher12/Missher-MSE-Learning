@@ -1,0 +1,195 @@
+{
+  "about": "Public synthetic controls; non-blind and not production data.",
+  "cases": [
+  {
+    "id": "new_indentation",
+    "source": "synthetic_control",
+    "prompt": "读配置时报错，问题好像在嵌套层级的缩进。应怎样修？",
+    "entries": [
+      {
+        "id": "audit_indent",
+        "type": "rule",
+        "status": "user_rule",
+        "version": 1,
+        "instruction": "先确认父子项的缩进宽度，再运行解析检查。",
+        "applicability": "遇到缩进层级错误时",
+        "exclusions": "",
+        "visibility": "global",
+        "originScope": "editor",
+        "originEnvironment": "desktop",
+        "updatedAt": 100
+      },
+      {
+        "id": "audit_announcement",
+        "type": "rule",
+        "status": "user_rule",
+        "version": 1,
+        "instruction": "说明此次上线时间并标记负责人。",
+        "applicability": "写发布公告时",
+        "exclusions": "",
+        "visibility": "global",
+        "originScope": "editor",
+        "originEnvironment": "desktop",
+        "updatedAt": 100
+      }
+    ],
+    "scope": "editor",
+    "environment": "desktop",
+    "expect": {
+      "relevant": [
+        "audit_indent"
+      ],
+      "excluded": [
+        "audit_announcement"
+      ],
+      "guards": []
+    }
+  },
+  {
+    "id": "import_failure_not_caption",
+    "source": "synthetic_control",
+    "prompt": "导入图片时程序报错，请帮我定位调用栈。",
+    "entries": [
+      {
+        "id": "audit_stack",
+        "type": "rule",
+        "status": "user_rule",
+        "version": 1,
+        "instruction": "保留输入样本和调用栈，定位解码失败的位置。",
+        "applicability": "图片导入异常或崩溃时",
+        "exclusions": "",
+        "visibility": "global",
+        "originScope": "editor",
+        "originEnvironment": "desktop",
+        "updatedAt": 100
+      },
+      {
+        "id": "audit_caption",
+        "type": "rule",
+        "status": "user_rule",
+        "version": 1,
+        "instruction": "核对题名与署名，改错字后交给编辑。",
+        "applicability": "图册中图片标题有拼写错误时",
+        "exclusions": "",
+        "visibility": "global",
+        "originScope": "editor",
+        "originEnvironment": "desktop",
+        "updatedAt": 100
+      }
+    ],
+    "scope": "editor",
+    "environment": "desktop",
+    "expect": {
+      "relevant": [
+        "audit_stack"
+      ],
+      "excluded": [
+        "audit_caption"
+      ],
+      "guards": []
+    }
+  },
+  {
+    "id": "copy_error_not_backend_error",
+    "source": "synthetic_control",
+    "prompt": "报价单中供应商名称有书写错误，帮我核对抬头用字。",
+    "entries": [
+      {
+        "id": "audit_registration",
+        "type": "rule",
+        "status": "user_rule",
+        "version": 1,
+        "instruction": "照登记名称逐字核对抬头。",
+        "applicability": "核对供应商抬头名称时",
+        "exclusions": "",
+        "visibility": "global",
+        "originScope": "editor",
+        "originEnvironment": "desktop",
+        "updatedAt": 100
+      },
+      {
+        "id": "audit_http",
+        "type": "rule",
+        "status": "user_rule",
+        "version": 1,
+        "instruction": "记录 HTTP 状态和服务端堆栈后再重试请求。",
+        "applicability": "报价接口报错时",
+        "exclusions": "",
+        "visibility": "global",
+        "originScope": "editor",
+        "originEnvironment": "desktop",
+        "updatedAt": 100
+      }
+    ],
+    "scope": "editor",
+    "environment": "desktop",
+    "expect": {
+      "relevant": [
+        "audit_registration"
+      ],
+      "excluded": [
+        "audit_http"
+      ],
+      "guards": []
+    }
+  },
+  {
+    "id": "unrelated_workspace",
+    "source": "synthetic_control",
+    "prompt": "修复解析错误并找出缩进层级。",
+    "entries": [
+      {
+        "id": "audit_local",
+        "type": "rule",
+        "status": "user_rule",
+        "version": 1,
+        "instruction": "先查对齐，再用解析器验证。",
+        "applicability": "排查解析失败的缩进层级时",
+        "exclusions": "",
+        "visibility": "scoped",
+        "originScope": "editor",
+        "originEnvironment": "desktop",
+        "updatedAt": 100
+      },
+      {
+        "id": "audit_elsewhere",
+        "type": "rule",
+        "status": "user_rule",
+        "version": 1,
+        "instruction": "另一个项目禁止手动纠正配置。",
+        "applicability": "排查解析失败的缩进层级时",
+        "exclusions": "",
+        "visibility": "scoped",
+        "originScope": "other",
+        "originEnvironment": "desktop",
+        "updatedAt": 100
+      },
+      {
+        "id": "audit_retired",
+        "type": "rule",
+        "status": "retired",
+        "version": 1,
+        "instruction": "强制用废弃缩进生成器。",
+        "applicability": "排查解析失败的缩进层级时",
+        "exclusions": "",
+        "visibility": "global",
+        "originScope": "editor",
+        "originEnvironment": "desktop",
+        "updatedAt": 100
+      }
+    ],
+    "scope": "editor",
+    "environment": "desktop",
+    "expect": {
+      "relevant": [
+        "audit_local"
+      ],
+      "excluded": [
+        "audit_elsewhere",
+        "audit_retired"
+      ],
+      "guards": []
+    }
+  }
+  ]
+}

@@ -1,11 +1,14 @@
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { publicFiles } from './public-set.mjs'
+import { verifyRecallQualification } from './rsi/verify-qualification.mjs'
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
+const recallQualification = verifyRecallQualification(root)
+if (!recallQualification.ok) throw new Error(`stale_recall_qualification:${recallQualification.reason}`)
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
 // `--dsh-only` remains a tolerated compatibility flag: unknown arguments are simply ignored, and a
 // DSH candidate is the only thing this script builds now (the Hermes adapter exited the public tree).

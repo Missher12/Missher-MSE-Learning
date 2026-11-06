@@ -3,28 +3,56 @@
  * inside engine.prepare, mechanically extracted with no rule change:
  *
  *   rankForRecall  — candidate scope filter + the bundle's tiered relevance + deterministic order
- *   packRecall     — the existing 2-entry / 768-byte line packing, including guard warnings
- *   recallSelection— rank + pack (what prepare now calls)
+ *   packRecall     — the historical 2-entry / 768-byte line packing, including guard warnings
+ *   recallSelection— historical rank + pack, kept unchanged for replay/old evidence
+ *   selectRecall   — production 0.16.1 policy: up to 2 methods + at most 1 guard, total ≤3 / 768 B
  *   replayRecall   — offline developer replay over frozen cases; NO store, NO model, NO clock
  *
  * Both `rankForRecall` and `recallSelection` are deterministic functions of their inputs; the CLI
  * (scripts/replay-recall.mjs) never reads or writes the live learning library.
  */
-import { analyze } from '../src/recall.mjs'
+import { analyze, normalizeText } from '../src/recall.mjs'
 import { methodNeedsGuard, guardSummary } from './evolution.mjs'
 
 export const DEFAULT_RECALL_MAX_ENTRIES = 2
 export const DEFAULT_RECALL_MAX_BYTES = 768
+// 0.16.1 production policy: guard warnings have their own one-entry slot, methods keep 2 slots.
+export const MAX_METHODS_PER_TURN = 2
+export const MAX_GUARDS_PER_TURN = 1
+export const MAX_RECALL_TOTAL = 3
 
 const tokensOf = text => new Set(analyze(text).keys)
 const overlap = (left, right) => [...left].filter(token => right.has(token)).length
+const ERROR_SEGMENTER = new Intl.Segmenter('zh', { granularity: 'word' })
+
+export const NORMALIZATION_RULE = Object.freeze({
+  id: 'whole-word-error-to-existing-log-v1',
+  sourceWord: '错误',
+  conceptId: 'log',
+})
+
+/** The offline-qualified analysis view, shared by the runtime and offline comparator. */
+export function normalizedView(text) {
+  const view = analyze(text)
+  const normalized = normalizeText(text)
+  const hasErrorWord = [...ERROR_SEGMENTER.segment(normalized)]
+    .some(part => part.isWordLike && part.segment === NORMALIZATION_RULE.sourceWord)
+  // Format assertions remain hard boundaries: a format-specific task cannot gain recall through
+  // an unrelated error term.
+  if (!hasErrorWord || view.formats.length > 0) return view
+  return {
+    ...view,
+    semantic: [...new Set([...view.semantic, NORMALIZATION_RULE.conceptId])],
+    keys: [...new Set([...view.keys, `@${NORMALIZATION_RULE.conceptId}`])],
+  }
+}
 
 /**
  * Candidates are the non-retired entries visible in this scope (global, or exactly this
  * project/environment), ranked by the SAME tiered relevance the live engine has always used.
  */
-export function rankForRecall(entries, { prompt, scope, environment }) {
-  const queryView = analyze(prompt)
+function rankWithView(entries, { prompt, scope, environment }, viewOf) {
+  const queryView = viewOf(prompt)
   const queryTokens = new Set(queryView.keys)
   const queryBigrams = new Set(queryView.bigrams)
   const candidates = (entries ?? []).filter(entry => entry.status !== 'retired'
@@ -39,7 +67,7 @@ export function rankForRecall(entries, { prompt, scope, environment }) {
     // bundle's own tiered recall view: a shared asserted FORMAT carries a recall on its own;
     // otherwise at least TWO strong topic words, or one strong word corroborated by a shared
     // bigram. A lone generic word (bash, 检查, 生成) never carries an unrelated fix.
-    const body = analyze(`${entry.applicability} ${entry.instruction} `
+    const body = viewOf(`${entry.applicability} ${entry.instruction} `
       + `${entry.lesson?.failurePattern ?? ''}`)
     const sharedFormats = body.formats.filter(format => queryView.formats.includes(format)).length
     const strongShared = body.semantic.filter(term => queryView.semantic.includes(term)
@@ -50,7 +78,7 @@ export function rankForRecall(entries, { prompt, scope, environment }) {
     // The SAME tiered relevance, judged SEPARATELY over the declared applicability. An entry
     // whose stated situation matches the task outranks one whose body is only brushed by
     // metadata tokens (paths, versions, tool names) inside a generic rule.
-    const appView = analyze(entry.applicability)
+    const appView = viewOf(entry.applicability)
     const appStrong = appView.semantic.filter(term => queryView.semantic.includes(term)
       && !queryView.weak.has(term) && !appView.weak.has(term)).length
     const appBigram = overlap(new Set(appView.bigrams), queryBigrams)
@@ -67,6 +95,15 @@ export function rankForRecall(entries, { prompt, scope, environment }) {
       || (left.entry.type === 'rule' ? -1 : 1) - (right.entry.type === 'rule' ? -1 : 1)
       || right.entry.updatedAt - left.entry.updatedAt
       || (left.entry.id < right.entry.id ? -1 : 1))
+}
+
+export function rankForRecall(entries, options) {
+  return rankWithView(entries, options, analyze)
+}
+
+/** Candidate analyzer wired through the exact production ranking implementation. */
+export function rankForRecallNormalized(entries, options) {
+  return rankWithView(entries, options, normalizedView)
 }
 
 /**
@@ -102,6 +139,56 @@ export function recallSelection(entries, options) {
   const ranked = rankForRecall(entries, options)
   return { ranked, ...packRecall(ranked, options) }
 }
+
+/**
+ * Production 0.16.1 selection. The first two slots are METHODS only, in the already-approved
+ * applicability-first order (same appMatch partition as v2); a guard never consumes a method
+ * slot. After the method pack, the first guard in original rank order that fits the remaining
+ * bytes is appended, at most one. The hard byte ceiling is min(caller limit, 768), so an older
+ * configured maxContextBytes > 768 still LOADS but cannot raise the new ceiling. The historical
+ * `recallSelection`/`packRecall` above are unchanged and remain the offline replay baseline.
+ */
+function selectWithRanker(entries, { prompt, scope, environment, maxBytes = DEFAULT_RECALL_MAX_BYTES,
+  now = Date.now(), guardAdmit = null } = {}, ranker) {
+  const limit = Math.min(maxBytes, DEFAULT_RECALL_MAX_BYTES)
+  const ranked = ranker(entries, { prompt, scope, environment })
+  const methodRows = ranked.filter(row => !methodNeedsGuard(row.entry, now))
+    .map((row, index) => ({ row, index }))
+    .sort((left, right) => (left.row.appMatch === true ? 0 : 1)
+      - (right.row.appMatch === true ? 0 : 1) || left.index - right.index)
+    .map(row => row.row)
+  const methods = packRecall(methodRows, { maxBytes: limit, maxEntries: MAX_METHODS_PER_TURN,
+    now, guardAdmit })
+  const lines = [...methods.lines]
+  const offered = [...methods.offered]
+  let bytes = methods.bytes
+  if (bytes < limit) {
+    for (const row of ranked) {
+      if (!methodNeedsGuard(row.entry, now)) continue
+      const guard = packRecall([row], { maxBytes: limit - bytes, maxEntries: 1,
+        now, guardAdmit })
+      if (guard.offered.length === 1) {
+        lines.push(...guard.lines)
+        offered.push(...guard.offered)
+        bytes += guard.bytes
+        break
+      }
+    }
+  }
+  return { ranked, lines, bytes, offered }
+}
+
+export function selectRecall(entries, options = {}) {
+  return selectWithRanker(entries, options, rankForRecall)
+}
+
+/** The single implementation used by offline qualification and the runtime candidate probe. */
+export function selectRecallNormalized(entries, options = {}) {
+  return selectWithRanker(entries, options, rankForRecallNormalized)
+}
+
+// Runtime-facing name emphasizes the only qualified normalization rule.
+export const selectRecallErrorLog = selectRecallNormalized
 
 /**
  * Offline developer replay. `cases` are frozen, hand-labelled cases; `ranker(entries, ctx)` returns
