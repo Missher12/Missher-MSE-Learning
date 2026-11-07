@@ -2,6 +2,8 @@
 
 <h1>MSE Learning · 自我进化</h1>
 
+<p><img src="../docs/images/overview.svg" alt="MSE Learning 功能示意" width="100%"></p>
+
 <p>让长期纠正和失败经验，在后续相关任务中派上用场。</p>
 
 <p>
@@ -15,6 +17,10 @@
 </div>
 
 ---
+
+<!-- current-source -->
+当前开发源码：**1.2.1** · [分支 `main`](https://github.com/Missher12/Missher-MSE-Learning/tree/main)。安装包以实际 Release 为准。
+<!-- /current-source -->
 
 ## 功能一览
 
