@@ -5,8 +5,9 @@
  * The problem ledger (src/problems.mjs) stores ONE optional capsule per observation under
  * `problem.capsules`. A capsule carries only what the host itself observed about the failure —
  * exit code, restricted failure class, a scrubbed command/parameter summary, and the first part of
- * the tool's own stderr/error message — after secrets, absolute paths, URLs, emails and
- * instruction-injection text have been replaced by safe placeholders. Technical value (error words,
+ * a bounded diagnostic. The DSH observer may form it from complete stdout/stderr after its
+ * workspace-material screen; capsule sanitization then replaces secrets, absolute paths, URLs,
+ * emails and instruction-injection text with safe placeholders. Technical value (error words,
  * file names with extensions, positions like `:12:3`, exit codes) is deliberately KEPT: an evidence
  * record that only says "non-zero exit" cannot ground a specific reflection.
  *
@@ -176,9 +177,11 @@ export function buildFailureCapsule(input = {}) {
 }
 
 /**
- * Extract the REAL rc.4 tool-result facts: exit code, the tool's stderr text (never stdout — tool
- * stdout is task data, not failure diagnostics), an error-flag message, and a scrubbed scalar
- * summary of the call arguments. This runs at capture time so nothing raw survives to the store.
+ * Extract the REAL rc.4 tool-result facts for this standalone helper: exit code, stderr text,
+ * an error-flag message, and a scrubbed scalar summary of the call arguments. The DSH observer
+ * has the workspace screen needed to admit bounded stdout diagnostics and passes those separately
+ * through `RebuildEngine.observeToolFailure`; this helper intentionally remains stderr-only.
+ * It sanitizes every text field that it does include.
  * `failureClass` is the trusted harness classification when it states one (the harness classifies
  * from host structure; this module only extracts the evidence for that class). Without a caller
  * class the fallback follows the EXACT host precedence — cancellation, timeout, error flag, then

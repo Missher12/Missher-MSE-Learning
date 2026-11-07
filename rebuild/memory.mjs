@@ -29,10 +29,13 @@
  * and re-importing the same content digest adds nothing.
  */
 import { createHash } from 'node:crypto'
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { LearningError, MAX_STORE_BYTES, check } from '../src/store.mjs'
+import { commitMemoryFile, prepareMemoryDirectory, readBoundedMemoryFileBytes, resolveMemoryDirectory,
+  withMemoryStoreLock }
+  from './storage.mjs'
 import { problemLoopValid, ensureProblemLoop } from '../src/problems.mjs'
+import { ADAPTIVE_TASK_OPERATION_IDS } from './adaptive-operations.mjs'
 
 // EVOLUTION016: format 4 adds the version evidence ledger (methodStats / methodHistory /
 // receipt.methodFeedback / request.methodFingerprint). Format 3 stays READ-COMPATIBLE: a pure
@@ -53,19 +56,20 @@ export const RECALL_STRATEGY_LIMIT = 128
 export const ADAPTIVE_RECALL_POLICY_LIMIT = 128
 export const ADAPTIVE_RECALL_PROBE_LIMIT = 128
 export const ADAPTIVE_RECALL_DECISION_LIMIT = 128
+const ADAPTIVE_POLICY_ROW_BYTES = 16_384
 const RECALL_STRATEGY_ROW_MODES = ['shadow', 'matched', 'active', 'approved', 'isolated']
 const RECALL_STRATEGY_REASONS = ['candidate_difference', 'same_turn_native_failure_match',
   'native_checker_failure', 'same_signature_recurrence']
 const ADAPTIVE_POLICY_MODES = ['observing', 'approved', 'isolated']
 const ADAPTIVE_POLICY_REASONS = ['awaiting_independent_holdout', 'holdout_approved',
   'awaiting_negative_control', 'competing_method_failure', 'native_recurrence',
-  'native_checker_failure']
+  'native_checker_failure', 'counterexample_child']
 const ADAPTIVE_SAMPLE_RESULTS = ['discovery_hit', 'holdout_hit', 'negative', 'recurrence',
   'checker_failure', 'negative_control', 'unknown']
 const ADAPTIVE_SAMPLE_REASONS = ['unique_native_method_match', 'independent_same_objective',
   'same_session_or_query', 'competing_method_failure', 'same_signature_recurrence',
   'native_checker_failure', 'cancelled_or_unknown', 'source_revoked', 'material_revoked',
-  'policy_stale', 'independent_unmatched_objective', 'strategy_disabled']
+  'policy_stale', 'independent_unmatched_objective', 'strategy_disabled', 'counterexample_child']
 const ADAPTIVE_DECISION_RESULTS = ['created', 'holdout_hit', 'negative_control', 'approved',
   'rejected', 'isolated', 'unknown', 'feature_refused']
 const ADAPTIVE_DECISION_REASONS = ['unique_native_method_match', 'independent_same_objective',
@@ -73,8 +77,11 @@ const ADAPTIVE_DECISION_REASONS = ['unique_native_method_match', 'independent_sa
   'native_checker_failure', 'cancelled_or_unknown', 'source_revoked', 'material_revoked',
   'policy_stale', 'insufficient_safe_features', 'already_tracked', 'candidate_not_additive',
   'ambiguous_native_failure', 'baseline_explains_failure', 'stale_probe', 'probe_capacity',
-  'independent_unmatched_objective', 'awaiting_negative_control', 'strategy_disabled']
+  'independent_unmatched_objective', 'awaiting_negative_control', 'strategy_disabled',
+  'revision_limit', 'same_mechanism_rejected', 'counterexample_child']
 const safeAdaptiveFeature = value => typeof value === 'string' && /^[a-z][a-z0-9]{0,15}$/u.test(value)
+const ADAPTIVE_TASK_OPERATIONS = new Set(ADAPTIVE_TASK_OPERATION_IDS)
+const ADAPTIVE_GENERIC_TASK_FEATURES = new Set(['null', 'empty', 'error', 'log', 'value', 'result', 'problem'])
 export const ENTRY_LIMIT = 256
 export const RECEIPT_LIMIT = 256
 export const REQUEST_LIMIT = 96
@@ -433,10 +440,27 @@ const materialValid = row => isPlainObject(row)
   && Number.isSafeInteger(row.autoRetriesUsed) && row.autoRetriesUsed >= 0 && row.autoRetriesUsed <= 1
   && typeof row.unknownCost === 'boolean' && Number.isFinite(row.updatedAt)
 
+const checkSummaryValid = (checkId, summary) => {
+  if (!isPlainObject(summary)) return false
+  if (checkId === 'node-test-runner-spec-v1') return Object.keys(summary).every(key =>
+    ['kind', 'tests', 'passed', 'failed', 'skipped', 'cancelled', 'todo'].includes(key))
+    && summary.kind === 'node_test_runner'
+    && ['tests', 'passed', 'failed', 'skipped', 'cancelled', 'todo'].every(key =>
+      Number.isSafeInteger(summary[key]) && summary[key] >= 0 && summary[key] <= 1_000_000)
+    && summary.tests === summary.passed + summary.failed + summary.skipped
+      + summary.cancelled + summary.todo
+  if (checkId === 'typescript-noemit-v1') return Object.keys(summary).every(key =>
+    ['kind', 'diagnostics'].includes(key))
+    && summary.kind === 'typescript_noemit' && Number.isSafeInteger(summary.diagnostics)
+    && summary.diagnostics >= 0 && summary.diagnostics <= 256
+  return false
+}
 const checkEventValid = row => isPlainObject(row)
-  && Object.keys(row).every(key => ['id', 'at', 'checkId', 'turnKey', 'entryId', 'entryVersion', 'passed'].includes(key))
+  && Object.keys(row).every(key => ['id', 'at', 'checkId', 'turnKey', 'entryId', 'entryVersion',
+    'passed', 'summary'].includes(key))
   && hex64(row.id) && Number.isFinite(row.at) && boundedLabel(row.checkId, 128) && hex64(row.turnKey)
   && entryHex(row.entryId) && Number.isSafeInteger(row.entryVersion) && typeof row.passed === 'boolean'
+  && (row.summary === undefined || checkSummaryValid(row.checkId, row.summary))
 
 const recallStrategyRowValid = row => isPlainObject(row)
   && Object.keys(row).every(key => ['turnKey', 'scope', 'session', 'qualification', 'id', 'version',
@@ -448,27 +472,73 @@ const recallStrategyRowValid = row => isPlainObject(row)
   && (row.mode === 'matched' ? hex64(row.problemId) : row.problemId === undefined)
   && Number.isSafeInteger(row.generation) && row.generation >= 0
   && RECALL_STRATEGY_REASONS.includes(row.reason)
+const adaptiveOfferValid = row => isPlainObject(row)
+  && Object.keys(row).every(key => ['id', 'version', 'mode'].includes(key))
+  && entryHex(row.id) && Number.isSafeInteger(row.version) && row.version >= 1
+  && ['method', 'guard'].includes(row.mode)
+const adaptiveOfferListValid = rows => Array.isArray(rows) && rows.length <= 3
+  && rows.every(adaptiveOfferValid)
+  && new Set(rows.map(row => `${row.id}\u0000${row.version}\u0000${row.mode}`)).size === rows.length
+  && rows.filter(row => row.mode === 'method').length <= 2
+  && rows.filter(row => row.mode === 'guard').length <= 1
+const adaptiveReplayProjectionValid = row => isPlainObject(row)
+  && ['baselineOffers', 'candidateOffers', 'protectedOffers', 'baselineBytes', 'candidateBytes',
+    'matched', 'observedEntry'].every(key => Object.hasOwn(row, key))
+  && adaptiveOfferListValid(row.baselineOffers) && adaptiveOfferListValid(row.candidateOffers)
+  && adaptiveOfferListValid(row.protectedOffers)
+  && Number.isSafeInteger(row.baselineBytes) && row.baselineBytes >= 0 && row.baselineBytes <= 768
+  && Number.isSafeInteger(row.candidateBytes) && row.candidateBytes >= 0 && row.candidateBytes <= 768
+  && typeof row.matched === 'boolean'
+  && isPlainObject(row.observedEntry) && entryHex(row.observedEntry.id)
+  && Number.isSafeInteger(row.observedEntry.version) && row.observedEntry.version >= 1
+  && row.protectedOffers.every(offer => row.baselineOffers.some(base => base.id === offer.id
+    && base.version === offer.version && base.mode === offer.mode)
+    && row.candidateOffers.some(next => next.id === offer.id
+      && next.version === offer.version && next.mode === offer.mode))
 const adaptiveSampleValid = row => isPlainObject(row)
   && Object.keys(row).every(key => ['turnKey', 'session', 'query', 'result', 'reason', 'at', 'replay'].includes(key))
   && hex64(row.turnKey) && hex64(row.session) && hex64(row.query)
   && ADAPTIVE_SAMPLE_RESULTS.includes(row.result) && ADAPTIVE_SAMPLE_REASONS.includes(row.reason)
   && (row.replay === undefined || (isPlainObject(row.replay)
-    && Object.keys(row.replay).every(key => ['features', 'baselineHasTarget', 'canAdd', 'expected'].includes(key))
+    && Object.keys(row.replay).every(key => ['features', 'baselineHasTarget', 'canAdd', 'expected',
+      'matched', 'baselineOffers', 'candidateOffers', 'protectedOffers', 'baselineBytes',
+      'candidateBytes', 'observedEntry'].includes(key))
     && Array.isArray(row.replay.features) && row.replay.features.length <= 8
     && row.replay.features.every(safeAdaptiveFeature)
     && new Set(row.replay.features).size === row.replay.features.length
     && typeof row.replay.baselineHasTarget === 'boolean' && typeof row.replay.canAdd === 'boolean'
-    && typeof row.replay.expected === 'boolean'))
+    && typeof row.replay.expected === 'boolean'
+    && (row.replay.baselineOffers === undefined
+      ? ['matched', 'candidateOffers', 'protectedOffers', 'baselineBytes', 'candidateBytes', 'observedEntry']
+        .every(key => row.replay[key] === undefined)
+      : adaptiveReplayProjectionValid(row.replay))))
   && Number.isFinite(row.at)
 const adaptivePolicyValid = row => isPlainObject(row)
   && Object.keys(row).every(key => ['id', 'schema', 'scope', 'qualification', 'entryId', 'version',
     'objective', 'features', 'mode', 'generation', 'positives', 'negativeControls', 'rejections', 'firstSession',
-    'firstQuery', 'reason', 'createdAt', 'updatedAt', 'samples'].includes(key))
-  && hex64(row.id) && row.schema === 'mse-adaptive-recall-v1'
+    'firstQuery', 'reason', 'createdAt', 'updatedAt', 'samples', 'excludedFeatures', 'familyId',
+    'familyGeneration', 'parentId'].includes(key))
+  && hex64(row.id) && ['mse-adaptive-recall-v1', 'mse-adaptive-recall-v2'].includes(row.schema)
   && hex64(row.scope) && hex64(row.qualification) && entryHex(row.entryId)
   && Number.isSafeInteger(row.version) && row.version >= 1 && hex64(row.objective)
-  && Array.isArray(row.features) && row.features.length >= 1 && row.features.length <= 4
+  && Array.isArray(row.features) && row.features.length >= (row.schema === 'mse-adaptive-recall-v2' ? 2 : 1)
+  && row.features.length <= 4
   && row.features.every(safeAdaptiveFeature) && new Set(row.features).size === row.features.length
+  && (row.schema === 'mse-adaptive-recall-v1'
+    ? row.excludedFeatures === undefined && row.familyId === undefined
+      && row.familyGeneration === undefined && row.parentId === undefined
+    : Array.isArray(row.excludedFeatures) && row.excludedFeatures.length <= 2
+      && row.excludedFeatures.every(id => safeAdaptiveFeature(id)
+        && !ADAPTIVE_TASK_OPERATIONS.has(id) && !ADAPTIVE_GENERIC_TASK_FEATURES.has(id)
+        && !row.features.includes(id))
+      && new Set(row.excludedFeatures).size === row.excludedFeatures.length
+      && row.features.some(id => !ADAPTIVE_TASK_OPERATIONS.has(id)
+        && !ADAPTIVE_GENERIC_TASK_FEATURES.has(id))
+      && row.features.some(id => ADAPTIVE_TASK_OPERATIONS.has(id))
+      && hex64(row.familyId) && Number.isSafeInteger(row.familyGeneration)
+      && row.familyGeneration >= 0 && row.familyGeneration <= 2
+      && (row.parentId === null ? row.familyGeneration === 0 : hex64(row.parentId)
+        && row.familyGeneration >= 1))
   && ADAPTIVE_POLICY_MODES.includes(row.mode)
   && Number.isSafeInteger(row.generation) && row.generation >= 0
   && Number.isSafeInteger(row.positives) && row.positives >= 1 && row.positives <= 1_000_000
@@ -479,16 +549,27 @@ const adaptivePolicyValid = row => isPlainObject(row)
   && ADAPTIVE_POLICY_REASONS.includes(row.reason)
   && Number.isFinite(row.createdAt) && Number.isFinite(row.updatedAt)
   && Array.isArray(row.samples) && row.samples.length >= 1 && row.samples.length <= 8
-  && row.samples.every(adaptiveSampleValid)
+  && row.samples.every(sample => adaptiveSampleValid(sample)
+    && (row.schema !== 'mse-adaptive-recall-v2'
+      || !['holdout_hit', 'negative_control', 'negative'].includes(sample.result)
+      || sample.replay !== undefined && adaptiveReplayProjectionValid(sample.replay)))
   && new Set(row.samples.map(sample => sample.turnKey)).size === row.samples.length
-  && Buffer.byteLength(JSON.stringify(row), 'utf8') <= 4096
-const adaptiveOfferValid = row => isPlainObject(row)
-  && Object.keys(row).every(key => ['id', 'version', 'mode'].includes(key))
-  && entryHex(row.id) && Number.isSafeInteger(row.version) && row.version >= 1
-  && ['method', 'guard'].includes(row.mode)
+  && Buffer.byteLength(JSON.stringify(row), 'utf8') <= ADAPTIVE_POLICY_ROW_BYTES
 const adaptiveComparisonValid = row => isPlainObject(row)
-  && Object.keys(row).every(key => ['policyId', 'baselineHasTarget', 'canAdd'].includes(key))
+  && Object.keys(row).every(key => ['policyId', 'baselineHasTarget', 'canAdd', 'matched',
+    'baselineOffers', 'candidateOffers', 'protectedOffers', 'baselineBytes', 'candidateBytes'].includes(key))
   && hex64(row.policyId) && typeof row.baselineHasTarget === 'boolean' && typeof row.canAdd === 'boolean'
+  && (row.baselineOffers === undefined
+    ? ['matched', 'candidateOffers', 'protectedOffers', 'baselineBytes', 'candidateBytes']
+      .every(key => row[key] === undefined)
+    : typeof row.matched === 'boolean' && adaptiveOfferListValid(row.baselineOffers)
+      && adaptiveOfferListValid(row.candidateOffers) && adaptiveOfferListValid(row.protectedOffers)
+      && Number.isSafeInteger(row.baselineBytes) && row.baselineBytes >= 0 && row.baselineBytes <= 768
+      && Number.isSafeInteger(row.candidateBytes) && row.candidateBytes >= 0 && row.candidateBytes <= 768
+      && row.protectedOffers.every(offer => row.baselineOffers.some(base => base.id === offer.id
+        && base.version === offer.version && base.mode === offer.mode)
+        && row.candidateOffers.some(next => next.id === offer.id
+          && next.version === offer.version && next.mode === offer.mode)))
 const adaptiveSignalValid = row => isPlainObject(row)
   && Object.keys(row).every(key => ['policyId', 'kind', 'entryId', 'version', 'objective',
     'problemId', 'signature', 'features', 'reason', 'at'].includes(key))
@@ -503,12 +584,15 @@ const adaptiveSignalValid = row => isPlainObject(row)
   && ADAPTIVE_DECISION_REASONS.includes(row.reason) && Number.isFinite(row.at)
 const adaptiveProbeValid = row => isPlainObject(row)
   && Object.keys(row).every(key => ['turnKey', 'scope', 'projectScope', 'environment', 'session',
-    'query', 'features', 'baselineOffers', 'offered', 'shadowPolicies', 'controlPolicies',
+    'query', 'taskQuery', 'features', 'taskFeatures', 'baselineOffers', 'offered', 'shadowPolicies', 'controlPolicies',
     'activePolicies', 'comparisons', 'pending', 'at'].includes(key))
   && hex64(row.turnKey) && hex64(row.scope) && hex64(row.projectScope) && hex64(row.environment)
   && hex64(row.session) && hex64(row.query)
+  && (row.taskQuery === undefined || hex64(row.taskQuery))
   && Array.isArray(row.features) && row.features.length <= 8
   && row.features.every(safeAdaptiveFeature) && new Set(row.features).size === row.features.length
+  && (row.taskFeatures === undefined || (Array.isArray(row.taskFeatures) && row.taskFeatures.length <= 8
+    && row.taskFeatures.every(safeAdaptiveFeature) && new Set(row.taskFeatures).size === row.taskFeatures.length))
   && Array.isArray(row.baselineOffers) && row.baselineOffers.length <= 3
   && row.baselineOffers.every(adaptiveOfferValid)
   && Array.isArray(row.offered) && row.offered.length <= 3 && row.offered.every(adaptiveOfferValid)
@@ -533,12 +617,29 @@ const adaptiveDecisionValid = row => isPlainObject(row)
   && (row.version === null || (Number.isSafeInteger(row.version) && row.version >= 1))
   && ADAPTIVE_DECISION_RESULTS.includes(row.result)
   && ADAPTIVE_DECISION_REASONS.includes(row.reason) && Number.isFinite(row.at)
+function adaptiveFamiliesValid(policies) {
+  const task = policies.filter(row => row.schema === 'mse-adaptive-recall-v2')
+  const byId = new Map(task.map(row => [row.id, row]))
+  const familyCounts = new Map()
+  const children = new Map()
+  for (const policy of task) {
+    familyCounts.set(policy.familyId, (familyCounts.get(policy.familyId) ?? 0) + 1)
+    if (policy.parentId === null) continue
+    const parent = byId.get(policy.parentId)
+    if (parent === undefined || parent.familyId !== policy.familyId
+      || parent.familyGeneration + 1 !== policy.familyGeneration) return false
+    children.set(parent.id, (children.get(parent.id) ?? 0) + 1)
+  }
+  return [...familyCounts.values()].every(count => count <= 3)
+    && [...children.values()].every(count => count <= 2)
+}
 const adaptiveStateValid = state => isPlainObject(state)
   && Object.keys(state).every(key => ['generation', 'policies', 'probes', 'decisions'].includes(key))
   && Number.isSafeInteger(state.generation) && state.generation >= 0
   && Array.isArray(state.policies) && state.policies.length <= ADAPTIVE_RECALL_POLICY_LIMIT
   && state.policies.every(adaptivePolicyValid)
   && new Set(state.policies.map(row => row.id)).size === state.policies.length
+  && adaptiveFamiliesValid(state.policies)
   && Array.isArray(state.probes) && state.probes.length <= ADAPTIVE_RECALL_PROBE_LIMIT
   && state.probes.every(adaptiveProbeValid)
   && new Set(state.probes.map(row => row.turnKey)).size === state.probes.length
@@ -642,6 +743,9 @@ export function validateDoc(doc) {
 
 export const memoryOf = doc => (doc.problemLoop === undefined ? ensureProblemLoop(doc) : doc.problemLoop)
 
+const NO_COMMIT = Symbol('mse-rebuild.no-commit')
+export const noCommit = value => ({ [NO_COMMIT]: value })
+
 /**
  * EVOLUTION016 format3 → format4 migration, executed ONLY inside the first real write transaction
  * (a pure read never calls this). Old text/status/counters/gates are untouched. The one existing
@@ -678,50 +782,102 @@ export function upgradeDocFormat(doc, now) {
 }
 
 export class MemoryStore {
-  // Own tiny atomic store: temp+rename durability, one writer (the plugin process). A mutation is
-  // committed ONLY when it completes without throwing and does not return the explicit rollback
-  // sentinel — a failed begin* branch can never leave a half-signed request on disk.
+  // One bounded document with a private directory, exclusive cross-process writer lease, and an
+  // explicit post-rename durability status. The public constructor/signatures stay unchanged.
   constructor({ stateRoot }) {
     check(typeof stateRoot === 'string' && isAbsolute(stateRoot) && stateRoot.length > 0, 'invalid_state_root')
-    mkdirSync(stateRoot, { recursive: true, mode: 0o700 })
+    this.stateRoot = stateRoot
+    this.root = null
     this.path = join(stateRoot, 'memory-v1.json')
+    this.lastCommitDurability = 'none'
+    this.hasObservedStore = false
+    this.onCommit = null
   }
-  read() {
-    let text
-    try { text = readFileSync(this.path, 'utf8') }
+  #recordCommit(durability) {
+    this.lastCommitDurability = durability
+    try { this.onCommit?.(durability) } catch { /* an observer must not change commit semantics */ }
+  }
+  #resolveRoot({ writable = false } = {}) {
+    try {
+      this.root = writable ? prepareMemoryDirectory(this.stateRoot) : resolveMemoryDirectory(this.stateRoot)
+    } catch (error) {
+      if (error?.storePresent === true) this.hasObservedStore = true
+      throw error
+    }
+    this.path = join(this.root, 'memory-v1.json')
+    return this.root
+  }
+  #readSnapshotAt(root) {
+    let bytes
+    try { bytes = readBoundedMemoryFileBytes(join(root, 'memory-v1.json')) }
     catch (error) {
-      if (error.code === 'ENOENT') return createDoc()
+      if (error.storePresent === true || error.code !== 'ENOENT') this.hasObservedStore = true
+      if (error.code === 'ENOENT') {
+        if (this.hasObservedStore) throw new LearningError('state_unavailable')
+        return { doc: createDoc(), exists: false, bytes: null }
+      }
+      if (error instanceof LearningError) throw error
       throw new LearningError('state_unavailable')
     }
+    this.hasObservedStore = true
     let doc
-    try { doc = JSON.parse(text) } catch { throw new LearningError('invalid_memory') }
-    validateDoc(doc)
-    return doc
+    try { doc = JSON.parse(bytes.toString('utf8')); validateDoc(doc) }
+    catch { throw new LearningError('invalid_memory') }
+    return { doc, exists: true, bytes }
+  }
+  #readAt(root) { return this.#readSnapshotAt(root).doc }
+  read() { return this.#readAt(this.#resolveRoot()) }
+  /** One validated document plus its exact bounded source bytes; reads never create or migrate. */
+  readSnapshot() {
+    const snapshot = this.#readSnapshotAt(this.#resolveRoot())
+    return { doc: snapshot.doc, exists: snapshot.exists,
+      bytes: snapshot.bytes === null ? null : Buffer.from(snapshot.bytes) }
   }
   transaction(mutate) {
-    const doc = this.read()
-    // EVOLUTION016: ONE atomic format3→4 migration on the first real write; a ROLLBACK or a
-    // refusal throws the migrated copy away together with the mutation (the file is untouched).
-    if (doc.format === 3) upgradeDocFormat(doc, Date.now())
-    const out = mutate(doc)
-    if (out === ROLLBACK) return { ok: false, rolledBack: true }
-    validateDoc(doc)
-    doc.updatedAt = Date.now()
-    // An empty optional ledger is losslessly reconstructed on read. Do not charge an old,
-    // nearly-full library for carrying no policies: even pausing must remain writable.
-    const adaptive = doc.recallStrategy.adaptive
-    if (adaptive?.generation === 0 && !adaptive.policies.length && !adaptive.probes.length
-      && !adaptive.decisions.length) delete doc.recallStrategy.adaptive
-    const body = JSON.stringify(doc)
-    check(Buffer.byteLength(body) <= MAX_STORE_BYTES, 'capacity')
-    const temporary = `${this.path}.${process.pid}.tmp`
-    try {
-      writeFileSync(temporary, body)
-      renameSync(temporary, this.path)
-    } finally {
-      try { unlinkSync(temporary) } catch { /* renamed away */ }
-    }
-    return out
+    const root = this.#resolveRoot({ writable: true })
+    return withMemoryStoreLock(root, () => {
+      const source = this.#readSnapshotAt(root)
+      const doc = source.doc
+      // EVOLUTION016: migrate format3 only inside the one locked commit; pure reads do not rewrite.
+      if (doc.format === 3) upgradeDocFormat(doc, Date.now())
+      const out = mutate(doc, { exists: source.exists,
+        bytes: source.bytes === null ? null : Buffer.from(source.bytes) })
+      if (out !== null && (typeof out === 'object' || typeof out === 'function')
+        && typeof out.then === 'function') {
+        Promise.resolve(out).catch(() => {})
+        throw new LearningError('transaction_async')
+      }
+      if (out === ROLLBACK) return { ok: false, rolledBack: true }
+      const requestedNoCommit = out !== null && typeof out === 'object'
+        && Object.hasOwn(out, NO_COMMIT)
+      const result = requestedNoCommit ? out[NO_COMMIT] : out
+      validateDoc(doc)
+      // An empty optional ledger is losslessly reconstructed on read. Do not charge an old,
+      // nearly-full library for carrying no policies: even pausing must remain writable.
+      const adaptive = doc.recallStrategy.adaptive
+      if (adaptive?.generation === 0 && !adaptive.policies.length && !adaptive.probes.length
+        && !adaptive.decisions.length) delete doc.recallStrategy.adaptive
+      if (requestedNoCommit) {
+        const unchangedBody = JSON.stringify(doc)
+        if (source.bytes !== null && Buffer.byteLength(unchangedBody) === source.bytes.length
+          && Buffer.from(unchangedBody).equals(source.bytes)) return result
+      }
+      doc.updatedAt = Date.now()
+      const body = JSON.stringify(doc)
+      check(Buffer.byteLength(body) <= MAX_STORE_BYTES, 'capacity')
+      try {
+        commitMemoryFile(join(root, 'memory-v1.json'), body)
+        this.hasObservedStore = true
+        this.#recordCommit('confirmed')
+      } catch (error) {
+        if (error?.committed === true) {
+          this.hasObservedStore = true
+          this.#recordCommit('unconfirmed')
+        } else this.lastCommitDurability = 'not_committed'
+        throw error
+      }
+      return result
+    })
   }
 }
 export const ROLLBACK = Symbol.for('mse-rebuild.rollback')

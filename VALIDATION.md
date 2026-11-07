@@ -1,6 +1,21 @@
-# 验证记录（当前本地候选 0.17.0）
+# 验证记录（当前本地候选 1.2.1）
 
-**0.17.0** 的离线对照单独计算旧策略和新策略的命中、漏用和误发；发现样本、重复会话、重复提问不算独立增益。用学习库副本核对了：证据不足时不启用，启用时保留原有方法和警示，可归因的退步只隔离新增策略，重建引擎后仍然有效。库接近容量上限时，优先保留原有方法。该对照不测模型整体能力；真实会话验收单独记录。
+## 1.2.1 候选
+
+- step 1 引擎调用链用 frozen 1.2.0 与候选 1.2.1 做 32 组配对比较：p50 146.702→99.773 ms，p95 157.603→109.502 ms；facts/route/prepare 降为 2 次事务（原 3 次），每次提交仍保留文件与目录同步。结果仅覆盖临时库中的实际引擎调用，不代表完整 Cordis hook 或宿主/模型 SLA；详见 `delivery/performance121/RESULTS.md`。
+- 针对事务合并、无效路由、重复 prepare、format3 迁移、验证默认值、容量 partial-success 与 step2 早退的定向用例：7/7 通过。标准全套 exit 0：311 tests，306 pass、0 fail、5 skipped（132.366 s；stderr 空）。原始输出见 `delivery/performance121/final-suite.stdout`。
+
+## 1.2.0 候选（历史验证）
+
+- 原生 Cordis 事件检查：实际 probe 的失败→pending→settled、外部材料拒绝、取消、无客观结果保持 unknown、无 probe 普通工具事件不记录、最多 32 条、字段脱敏与重启清空，1/1 通过；测试假 provider 会在任何模型调用时失败。
+- 用户规则召回：正式共享 helper 对同一 34 个冻结标签回放，仅 rsi-02 变化；miss 1→0、falseOffer 2→1，标签未改，0 provider、0 真库写入。rsi-09 excluded-only 的单个 falseOffer 仍保留并如实报告。完整证据：`delivery/enterprise/ROOT-RULE-PRIORITY-REPLAY.json`；单例 engine path 与计时另见 `ROOT-CANDIDATE-PREPARE-PROFILE2.json`。
+- 包源码白名单只读检查：32 个声明包文件均存在且属于 78 个公开源码文件，局部相对导入闭包完整。
+- 同条件 prepare-only 探针：45 条库 p95 55.116 ms，256 条库 p95 91.578 ms，近容量合法样本 p95 130.115 ms。旧 1.1.1 包基线分别为 4.626/9.329/55.321 ms。近容量旧值为同样的 256 条、2,041,208 B、32-turn 临时库，含 1,843,200 B 合法 unknown legacy padding（非典型库/语义复杂度）；见 `delivery/enterprise/BASELINE-NEAR-LIMIT-PERFORMANCE.json`。候选耗时高于旧包；本机同步持久化影响该结果，不代表宿主 SLA。
+- 完整假 provider 套件运行一次：304 tests，298 pass、1 fail、5 skipped。唯一失败是 E6b 中仍写死旧版本 `1.1.1`；将断言同步为候选 `1.2.0` 后，E6b 与 UI 阶段文案两项定向重跑均通过。完整套件没有在该测试修正后重跑，不能将整套结果称为 exit 0。原始输出见 `delivery/enterprise/FINAL-SUITE.stdout`。
+
+## 0.17.0（历史验证）
+
+该版本的离线对照单独计算旧策略和新策略的命中、漏用和误发；发现样本、重复会话、重复提问不算独立增益。用学习库副本核对了：证据不足时不启用，启用时保留原有方法和警示，可归因的退步只隔离新增策略，重建引擎后仍然有效。库接近容量上限时，优先保留原有方法。该对照不测模型整体能力；真实会话验收单独记录。
 
 ## 0.16.2（历史验证）
 

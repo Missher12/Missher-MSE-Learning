@@ -9,12 +9,11 @@
  *                              「仅本项目/这个仓库」 binds scope to session.header.cwd — there is
  *                              no such thing as session.projectKey), then recall injection ≤2/768B
  *                              with the host's own createUserMessage shape.
- *   ctx.on('tools/result')    — rc.4 facts: cancelled/timeout/error/exit precedence; the turn is
- *                              located through the session's OWN event index (eventAt/seq), not a
- *                              guessed field.
- *   ctx.on('session/event')   — turn/start marks foreground; turn/end settles the turn fact with
- *                              reason.kind (aborted → cancelled — never a failure, never a
- *                              recurrence).
+ *   ctx.on('tools/result')    — rc.4 facts: cancelled/timeout/error/exit precedence; development
+ *                              checks stay count-only and pending until the session's exact
+ *                              tool/result event is durable.
+ *   ctx.on('session/event')   — validates that persisted call/result pair; turn/end credits only
+ *                              durable checks and settles reason.kind (aborted → cancelled).
  *   ctx.provide('mseRebuild') + ./remote Remotes — status read face and the human control face.
  *   idle wake — reflection/revision first, then the daily digest at/after local 23:00; persistent
  *              backlog catches up one idle wake at a time. No OS timer, no config system.
@@ -24,6 +23,7 @@
  * deadline, and the contract's output byte bound. Pause, dispose and route change never commit.
  */
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
@@ -32,9 +32,10 @@ import { usageTokens } from '../adapters/dsh/usage.mjs'
 import { RebuildEngine, pathInside, TEMPORARY_SCOPE, REVISION_INTENT } from './engine.mjs'
 import { readModel, mseMessageSource, isMseSource } from './llm.mjs'
 import { SENSITIVE_PATTERN, AUTHORITY_PATTERN } from '../src/failure-evidence.mjs'
-import { runChecker } from './checker.mjs'
+import { runChecker, runDevelopmentChecker } from './checker.mjs'
 import { apply as applyRemotes } from './remote.mjs'
 import { localDayKey } from './time.mjs'
+import { isMemoryStorageError } from './storage.mjs'
 
 export const name = 'mse-learning'
 export const inject = ['agents', 'tools', 'llm', 'dshHomePath', 'workspaceRegistry']
@@ -93,12 +94,165 @@ export function apply(ctx, config = {}) {
     throw new Error('mse-learning(rebuild): the host must provide dshHomePath')
   }
   const engine = new RebuildEngine({ stateRoot, now: () => Date.now() })
-  const safeStoreAction = (reason, action) => {
+  const RSI_TRACE_LIMIT = 32
+  const rsiTraceRows = []
+  const rsiProbeTurns = new Map()
+  const traceHash = value => createHash('sha256').update(value).digest('hex')
+  const traceTurnKey = (sessionId, turnId) => traceHash(JSON.stringify([String(sessionId), String(turnId)]))
+  const traceShortId = value => typeof value !== 'string' ? null
+    : /^mem_[a-f0-9]{24}$/u.test(value) ? value.slice(4, 12)
+      : /^[a-f0-9]{64}$/u.test(value) ? value.slice(0, 12) : null
+  const rsiTraceView = () => ({ processLocal: true, restartClears: true,
+    recent: rsiTraceRows.slice(-RSI_TRACE_LIMIT).reverse().map(row => ({ ...row })) })
+  let runtimeReadReason = null
+  let runtimeWriteReason = null
+  let staleWorkReconciled = false
+  let digestInitialized = false
+  const writeWarningCodes = new Set(['capacity', 'lock_busy', 'durability_unconfirmed',
+    'state_unavailable', 'transaction_async', 'transaction_reentry',
+    'ENOSPC', 'EIO', 'EACCES', 'EROFS'])
+  engine.store.onCommit = durability => {
+    if (durability === 'confirmed') {
+      runtimeWriteReason = null
+      runtimeReadReason = null
+    } else runtimeWriteReason = 'durability_unconfirmed'
+  }
+  const noteStorageFailure = (error, reason, operation = 'write') => {
+    if (operation === 'write' && writeWarningCodes.has(error.code)) runtimeWriteReason = error.code
+    else runtimeReadReason = error.code
+    engine.noteCollectionSkip(reason)
+  }
+  const safeStoreAction = (reason, action, operation = 'write') => {
     try { return action() } catch (error) {
-      if (!['state_unavailable', 'invalid_memory', 'invalid_store', 'capacity', 'ENOSPC', 'EIO',
-        'EACCES', 'EROFS'].includes(error?.code)) throw error
-      engine.noteCollectionSkip(reason)
+      if (!isMemoryStorageError(error)) throw error
+      noteStorageFailure(error, reason, operation)
       return null
+    }
+  }
+  const readRsiStore = () => {
+    try { return engine.store.read() } catch (error) {
+      if (!isMemoryStorageError(error)) throw error
+      return null
+    }
+  }
+  const RSI_TRACE_STAGES = new Set(['admission', 'probe', 'tool_result', 'pending', 'settled'])
+  const RSI_TRACE_REASONS = new Set([
+    'probe_created', 'failure_admitted', 'failure_duplicate', 'failure_rejected',
+    'source_refused', 'material_refused', 'output_incomplete', 'cancelled', 'no_failure',
+    'pending_signal', 'no_pending_signal', 'storage_unavailable', 'no_adaptive_decision',
+    'unknown_outcome', 'unique_native_method_match', 'independent_same_objective',
+    'same_session_or_query', 'competing_method_failure', 'same_signature_recurrence',
+    'native_checker_failure', 'cancelled_or_unknown', 'source_revoked', 'material_revoked',
+    'policy_stale', 'insufficient_safe_features', 'already_tracked', 'candidate_not_additive',
+    'ambiguous_native_failure', 'baseline_explains_failure', 'stale_probe', 'probe_capacity',
+    'independent_unmatched_objective', 'awaiting_negative_control', 'strategy_disabled',
+    'revision_limit', 'same_mechanism_rejected', 'counterexample_child', 'policy_disabled',
+  ])
+  const RSI_TRACE_RESULTS = new Set(['created', 'holdout_hit', 'negative_control', 'approved',
+    'rejected', 'isolated', 'unknown', 'feature_refused'])
+  const RSI_TRACE_OUTCOMES = new Set(['failed', 'cancelled', 'unknown', 'verified'])
+  const recordRsiTrace = (turnKey, stage, reason, details = {}) => {
+    if (!rsiProbeTurns.has(turnKey) || !RSI_TRACE_STAGES.has(stage)
+      || !RSI_TRACE_REASONS.has(reason)) return
+    const result = RSI_TRACE_RESULTS.has(details.result) ? details.result : null
+    const outcome = RSI_TRACE_OUTCOMES.has(details.outcome) ? details.outcome : null
+    rsiTraceRows.push({ stage, reason, turnHash: turnKey.slice(0, 12),
+      policyId: traceShortId(details.policyId), entryId: traceShortId(details.entryId),
+      version: Number.isSafeInteger(details.version) ? details.version : null,
+      result, outcome, at: Number.isSafeInteger(details.at) ? details.at : Date.now() })
+    if (rsiTraceRows.length > RSI_TRACE_LIMIT) rsiTraceRows.shift()
+  }
+  const rememberRsiProbe = probe => {
+    if (!/^[a-f0-9]{64}$/u.test(probe?.turnKey ?? '')) return false
+    if (!rsiProbeTurns.has(probe.turnKey) && rsiProbeTurns.size >= RSI_TRACE_LIMIT) {
+      rsiProbeTurns.delete(rsiProbeTurns.keys().next().value)
+    }
+    rsiProbeTurns.set(probe.turnKey, true)
+    const policyId = [...(probe.activePolicies ?? []), ...(probe.shadowPolicies ?? []),
+      ...(probe.controlPolicies ?? [])].find(value => traceShortId(value) !== null) ?? null
+    const target = [...(probe.offered ?? []), ...(probe.baselineOffers ?? [])]
+      .find(row => traceShortId(row?.id) !== null)
+    recordRsiTrace(probe.turnKey, 'probe', 'probe_created', {
+      policyId, entryId: target?.id ?? null, version: target?.version,
+      at: Number.isSafeInteger(probe.at) ? probe.at : undefined,
+    })
+    return true
+  }
+  const recordRsiPending = turnKey => {
+    if (!rsiProbeTurns.has(turnKey)) return
+    const doc = readRsiStore()
+    if (doc === null) {
+      recordRsiTrace(turnKey, 'pending', 'storage_unavailable')
+      return
+    }
+    const probe = doc.recallStrategy.adaptive.probes.find(row => row.turnKey === turnKey)
+    if (probe === undefined || probe.pending.length === 0) {
+      recordRsiTrace(turnKey, 'pending', 'no_pending_signal')
+      return
+    }
+    for (const signal of probe.pending) {
+      const reason = RSI_TRACE_REASONS.has(signal.reason) ? signal.reason : 'pending_signal'
+      recordRsiTrace(turnKey, 'pending', reason, { policyId: signal.policyId,
+        entryId: signal.entryId, version: signal.version, at: signal.at })
+    }
+  }
+  const recordRsiSettlement = (turnKey, fallbackOutcome) => {
+    if (!rsiProbeTurns.has(turnKey)) return
+    const doc = readRsiStore()
+    if (doc === null) {
+      recordRsiTrace(turnKey, 'settled', 'storage_unavailable', { outcome: fallbackOutcome })
+      rsiProbeTurns.delete(turnKey)
+      return
+    }
+    const storedOutcome = doc.turnFacts.find(row => row.turnKey === turnKey)?.outcome
+    const outcome = RSI_TRACE_OUTCOMES.has(storedOutcome) ? storedOutcome
+      : RSI_TRACE_OUTCOMES.has(fallbackOutcome) ? fallbackOutcome : 'unknown'
+    const decisions = doc.recallStrategy.adaptive.decisions
+      .filter(row => row.turnKey === turnKey).slice(-8)
+    if (decisions.length === 0) {
+      recordRsiTrace(turnKey, 'settled', outcome === 'unknown'
+        ? 'unknown_outcome' : 'no_adaptive_decision', { result: 'unknown', outcome })
+    } else {
+      for (const decision of decisions) {
+        const reason = RSI_TRACE_REASONS.has(decision.reason) ? decision.reason : 'unknown_outcome'
+        recordRsiTrace(turnKey, 'settled', reason, { policyId: decision.policyId,
+          entryId: decision.entryId, version: decision.version, result: decision.result,
+          outcome, at: decision.at })
+      }
+    }
+    rsiProbeTurns.delete(turnKey)
+  }
+  const statusView = () => {
+    const view = engine.statusView()
+    if (view.storage?.available === false) return { ...view, rsiDiagnostics: rsiTraceView() }
+    runtimeReadReason = null // a successful read clears only read-side degradation
+    if (view.storage?.available === true && runtimeWriteReason !== null) {
+      return { ...view, storage: { ...view.storage, reason: runtimeWriteReason },
+        rsiDiagnostics: rsiTraceView() }
+    }
+    return { ...view, rsiDiagnostics: rsiTraceView() }
+  }
+  const ensureStoreReady = () => {
+    let operation = 'write'
+    try {
+      if (!staleWorkReconciled) {
+        try { engine.abandonStale(); staleWorkReconciled = true }
+        catch (error) { if (error?.committed === true) staleWorkReconciled = true; throw error }
+      } else {
+        operation = 'read'
+        engine.store.read()
+      }
+      if (!digestInitialized) {
+        operation = 'write'
+        try { engine.syncDigest(); digestInitialized = true }
+        catch (error) { if (error?.committed === true) digestInitialized = true; throw error }
+      }
+      runtimeReadReason = null
+      return true
+    } catch (error) {
+      if (!isMemoryStorageError(error)) throw error
+      noteStorageFailure(error, 'store_unavailable', operation)
+      return false
     }
   }
   // Settings arrive either as plain values (embedded/test host) or as volatile schemastery
@@ -141,7 +295,7 @@ export function apply(ctx, config = {}) {
   const diagnosticSlots = new Map()
   let disposed = false
   let running = null // the ONE in-process background slot; freed only after the request exited
-  const foregroundTurns = new Set()
+  const foregroundTurns = new Map()
   const turnHasFailure = new Map()
   // Turns whose CURRENT material the host cannot permit (explicit outside-file references):
   // no learning side effect at all — not immediate saves, not the queue, not turnFacts, and
@@ -154,8 +308,7 @@ export function apply(ctx, config = {}) {
   if (existsSync(legacyPath)) {
     try { engine.importOld(readFileSync(legacyPath, 'utf8'), 'startup') } catch { /* source unreadable: skip, file untouched */ }
   }
-  engine.abandonStale()
-  engine.syncDigest()
+  ensureStoreReady()
 
   const sessionIdOf = session => {
     const id = session?.id ?? session?.header?.id
@@ -395,7 +548,9 @@ export function apply(ctx, config = {}) {
     const sessionId = sessionIdOf(session)
     const turn = payload?.turn
     const decision = await next(payload)
+    try {
     if (disposed || payload?.step !== 1 || sessionId === undefined || turn === undefined) return decision
+    if (!ensureStoreReady()) return decision
     // Only messages the HOST attributes to the person: role user, source kind user, and never
     // anything MSE or another plugin produced (quoted recall text must not re-learn itself).
     const trusted = (payload?.messages ?? []).filter(message => message?.role === 'user'
@@ -406,9 +561,25 @@ export function apply(ctx, config = {}) {
     // collection and model inputs, never the host's normal work.
     const wsRoots = workspaceRoots()
     const inWorkspace = attribution(sessionId, wsRoots)
+    let taskContext = []
     if (userText !== '' && !inWorkspace) {
+      recordRsiTrace(traceTurnKey(sessionId, turn), 'admission', 'source_refused')
       engine.noteCollectionSkip(wsRoots === null ? 'registry_unavailable' : 'session_unattributed',
         wsRoots === null ? 0 : wsRoots.length)
+    }
+    const agentRoute = payload?.agent?.options
+    let routeRecorded = false
+    const recordTurnFactsSeparately = () => {
+      try {
+        engine.recordTurnFacts({ sessionId, turnId: String(turn), taskSummary: userText.slice(0, 200) })
+      } catch (error) {
+        const code = typeof error?.code === 'string' ? error.code : ''
+        if (code === 'invalid_memory' || code === 'capacity') {
+          engine.noteCollectionSkip('turn_facts_rejected', wsRoots.length)
+        } else if (code === 'state_unavailable') {
+          engine.noteCollectionSkip('store_unavailable', wsRoots.length)
+        } else throw error
+      }
     }
     if (userText !== '' && inWorkspace) {
       // UNIFIED material gate (stage-3b): collected material for THIS turn is screened for
@@ -416,6 +587,7 @@ export function apply(ctx, config = {}) {
       // the candidate queue and turnFacts alike. Refusal is a readable skip reason (no path or
       // content in it); the agent's next step proceeds normally.
       if (textMentionsOutside(userText, wsRoots, cwdOf(session))) {
+        recordRsiTrace(traceTurnKey(sessionId, turn), 'admission', 'material_refused')
         engine.noteCollectionSkip('turn_material_outside', wsRoots.length)
         if (rejectedTurns.size > 512) rejectedTurns.clear()
         rejectedTurns.add(`${sessionId}\u0000${String(turn)}`)
@@ -432,6 +604,12 @@ export function apply(ctx, config = {}) {
         engine.noteCollectionSkip('store_unavailable', wsRoots === null ? 0 : wsRoots.length)
         return decision
       }
+      // Reuse the same bounded, end-turn-checked context collector for task disambiguation.
+      // The full current turn and each selected historical item have already passed the real
+      // workspace/material gate before any lexical feature extraction or adaptive write.
+      const ctxCollected = collectCorrectionContext(session, payload?.messages,
+        trusted[trusted.length - 1], turn, wsRoots)
+      taskContext = ctxCollected.items
       // Only the CURRENT request counts as a correction: the last trusted user message of this
       // turn — never older/history messages, and never a question (「以后谁负责…」 asks, it does
       // not instruct). No new recognition system: one position, one question test.
@@ -496,8 +674,6 @@ export function apply(ctx, config = {}) {
           // brief that cannot be proven inside → conservatively not collected (reason+count
           // only — no path, body or content hash persists).
           const cwdHere = cwdOf(session)
-          const ctxCollected = collectCorrectionContext(session, messages,
-            trusted[trusted.length - 1], turn, wsRoots)
           if (textMentionsOutside(material, wsRoots, cwdHere)
             || (assistantBrief !== null && textMentionsOutside(assistantBrief, wsRoots, cwdHere))) {
             engine.noteCollectionSkip('material_outside_reference', wsRoots.length)
@@ -523,24 +699,33 @@ export function apply(ctx, config = {}) {
           }
         }
       }
-      try {
-        engine.recordTurnFacts({ sessionId, turnId: String(turn), taskSummary: userText.slice(0, 200) })
-      } catch (error) {
-        const code = typeof error?.code === 'string' ? error.code : ''
-        if (code === 'invalid_memory' || code === 'capacity') {
-          engine.noteCollectionSkip('turn_facts_rejected', wsRoots.length)
-        } else if (code === 'state_unavailable') {
-          engine.noteCollectionSkip('store_unavailable', wsRoots.length)
-        } else throw error
+      if (agentRoute === undefined) recordTurnFactsSeparately()
+      else {
+        try {
+          engine.recordTurnFactsAndRoute({ sessionId, turnId: String(turn),
+            taskSummary: userText.slice(0, 200), route: agentRoute })
+          routeRecorded = true
+        } catch (error) {
+          // Keep the old capacity partial-success contract: if facts fit but the route does not,
+          // persist facts first, then let the standalone route write refuse at the same bound.
+          if (error?.code !== 'capacity' || error?.committed === true) throw error
+          recordTurnFactsSeparately()
+        }
       }
     }
     // The host-reported route for THIS session becomes the frozen source of background work —
     // recorded with the session, never borrowed across projects, overridable only by settings.
-    const agentRoute = payload?.agent?.options
-    if (agentRoute !== undefined) engine.observeRoute({ sessionId, route: agentRoute })
+    if (agentRoute !== undefined && !routeRecorded) engine.observeRoute({ sessionId, route: agentRoute })
     if (decision?.kind !== 'enter') return decision
     const prepared = engine.prepare({ sessionId, turnId: String(turn),
-      projectKey: cwdOf(session), prompt: userText, strategyEligible: userText !== '' && inWorkspace })
+      projectKey: cwdOf(session), prompt: userText, taskContext,
+      strategyEligible: userText !== '' && inWorkspace })
+    if (inWorkspace && userText !== '') {
+      const turnKey = typeof prepared.turnKey === 'string' ? prepared.turnKey : traceTurnKey(sessionId, turn)
+      const doc = readRsiStore()
+      const probe = doc?.recallStrategy.adaptive.probes.find(row => row.turnKey === turnKey)
+      if (probe !== undefined) rememberRsiProbe(probe)
+    }
     if (prepared.context !== '') {
       decision.messages = [...decision.messages, createUserMessage({
         content: [{ type: 'text',
@@ -548,6 +733,11 @@ export function apply(ctx, config = {}) {
         source: mseMessageSource('instructions') })]
     }
     return decision
+    } catch (error) {
+      if (!isMemoryStorageError(error)) throw error
+      noteStorageFailure(error, 'store_unavailable')
+      return decision
+    }
   }))
 
   // ── native file facts → real checker on the PROJECT's JSON artifacts (not the data dir) ─────
@@ -556,6 +746,12 @@ export function apply(ctx, config = {}) {
   // before the turn settles and bound ONLY to the receipt's JSON-relevant injected versions.
   const jsonWrites = new Map()      // exec.token → {sessionId, turnId, file, cwd, callId}
   const pendingChecks = new Map()   // `${sessionId}\u0000${turnId}` → [{file, cwd, callId}]
+  const pendingDevelopmentChecks = new Map() // turn key → bounded checks; credit requires persisted tool/result
+  const pairedDevelopmentCapacity = (map, key, callId) => {
+    const rows = map.get(key) ?? []
+    return (map.has(key) || map.size < 64) && rows.length < 16
+      && !rows.some(row => row.callId === callId)
+  }
   const isJsonMutation = exec => {
     const args = exec?.arguments
     if (typeof args !== 'object' || args === null) return null
@@ -618,14 +814,36 @@ export function apply(ctx, config = {}) {
   }))
 
   // ── trusted tool facts (rc.4 result shape; precedence cancelled→timeout→error→exit) ─────────
-  const callEventOf = (exec, session) => {
+  const callEventLocationOf = (callId, session) => {
     if (typeof session?.eventAt !== 'function' || !Number.isSafeInteger(session?.seq)) return null
     for (let i = session.seq - 1, seen = 0; i >= 0 && seen < 400; i -= 1, seen += 1) {
       const event = session.eventAt(i)
       if (event?.type === 'tool/call'
-        && (event?.data?.callId === (exec.rootCallId ?? exec.callId))) return event
+        && event?.data?.callId === callId) return { event, seq: i }
     }
     return null
+  }
+  const callEventOf = (exec, session) => callEventLocationOf(
+    exec.rootCallId ?? exec.callId, session)?.event ?? null
+  const developmentCallOf = (exec, session, sessionId) => {
+    const callId = exec?.rootCallId ?? exec?.callId
+    if (exec?.name !== 'bash' || typeof callId !== 'string' || callId.length === 0
+      || callId.length > 512) return null
+    const located = callEventLocationOf(callId, session)
+    const callEvent = located?.event
+    if (callEvent?.data?.callId !== callId || callEvent.data.name !== exec.name) return null
+    const turn = turnOfCall(session, callId)
+    const step = callEvent.data.step
+    if (!Number.isSafeInteger(turn) || !Number.isSafeInteger(callEvent.data.turn)
+      || !Number.isSafeInteger(step) || turn !== callEvent.data.turn
+      || foregroundTurns.get(sessionId) !== String(turn)) return null
+    let args = callEvent.data.arguments
+    if (typeof args === 'string') {
+      try { args = JSON.parse(args) } catch { return null }
+    }
+    if (args === null || typeof args !== 'object' || Array.isArray(args)
+      || Object.getPrototypeOf(args) !== Object.prototype || typeof args.command !== 'string') return null
+    return { callId, turnId: String(turn), step, callSeq: located.seq, command: args.command }
   }
   disposers.push(ctx.on('tools/result', (exec, result) => {
     const earlySession = exec?.agent?.session
@@ -633,12 +851,55 @@ export function apply(ctx, config = {}) {
     if (earlyId !== undefined) {
       const atRoots = workspaceRoots()
       if (!attribution(earlyId, atRoots)) {
+        const earlyTurn = turnOfCall(earlySession, exec.rootCallId ?? exec.callId)
+        if (Number.isSafeInteger(earlyTurn)) {
+          recordRsiTrace(traceTurnKey(earlyId, earlyTurn), 'tool_result', 'source_refused')
+        }
         // Every learning side effect of this handler — cancellation counters, JSON-write/checker
         // plumbing, failure capsules — requires a host-confirmed source session.
         engine.noteCollectionSkip(atRoots === null ? 'registry_unavailable' : 'session_unattributed',
           atRoots === null ? 0 : atRoots.length)
         jsonWrites.delete(exec?.token)
         return
+      }
+    }
+    if (earlyId !== undefined) {
+      const call = developmentCallOf(exec, earlySession, earlyId)
+      if (call !== null) {
+        const roots = workspaceRoots()
+        const value = result?.value
+        const stdout = value?.stdout?.text
+        const stderr = value?.stderr?.text
+        const completeOutput = typeof stdout === 'string' && typeof stderr === 'string'
+          && stdout.length <= 256 * 1024 && stderr.length <= 64 * 1024
+          && value.stdout.truncated === false && value.stderr.truncated === false
+          && String(result?.error?.message ?? '').length <= 64 * 1024
+        if (roots === null) {
+          engine.noteCollectionSkip('registry_unavailable', 0)
+        } else if (completeOutput && realInside(value?.cwd, roots)
+          && !textMentionsOutside(call.command, roots, cwdOf(earlySession))
+          && !textMentionsOutside(`${stdout}\n${stderr}\n${result?.error?.message ?? ''}`, roots, null)) {
+          const checked = runDevelopmentChecker({ command: call.command, result })
+          if (checked.checkId !== null && ['pass', 'fail'].includes(checked.status)) {
+            const key = `${earlyId}\u0000${call.turnId}`
+            const offers = safeStoreAction('checker_state_unavailable', () =>
+              engine.developmentRelevantOffers({ sessionId: earlyId, turnId: call.turnId,
+                command: call.command }), 'read') ?? []
+            if (offers.length === 1 && pairedDevelopmentCapacity(pendingDevelopmentChecks, key,
+              call.callId)) {
+              if (!pendingDevelopmentChecks.has(key)) pendingDevelopmentChecks.set(key, [])
+              pendingDevelopmentChecks.get(key).push({ callId: call.callId, callSeq: call.callSeq,
+                step: call.step, persisted: false, isError: result?.isError === true,
+                checkId: checked.checkId,
+                passed: checked.status === 'pass', summary: checked.evidence,
+                entryId: offers[0].id, entryVersion: offers[0].version })
+            }
+          }
+        } else if (!completeOutput) {
+          engine.noteCollectionSkip('development_check_incomplete_output')
+        } else {
+          engine.noteCollectionSkip('development_check_material_refused', roots.length)
+        }
       }
     }
     const write = jsonWrites.get(exec?.token)
@@ -654,20 +915,26 @@ export function apply(ctx, config = {}) {
     const sessionId = sessionIdOf(session)
     if (sessionId === undefined) return
     const turn = turnOfCall(session, exec.rootCallId ?? exec.callId)
+    const rsiTurnKey = Number.isSafeInteger(turn) ? traceTurnKey(sessionId, turn) : null
     const turnId = String(turn ?? '?')
     const cancelled = exec.signal?.aborted === true || result.value?.cancelled === true
       || result.value?.aborted === true
       || (result.isError === true && ['ABORTED', 'ABORTED_BEFORE_DISPATCH'].includes(result.error?.info?.code))
     if (cancelled) {
-      safeStoreAction('tool_state_unavailable', () =>
+      const cancellation = safeStoreAction('tool_state_unavailable', () =>
         engine.recordCancellation({ sessionId, turnId, callId: exec.callId }))
+      if (rsiTurnKey !== null) recordRsiTrace(rsiTurnKey, 'tool_result',
+        cancellation === null ? 'storage_unavailable' : 'cancelled', { outcome: 'cancelled' })
       return
     }
     const failureCode = result.value?.timedOut === true ? 'tool_timeout'
       : result.isError === true ? 'tool_error_flag'
         : (typeof result.value?.exitCode === 'number' && result.value.exitCode !== 0
           ? 'tool_nonzero_exit' : null)
-    if (failureCode === null) return
+    if (failureCode === null) {
+      if (rsiTurnKey !== null) recordRsiTrace(rsiTurnKey, 'tool_result', 'no_failure')
+      return
+    }
     // Boundary for tool material (before any capsule side effect): structured arguments are
     // serialized (a non-string argument is never treated as an empty command); absolute AND
     // relative path forms are realpath-checked against the registered workspaces; explicit
@@ -676,6 +943,7 @@ export function apply(ctx, config = {}) {
     const toolRoots = workspaceRoots()
     if (toolRoots === null) {
       engine.noteCollectionSkip('registry_unavailable', 0)
+      if (rsiTurnKey !== null) recordRsiTrace(rsiTurnKey, 'tool_result', 'source_refused')
       return
     }
     const callEvent = callEventOf(exec, session)
@@ -684,19 +952,38 @@ export function apply(ctx, config = {}) {
       : (rawArgs === undefined || rawArgs === null ? '' : JSON.stringify(rawArgs))
     if (textMentionsOutside(commandText, toolRoots, cwdOf(session))) {
       engine.noteCollectionSkip('tool_material_outside', toolRoots.length)
+      if (rsiTurnKey !== null) recordRsiTrace(rsiTurnKey, 'tool_result', 'material_refused')
       return
     }
-    const outputText = `${result.value?.stderr?.text ?? ''}
-${result.error?.message ?? ''}`
+    const stdout = typeof result.value?.stdout?.text === 'string' ? result.value.stdout.text : ''
+    const stderr = typeof result.value?.stderr?.text === 'string' ? result.value.stderr.text : ''
+    const errorText = typeof result.error?.message === 'string' ? result.error.message : ''
+    if (stdout.length > 256 * 1024 || stderr.length > 64 * 1024 || errorText.length > 64 * 1024
+      || result.value?.stdout?.truncated === true || result.value?.stderr?.truncated === true) {
+      engine.noteCollectionSkip('tool_output_incomplete')
+      if (rsiTurnKey !== null) recordRsiTrace(rsiTurnKey, 'tool_result', 'output_incomplete')
+      return
+    }
+    const outputText = `${stdout}\n${stderr}\n${errorText}`
     if (textMentionsOutside(outputText, toolRoots, null)) {
       engine.noteCollectionSkip('tool_output_outside', toolRoots.length)
+      if (rsiTurnKey !== null) recordRsiTrace(rsiTurnKey, 'tool_result', 'material_refused')
       return
     }
     turnHasFailure.set(`${sessionId}\u0000${turnId}`, true)
-    safeStoreAction('tool_state_unavailable', () => engine.observeToolFailure({ sessionId, turnId,
+    const observed = safeStoreAction('tool_state_unavailable', () => engine.observeToolFailure({ sessionId, turnId,
       projectKey: cwdOf(session), callId: exec.callId, toolName: exec.name, failureCode,
-      exitCode: result.value?.exitCode ?? null, stderr: result.value?.stderr?.text ?? null,
-      error: result.error?.message ?? null, command: commandText === '' ? null : commandText }))
+      exitCode: result.value?.exitCode ?? null, stdout, stderr,
+      error: errorText === '' ? null : errorText, command: commandText === '' ? null : commandText }))
+    if (rsiTurnKey !== null) {
+      if (observed === null) recordRsiTrace(rsiTurnKey, 'tool_result', 'storage_unavailable')
+      else if (observed.ok === true && observed.duplicate === true) {
+        recordRsiTrace(rsiTurnKey, 'tool_result', 'failure_duplicate')
+      } else if (observed.ok === true) {
+        recordRsiTrace(rsiTurnKey, 'tool_result', 'failure_admitted')
+        recordRsiPending(rsiTurnKey)
+      } else recordRsiTrace(rsiTurnKey, 'tool_result', 'failure_rejected')
+    }
   }))
 
   // ── turn facts and settlement (persistent identity; idempotent) ────────────────────────────
@@ -764,17 +1051,79 @@ ${result.error?.message ?? ''}`
     }
   }
 
+  // The host calls tools/result before BatchSettlement.commit appends session tool/result.
+  // Keep only the bounded count-only observation until that exact durable event appears.
+  const capturePersistedDevelopmentResult = (session, event, sessionId) => {
+    if (event?.type !== 'tool/result' || sessionId === undefined) return
+    const turn = event.data?.turn
+    const step = event.data?.step
+    const callId = event.data?.message?.toolCallId
+    if (!Number.isSafeInteger(turn) || !Number.isSafeInteger(step)
+      || typeof callId !== 'string' || foregroundTurns.get(sessionId) !== String(turn)) return
+    const key = `${sessionId}\u0000${String(turn)}`
+    const rows = pendingDevelopmentChecks.get(key)
+    const row = rows?.find(item => item.callId === callId && item.step === step && item.persisted !== true)
+    if (row === undefined) return
+    const message = event.data.message
+    const call = session?.eventAt?.(row.callSeq)
+    if (call?.type !== 'tool/call' || call.data?.callId !== callId || call.data?.name !== 'bash'
+      || call.data?.turn !== turn || call.data?.step !== step
+      || message?.role !== 'tool' || message?.source?.kind !== 'tool'
+      || message.source.callId !== callId
+      || typeof message?.isError !== 'boolean' || message.isError !== row.isError) return
+    if (typeof session?.eventAt !== 'function' || !Number.isSafeInteger(session?.seq)) return
+    const exactLoggedResult = logged => logged?.type === 'tool/result'
+      && logged.data?.turn === turn && logged.data?.step === step
+      && logged.data?.message?.toolCallId === callId
+    let resultSeq = Number.isSafeInteger(event.seq) && exactLoggedResult(session.eventAt(event.seq))
+      ? event.seq : -1
+    if (resultSeq < 0) {
+      for (let i = session.seq - 1, seen = 0; i >= 0 && seen < 32; i -= 1, seen += 1) {
+        if (session.eventAt(i) === event || exactLoggedResult(session.eventAt(i))) {
+          resultSeq = i
+          break
+        }
+      }
+    }
+    if (resultSeq <= row.callSeq || !exactLoggedResult(session.eventAt(resultSeq))) return
+    const roots = workspaceRoots()
+    const output = Array.isArray(message.content) ? textsOf(message).join('\n') : ''
+    const eventError = String(event.data?.error?.message ?? '')
+    if (roots === null) {
+      engine.noteCollectionSkip('registry_unavailable', 0)
+      return
+    }
+    if (output.length > 320 * 1024 || eventError.length > 64 * 1024
+      || !attribution(sessionId, roots)
+      || textMentionsOutside(`${output}\n${eventError}`, roots, null)) {
+      if (output.length > 320 * 1024 || eventError.length > 64 * 1024) {
+        engine.noteCollectionSkip('development_check_incomplete_output')
+      } else {
+        engine.noteCollectionSkip('development_check_material_refused', roots.length)
+      }
+      return
+    }
+    row.persisted = true
+  }
+
   disposers.push(ctx.on('session/event', (session, event) => {
     const sessionId = sessionIdOf(session)
+    capturePersistedDevelopmentResult(session, event, sessionId)
     ingestDiagnosticEvent(sessionId, session, event)
-    if (event?.type === 'turn/start' && sessionId !== undefined) foregroundTurns.add(sessionId)
+    if (event?.type === 'turn/start' && sessionId !== undefined
+      && Number.isSafeInteger(event.data?.turn)) foregroundTurns.set(sessionId, String(event.data.turn))
     if (event?.type !== 'turn/end' || sessionId === undefined) return
-    foregroundTurns.delete(sessionId)
     const turn = event?.data?.turn
     if (turn === undefined) return
+    const rsiTurnKey = Number.isSafeInteger(turn) ? traceTurnKey(sessionId, turn) : null
+    if (foregroundTurns.get(sessionId) === String(turn)) foregroundTurns.delete(sessionId)
     {
       const endRoots = workspaceRoots()
       if (!attribution(sessionId, endRoots)) {
+        if (rsiTurnKey !== null) {
+          recordRsiTrace(rsiTurnKey, 'settled', 'source_refused', { outcome: 'unknown' })
+          rsiProbeTurns.delete(rsiTurnKey)
+        }
         // complete()/checker results would REBUILD persistent facts — refused for sources the
         // host does not confirm; bookkeeping maps drop the keys, the host's turn stays intact.
         engine.noteCollectionSkip(endRoots === null ? 'registry_unavailable' : 'session_unattributed',
@@ -782,14 +1131,20 @@ ${result.error?.message ?? ''}`
         const dropKey = `${sessionId}\u0000${String(turn)}`
         turnHasFailure.delete(dropKey)
         pendingChecks.delete(dropKey)
+        pendingDevelopmentChecks.delete(dropKey)
         return
       }
     }
     if (rejectedTurns.delete(`${sessionId}\u0000${String(turn)}`)) {
+      if (rsiTurnKey !== null) {
+        recordRsiTrace(rsiTurnKey, 'settled', 'material_refused', { outcome: 'unknown' })
+        rsiProbeTurns.delete(rsiTurnKey)
+      }
       // Material for this turn was refused pre-persistence; settlement must not rebuild it.
       const dropKey = `${sessionId}\u0000${String(turn)}`
       turnHasFailure.delete(dropKey)
       pendingChecks.delete(dropKey)
+      pendingDevelopmentChecks.delete(dropKey)
       return
     }
     const reason = event?.data?.reason?.kind
@@ -801,15 +1156,26 @@ ${result.error?.message ?? ''}`
     // An exit-0 with no applicable checker stays UNKNOWN — never a fake verified.
     const checks = pendingChecks.get(key) ?? []
     pendingChecks.delete(key)
+    const developmentChecks = (pendingDevelopmentChecks.get(key) ?? [])
+      .filter(check => check.persisted === true)
+    pendingDevelopmentChecks.delete(key)
     const cancelled = reason === 'aborted'
     let checkSeen = null // {file, status, reason} — failures dominate passes objectively
     // A CANCELLED turn settles as cancelled, full stop: an artifact that happened to land first
     // gets no success credit and no recurrence charge for anybody's lesson — the queue is dropped.
     if (cancelled) pendingChecks.delete(key)
+    for (const check of cancelled ? [] : developmentChecks) {
+      safeStoreAction('checker_state_unavailable', () => engine.recordCheck({
+        checkId: check.checkId, passed: check.passed, evidence: check.summary, summary: check.summary,
+        sessionId, turnId: String(turn), entryId: check.entryId, entryVersion: check.entryVersion,
+        sourceRequired: true,
+        eventId: `development-check:${check.callId}` }))
+    }
     for (const check of cancelled ? [] : checks) {
       const report = runChecker('json-file-parses-v1', { file: check.file, root: check.cwd })
       if (report.status === 'not_applicable') continue
-      const offers = engine.jsonRelevantOffers({ sessionId, turnId: String(turn) })
+      const offers = safeStoreAction('checker_state_unavailable', () =>
+        engine.jsonRelevantOffers({ sessionId, turnId: String(turn) }), 'read') ?? []
       if (offers.length > 0) {
         safeStoreAction('checker_state_unavailable', () => engine.recordCheck({
           checkId: report.checkId, passed: report.status === 'pass',
@@ -823,13 +1189,19 @@ ${result.error?.message ?? ''}`
     }
     const outcome = cancelled ? 'cancelled' : failed ? 'failed'
       : checkSeen !== null ? (checkSeen.status === 'pass' ? 'verified' : 'failed') : 'unknown'
-    safeStoreAction('turn_state_unavailable', () => engine.complete({ sessionId, turnId: String(turn), outcome,
+    const completed = safeStoreAction('turn_state_unavailable', () => engine.complete({ sessionId, turnId: String(turn), outcome,
       evidence: outcome === 'failed' ? (failed ? '本回合存在真实工具失败记录'
         : `产物检查未通过：${checkSeen.file}（${checkSeen.reason}）`)
         : outcome === 'cancelled' ? '回合被取消'
           : outcome === 'verified' ? `产物检查通过：${checkSeen.file}（${checkSeen.reason}）`
             : '回合完成，无客观检查记录' }))
-    void engine.syncDigest()
+    safeStoreAction('turn_digest_sync_unavailable', () => engine.syncDigest())
+    if (rsiTurnKey !== null && rsiProbeTurns.has(rsiTurnKey)) {
+      if (completed === null) {
+        recordRsiTrace(rsiTurnKey, 'settled', 'storage_unavailable', { outcome })
+        rsiProbeTurns.delete(rsiTurnKey)
+      } else recordRsiSettlement(rsiTurnKey, outcome)
+    }
     // Soon-after-source-turn processing over the SAME running slot: wake() holds when busy or
     // paused; the candidate stays a persistent todo until the next idle chance — no new timer.
     if (reason !== 'aborted') void wake()
@@ -842,14 +1214,17 @@ ${result.error?.message ?? ''}`
     for (const key of [...diagnosticSlots.keys()]) {
       if (key.startsWith(`${gone}\u0000`)) diagnosticSlots.delete(key)
     }
+    for (const key of [...pendingDevelopmentChecks.keys()]) {
+      if (key.startsWith(`${gone}\u0000`)) pendingDevelopmentChecks.delete(key)
+    }
   }))
 
   // ── one background slot over the explicit configured route ─────────────────────────────────
   async function runBackground(prepared) {
     const lifetime = new AbortController()
     running = { ticket: prepared.ticket, lifetime }
-    engine.markDispatched(prepared.ticket) // audit marks dispatch BEFORE the wire is touched
     try {
+      engine.markDispatched(prepared.ticket) // audit marks dispatch BEFORE the wire is touched
       const answer = await readModel(ctx, { route: prepared.request.route, system: prepared.request.system,
         prompt: prepared.request.text, maxTokens: prepared.request.maxTokens,
         signal: AbortSignal.any([lifetime.signal, AbortSignal.timeout(60_000)]),
@@ -877,6 +1252,10 @@ ${result.error?.message ?? ''}`
           outputBytes: answer.outputBytes ?? null, finishKind: answer.finishKind ?? null })
       }
     } catch (error) {
+      if (isMemoryStorageError(error)) {
+        noteStorageFailure(error, 'background_state_unavailable')
+        return // the provider result is never replayed or blindly aborted after a storage failure
+      }
       // Failures carry the REAL measured fields (or nothing) — never a total masquerading as output.
       const raw = error?.usage
       const usage = raw !== undefined && raw !== null ? {
@@ -886,8 +1265,9 @@ ${result.error?.message ?? ''}`
         cacheWrite: Number.isSafeInteger(raw.cacheWriteTokens) ? raw.cacheWriteTokens : null,
         reasoning: Number.isSafeInteger(raw.reasoningTokens) ? raw.reasoningTokens : null,
         total: usageTokens(raw) } : null
-      engine.abortWork({ ticket: prepared.ticket, failure: error?.code ?? 'model_failed', usage,
-        outputBytes: error?.outputBytes ?? null, finishKind: error?.finishKind ?? null })
+      safeStoreAction('background_state_unavailable', () => engine.abortWork({ ticket: prepared.ticket,
+        failure: error?.code ?? 'model_failed', usage,
+        outputBytes: error?.outputBytes ?? null, finishKind: error?.finishKind ?? null }))
     } finally {
       running = null
     }
@@ -904,6 +1284,10 @@ ${result.error?.message ?? ''}`
       if (disposed) return
       const code = typeof error?.code === 'string' && /^[a-z_]{1,48}$/u.test(error.code)
         ? error.code : 'unexpected'
+      if (isMemoryStorageError(error)) {
+        noteStorageFailure(error, 'wake_state_unavailable')
+        return
+      }
       // This path is also called without await from a host observer. Keep scheduler defects
       // observable without letting a rejected promise terminate the entire DSH host.
       try { engine.store.transaction(doc => { doc.digest.waitReason = `background_error_${code}`; return true }) }
@@ -917,8 +1301,8 @@ ${result.error?.message ?? ''}`
     if (disposed || running !== null) return
     refreshSettings() // volatile settings are live: a route change takes effect at the next wake
     engine.busy = foregroundTurns.size > 0
-    engine.abandonStale()
-    void engine.syncDigest()
+    if (!ensureStoreReady()) return
+    if (safeStoreAction('wake_state_unavailable', () => engine.syncDigest()) === null) return
     // Either an explicit settings route or a host-reported session route unlocks background work;
     // the default (observed) route needs NO new user-filled fields to work after installation.
     if (engine.busy || engine.paused || !engine.hasRoute()) return
@@ -953,7 +1337,7 @@ ${result.error?.message ?? ''}`
   // ── host surfaces: core service + typed Remotes (the released registration pattern) ────────
   if (typeof ctx.provide === 'function') {
     ctx.provide('mseRebuild', { engine, stateRoot,
-      statusView: () => engine.statusView(),
+      statusView,
       allowRetry: ticket => engine.allowRetry(ticket) })
   }
   if (typeof ctx.plugin === 'function') {
@@ -961,10 +1345,12 @@ ${result.error?.message ?? ''}`
       itself keeps running and the status stays reachable through the core service */ }
   }
 
-  const api = { engine, wake, status: () => engine.statusView(), pause: value => engine.pause(value === true),
+  const api = { engine, wake, status: statusView, pause: value => engine.pause(value === true),
     dispose() {
       disposed = true
       diagnosticSlots.clear()
+      rsiTraceRows.length = 0
+      rsiProbeTurns.clear()
       running?.lifetime.abort()
       for (const stop of disposers.splice(0)) { try { stop() } catch { /* already gone */ } }
     } }

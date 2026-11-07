@@ -1,6 +1,6 @@
 {
   "name": "@missher/dsh-mse-learning",
-  "version": "1.0.0",
+  "version": "1.2.1",
   "description": "MSE learning (rebuilt slim chain): trusted user/tool facts → bounded recall → evidence-bound lessons → daily digest. An upgrade of the mse-learning bundle.",
   "type": "module",
   "private": true,
@@ -17,6 +17,7 @@
     "adapters/dsh/usage.mjs",
     "cordis.patch.yml",
     "docs/AUTONOMY_0.15.0.md",
+    "rebuild/adaptive-operations.mjs",
     "rebuild/adaptive-recall.mjs",
     "rebuild/adaptive-replay.mjs",
     "rebuild/checker.mjs",
@@ -31,6 +32,8 @@
     "rebuild/recall-qualification.mjs",
     "rebuild/remote.mjs",
     "rebuild/root.mjs",
+    "rebuild/storage.mjs",
+    "rebuild/recall-user-rule-priority.mjs",
     "rebuild/time.mjs",
     "rebuild/typert.mjs",
     "src/checks.mjs",
@@ -38,7 +41,8 @@
     "src/failure-lessons.mjs",
     "src/problems.mjs",
     "src/recall.mjs",
-    "src/store.mjs"
+    "src/store.mjs",
+    "scripts/mse-maintenance.mjs"
   ],
   "keywords": [
     "dsh-plugin",

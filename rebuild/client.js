@@ -51,6 +51,13 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     tabOverview: '常规', tabLessons: '经验', tabRecall: '召回', tabTasks: '任务', tabUsage: '学习状态',
     refresh: '刷新', refreshing: '读取中…', loading: '读取中…',
     statusUnreadable: '状态不可读', loadFailed: '读取失败',
+    storageInvalidMemory: '学习库内容校验失败，已暂停读写与后台学习。',
+    storageInvalidStore: '学习库文件或目录不安全，已暂停读写与后台学习。',
+    storageUnavailable: '学习库当前不可读写，后台学习已暂停。',
+    storageCapacity: '学习库容量已满，旧数据已保留，新条目暂缓保存。',
+    storageDurability: '最近一次写入已提交，但持久化尚未确认。',
+    storageBusy: '另一进程正在写入，本次写入已跳过。',
+    storageWarning: '学习库状态',
     effectiveRunning: '运行中', effectivePaused: '已暂停',
     learning: '学习开关', learningHint: '关闭后只记录事实，不再产生新的反思、每日总结或纠正提取。',
     enabledOn: '已开启', enabledOff: '已关闭',
@@ -79,6 +86,32 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     recallSection: '注入记录', recallHint: '每次注入都有凭据：提供了哪些经验的哪个版本，以及回合结局。',
     offeredVersions: '提供版本', outcomeUnknown: '未判定', outcomeCompleted: '完成', outcomeAborted: '中止',
     outcomeVerified: '检查通过', outcomeFailed: '存在失败', outcomeCancelled: '已取消',
+    rsiSection: '自适应召回诊断', rsiHint: '只显示已登记工作区中实际发生的 RSI 探针；运行诊断仅保存在当前进程，重启后清空，已结算决定仍保留。',
+    rsiPersisted: '最近持久化决定', rsiRuntime: '最近运行记录', rsiNone: '暂无记录',
+    rsiStageAdmission: '来源检查', rsiStageProbe: '探针', rsiStageToolResult: '工具结果',
+    rsiStagePending: '待结算', rsiStageSettled: '回合结算',
+    rsiResultCreated: '已建立策略', rsiResultHoldout: '独立命中', rsiResultControl: '负向对照',
+    rsiResultApproved: '已批准', rsiResultRejected: '已拒绝', rsiResultIsolated: '已隔离',
+    rsiResultUnknown: '未知', rsiResultFeatureRefused: '特征不足',
+    rsiReasonProbeCreated: '已记录真实探针', rsiReasonFailureAdmitted: '失败证据已接纳',
+    rsiReasonFailureDuplicate: '重复失败证据', rsiReasonFailureRejected: '失败证据未接纳',
+    rsiReasonSourceRefused: '来源不再获准', rsiReasonMaterialRefused: '材料被拒绝',
+    rsiReasonOutputIncomplete: '工具输出不完整', rsiReasonCancelled: '工具调用已取消',
+    rsiReasonNoFailure: '没有工具失败', rsiReasonPendingSignal: '等待结算',
+    rsiReasonNoPendingSignal: '没有待结算信号', rsiReasonStorageUnavailable: '学习库暂不可读',
+    rsiReasonNoDecision: '没有自适应决定', rsiReasonUnknownOutcome: '客观结果未知',
+    rsiReasonUniqueNative: '唯一原生失败匹配', rsiReasonIndependentSame: '独立同类命中',
+    rsiReasonSameSession: '会话或任务重复', rsiReasonCompeting: '其他方法解释了失败',
+    rsiReasonRecurrence: '同类失败复发', rsiReasonCheckerFailure: '原生检查失败',
+    rsiReasonCancelledUnknown: '取消或结果未知', rsiReasonSourceRevoked: '来源许可撤销',
+    rsiReasonMaterialRevoked: '材料许可撤销', rsiReasonPolicyStale: '策略版本失效',
+    rsiReasonInsufficientFeatures: '安全特征不足', rsiReasonAlreadyTracked: '策略已跟踪',
+    rsiReasonNotAdditive: '没有新增价值', rsiReasonAmbiguousFailure: '失败目标不唯一',
+    rsiReasonBaselineExplains: '基线经验已解释失败', rsiReasonStaleProbe: '探针已过期',
+    rsiReasonProbeCapacity: '探针容量已满', rsiReasonUnmatchedObjective: '目标不匹配',
+    rsiReasonAwaitingControl: '等待负向对照', rsiReasonStrategyDisabled: '策略已停用',
+    rsiReasonRevisionLimit: '策略修订次数已满', rsiReasonSameMechanism: '修订机制重复',
+    rsiReasonCounterexampleChild: '反例修订已建立',
     settledYes: '已结算', settledNo: '在途', historicalEntry: '历史经验', fullId: '完整标识',
     summaryLabel: '摘要', fullText: '完整原文', requestLabel: '请求标识', rawCode: '原始结果码',
     tasksSection: '后台请求', tasksHint: '反思、修订、每日总结与纠正提取共用同一个在途槽；一次已知费用的输出截断最多有一次有界自动重试，未知费用与其它失败都不会自动重发，可发起人工审计重试。',
@@ -115,6 +148,13 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
   const TYPE_ZH = { rule: zh.typeRule, lesson: zh.typeLesson, digest: zh.typeDigest }
   const STATUS_ZH = { user_rule: zh.statusActive, pending: '待验证', check_passed: zh.statusActive,
     needs_revision: '需修订', superseded: zh.statusSuperseded }
+  const STORAGE_REASON_ZH = { invalid_memory: zh.storageInvalidMemory,
+    invalid_store: zh.storageInvalidStore, state_unavailable: zh.storageUnavailable,
+    invalid_state_root: zh.storageUnavailable, capacity: zh.storageCapacity,
+    entry_capacity: zh.storageCapacity, durability_unconfirmed: zh.storageDurability,
+    lock_busy: zh.storageBusy, ENOSPC: zh.storageCapacity, EIO: zh.storageUnavailable,
+    EACCES: zh.storageUnavailable, EROFS: zh.storageUnavailable,
+    transaction_async: zh.storageUnavailable, transaction_reentry: zh.storageUnavailable }
   // EVOLUTION016: fixed revision-reason vocabulary for the EXISTING entry detail rows.
   const REVISION_REASON_ZH = { matched_recurrence: '同类任务再次失败', matched_recurrence_late: '旧版晚到同类失败',
     check_failed: '检查未通过', check_failed_late: '旧版晚到检查未通过', check_passed: '检查通过',
@@ -137,6 +177,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     immediate_rule_rejected: '不符合即时入库的既有校验（过长/含敏感形态），未即时保存',
     candidate_rejected: '纠正审计写入被既有字段边界拒绝（已按 UTF-16 单位裁剪；仍未入库）',
     store_unavailable: '学习库暂时不可读写（已跳过本次审计写入，不影响当前步骤）',
+    entry_capacity: '学习库条目已满，新条目已等待或拒收，现有条目保留',
     turn_facts_rejected: '回合事实写入被既有字段边界拒绝，不影响当前回合',
     temp_workspace_excluded: '临时工作区未采集',
     user_correction: '用户纠正停用',
@@ -177,6 +218,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     no_source_route: '来源会话没有可用路线', same_material_needs_audited_retry: '同一材料需人工审计重试',
     unknown_cost_never_auto_replayed: '一次未知费用的调用已保留记录，不会自动重发',
     background_error_invalid_memory: '后台记录未通过校验，请查看诊断记录',
+    entry_capacity: '学习库条目已满，新经验暂缓保存',
     background_error_unexpected: '后台学习暂时异常，请查看诊断记录', null: '—' }
   // MSE21: a REAL next step for a settled task (never a fake dash / generic failure).
   const NEXT_ZH = { in_flight: '调用中', retry_pending: '已知费用，待唯一重试',
@@ -184,8 +226,38 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
   const OUTCOME_ZH = { completed: zh.outcomeCompleted, aborted: zh.outcomeAborted,
     verified: zh.outcomeVerified, failed: zh.outcomeFailed, cancelled: zh.outcomeCancelled,
     unknown: zh.outcomeUnknown }
+  const RSI_STAGE_ZH = { admission: zh.rsiStageAdmission, probe: zh.rsiStageProbe,
+    tool_result: zh.rsiStageToolResult, pending: zh.rsiStagePending, settled: zh.rsiStageSettled }
+  const RSI_RESULT_ZH = { created: zh.rsiResultCreated, holdout_hit: zh.rsiResultHoldout,
+    negative_control: zh.rsiResultControl, approved: zh.rsiResultApproved,
+    rejected: zh.rsiResultRejected, isolated: zh.rsiResultIsolated,
+    unknown: zh.rsiResultUnknown, feature_refused: zh.rsiResultFeatureRefused }
+  const RSI_REASON_ZH = { probe_created: zh.rsiReasonProbeCreated,
+    failure_admitted: zh.rsiReasonFailureAdmitted, failure_duplicate: zh.rsiReasonFailureDuplicate,
+    failure_rejected: zh.rsiReasonFailureRejected, source_refused: zh.rsiReasonSourceRefused,
+    material_refused: zh.rsiReasonMaterialRefused, output_incomplete: zh.rsiReasonOutputIncomplete,
+    cancelled: zh.rsiReasonCancelled, no_failure: zh.rsiReasonNoFailure,
+    pending_signal: zh.rsiReasonPendingSignal, no_pending_signal: zh.rsiReasonNoPendingSignal,
+    storage_unavailable: zh.rsiReasonStorageUnavailable, no_adaptive_decision: zh.rsiReasonNoDecision,
+    unknown_outcome: zh.rsiReasonUnknownOutcome,
+    unique_native_method_match: zh.rsiReasonUniqueNative,
+    independent_same_objective: zh.rsiReasonIndependentSame,
+    same_session_or_query: zh.rsiReasonSameSession, competing_method_failure: zh.rsiReasonCompeting,
+    same_signature_recurrence: zh.rsiReasonRecurrence, native_checker_failure: zh.rsiReasonCheckerFailure,
+    cancelled_or_unknown: zh.rsiReasonCancelledUnknown, source_revoked: zh.rsiReasonSourceRevoked,
+    material_revoked: zh.rsiReasonMaterialRevoked, policy_stale: zh.rsiReasonPolicyStale,
+    insufficient_safe_features: zh.rsiReasonInsufficientFeatures, already_tracked: zh.rsiReasonAlreadyTracked,
+    candidate_not_additive: zh.rsiReasonNotAdditive,
+    ambiguous_native_failure: zh.rsiReasonAmbiguousFailure,
+    baseline_explains_failure: zh.rsiReasonBaselineExplains, stale_probe: zh.rsiReasonStaleProbe,
+    probe_capacity: zh.rsiReasonProbeCapacity,
+    independent_unmatched_objective: zh.rsiReasonUnmatchedObjective,
+    awaiting_negative_control: zh.rsiReasonAwaitingControl, strategy_disabled: zh.rsiReasonStrategyDisabled,
+    revision_limit: zh.rsiReasonRevisionLimit, same_mechanism_rejected: zh.rsiReasonSameMechanism,
+    counterexample_child: zh.rsiReasonCounterexampleChild }
   // Chinese reads first; the original code stays in parentheses for tracing.
   const TERMINAL_ZH = { saved: '已保存', committed: '已入库', linked: '已关联', skipped: '已跳过',
+    entry_capacity: '经验容量已满，新条目未保存',
     truncated: '输出截断', output_too_large: '输出过长', attempt_aborted: '尝试中止',
     invalid_result: '输出不符合契约', model_unparseable: '输出无法解析', connection_reset: '连接中断',
     timeout: '超时', paused: '已暂停', aborted: '已中止', audit_retry_accepted: '审计重试已受理',
@@ -424,8 +496,15 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         try {
           const business = await callRemote(call, 'status')
           if (generation.current !== mine) return
-          setShell({ status: 'ready', value: business.view ?? null, error: null })
-          setControlState({ status: 'ready', paused: business.view?.paused === true })
+          const view = business.view ?? null
+          if (view?.storage?.available === false) {
+            setShell({ status: 'error', value: null,
+              error: STORAGE_REASON_ZH[view.storage.reason] ?? zh.statusUnreadable })
+            setControlState({ status: 'unknown', paused: null })
+          } else {
+            setShell({ status: 'ready', value: view, error: null })
+            setControlState({ status: 'ready', paused: view?.paused === true })
+          }
         } catch (error) {
           if (generation.current !== mine) return
           setShell({ status: 'error', value: null, error: String(error?.message ?? error) })
@@ -482,12 +561,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const state = shell.status === 'error' ? 'error' : shell.status === 'idle' ? 'loading' : 'ready'
 
     // ── 常规 ──────────────────────────────────────────────────────────────────────────────
-    const overviewPanel = h(React.Fragment, { key: 'overview' }, [
-      h('div', { key: 'm', className: 'mse-metrics mse-metrics-2' }, [
-        metric(dict.pauseControl, controlState.paused === null ? '—'
-          : controlState.paused === true ? dict.effectivePaused : dict.effectiveRunning),
-        metric(dict.lastDoneDay, view?.daily?.lastDoneDay ?? '—'),
-      ]),
+    const runtimeSettings = [
       h('h2', { key: 'runtime-group', className: 'mse-section-title' }, dict.runtimeGroup),
       row('enabled', dict.learning, dict.learningHint,
         h(Switch, { key: 'sw', checked: enabled, onChange: next => void mutateSetting('enabled', next) })),
@@ -502,6 +576,14 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         [h(Input, { key: 'i', value: wakeDraft, placeholder: '600000', onChange: setWakeDraft }),
           h(Button, { key: 'b', variant: 'outline', size: 'sm', onClick: saveWake }, dict.wakeSave)]),
       saveState?.kind === 'error' ? h('p', { key: 'err', className: 'mse-error' }, saveState.detail) : null,
+    ]
+    const overviewPanel = h(React.Fragment, { key: 'overview' }, [
+      h('div', { key: 'm', className: 'mse-metrics mse-metrics-2' }, [
+        metric(dict.pauseControl, controlState.paused === null ? '—'
+          : controlState.paused === true ? dict.effectivePaused : dict.effectiveRunning),
+        metric(dict.lastDoneDay, view?.daily?.lastDoneDay ?? '—'),
+      ]),
+      ...runtimeSettings,
       h('h2', { key: 'sec', className: 'mse-section-title' }, dict.dailySection),
       h('p', { key: 'dh', className: 'mse-hint' }, dict.dailyHint),
       view === null ? null : row('daily',
@@ -614,6 +696,29 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
             meta: [item.settled ? dict.settledYes : dict.settledNo,
               item.outcome === null ? dict.outcomeUnknown : (OUTCOME_ZH[item.outcome] ?? item.outcome),
               `${item.bytes} B`] })),
+      h('h2', { key: 'rsi-sec', className: 'mse-section-title' }, dict.rsiSection),
+      h('p', { key: 'rsi-hint', className: 'mse-hint' }, dict.rsiHint),
+      h('div', { key: 'rsi-persisted-label', className: 'mse-statline' }, dict.rsiPersisted),
+      view === null || (view.recallStrategy?.adaptive?.decisions ?? []).length === 0
+        ? h('p', { key: 'rsi-no-persisted', className: 'mse-hint' }, dict.rsiNone)
+        : view.recallStrategy.adaptive.decisions.slice(0, 8).map((item, index) => row(
+          `rsi-decision-${index}`, RSI_RESULT_ZH[item.result] ?? dict.rsiResultUnknown,
+          `${RSI_REASON_ZH[item.reason] ?? '其他决定'} · ${item.policyId ? `策略 ${item.policyId}` : '无策略标识'} · `
+            + `${item.entryId ? `目标 ${item.entryId}` : '无目标标识'}${Number.isSafeInteger(item.version) ? ` · v${item.version}` : ''}`,
+          atText(item.at), { top: true })),
+      h('div', { key: 'rsi-runtime-label', className: 'mse-statline' }, dict.rsiRuntime),
+      view === null || (view.rsiDiagnostics?.recent ?? []).length === 0
+        ? h('p', { key: 'rsi-no-runtime', className: 'mse-hint' }, dict.rsiNone)
+        : view.rsiDiagnostics.recent.slice(0, 8).map((item, index) => row(
+          `rsi-runtime-${index}`,
+          `${RSI_STAGE_ZH[item.stage] ?? dict.rsiStageSettled} · ${RSI_REASON_ZH[item.reason] ?? '其他记录'}`,
+          `回合 ${item.turnHash}`
+            + `${item.result ? ` · ${RSI_RESULT_ZH[item.result] ?? dict.rsiResultUnknown}` : ''}`
+            + `${item.outcome ? ` · ${OUTCOME_ZH[item.outcome] ?? dict.outcomeUnknown}` : ''}`
+            + `${item.policyId ? ` · 策略 ${item.policyId}` : ''}`
+            + `${item.entryId ? ` · 目标 ${item.entryId}` : ''}`
+            + `${Number.isSafeInteger(item.version) ? ` · v${item.version}` : ''}`,
+          atText(item.at), { top: true })),
     ])
 
     // ── 任务 ──────────────────────────────────────────────────────────────────────────────
@@ -771,8 +876,11 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 
     const tabs = h('div', { key: 'tabs', ref: tabsHost, className: 'mse-tabs-host' },
       settingsTabNavigation(tab, setTab, dict, compactTabs))
-    const body = tab === 'overview' ? overviewPanel : tab === 'lessons' ? lessonsPanel
+    const unavailablePanel = tab === 'overview'
+      ? h(React.Fragment, { key: 'storage-unavailable' }, runtimeSettings) : null
+    const normalBody = tab === 'overview' ? overviewPanel : tab === 'lessons' ? lessonsPanel
       : tab === 'recall' ? recallPanel : tab === 'tasks' ? tasksPanel : usagePanel
+    const body = state === 'error' ? unavailablePanel : normalBody
     return h('section', { className: 'mse-details', 'data-mse-details': 'page' }, [
       h('div', { key: 'heading', className: 'mse-heading' }, [
         h('h1', { key: 't' }, dict.settingsTitle),
@@ -781,7 +889,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           : h('span', { key: 's', className: 'mse-status' }, [
             h(StateDot, { key: 'd', state: view === null ? 'idle' : view.paused === true ? 'idle' : 'done' }),
             h('span', { key: 't' }, view === null ? dict.loading
-              : view.paused === true ? dict.effectivePaused : dict.effectiveRunning),
+              : `${view.paused === true ? dict.effectivePaused : dict.effectiveRunning}`
+                + (view.storage?.reason ? ` · ${STORAGE_REASON_ZH[view.storage.reason] ?? dict.storageWarning}` : '')),
           ]),
         h(Button, { key: 'r', variant: 'ghost', size: 'sm', className: 'mse-heading-action',
           disabled: shell.status === 'loading', onClick: () => setReloadToken(current => current + 1) },

@@ -425,7 +425,7 @@ test('real rc.4 wiring: trusted corrections, indexed facts, explicit route, Remo
     ? { isError: true, content: [], error: { message: 'tool call aborted',
       info: { name: 'AbortError', code: 'ABORTED' } } }
     : { isError: false, value: { kind: 'foreground', cwd: dir, signal: null, timedOut: false,
-      aborted: false, timeoutMs: 1000, exitCode: exit, stdout: { text: 'secret output must not persist',
+      aborted: false, timeoutMs: 1000, exitCode: exit, stdout: { text: 'api_key=raw-stdout-credential',
         truncated: false }, stderr: { text: exit === 0 ? '' : failure.stderr, truncated: false } },
       content: [{ type: 'text', text: 'output' }] }
   emit('tools/result', toolCall('c1', 1), rcResult(1))
@@ -444,8 +444,8 @@ test('real rc.4 wiring: trusted corrections, indexed facts, explicit route, Remo
   const fact1 = facts.find(f => f.failures > 0)
   assert.equal(fact1.outcome, 'failed')
   assert.match(fact1.evidenceHash, /^[a-f0-9]{64}$/u)
-  assert.ok(JSON.stringify(plugin.engine.store.read()).includes('secret output must not persist') === false,
-    'raw stdout never persists')
+  assert.ok(!JSON.stringify(plugin.engine.store.read()).includes('raw-stdout-credential'),
+    'credentials in stdout are scrubbed before persistence')
 
   await plugin.wake()
   assert.equal(llmCalls.length, 1, 'exactly one background call for the two failures')
@@ -611,6 +611,7 @@ test('default background route comes from the session the host reported; artifac
   await userTurn(2, ['帮我看下这个配置'])
   await userTurn(3, ['以后生成的 JSON 配置文件都要先整体校验'])
   assert.ok(plugin.status().entries.some(row => row.instruction.includes('都要先整体校验')))
+  await emit('session/event', session, { type: 'turn/end', data: { turn: 3, reason: { kind: 'completed' } } })
 
   const toolCall = (callId, turn) => {
     session.events.push({ type: 'tool/call', seq: session.seq, data: { turn, step: 1, callId,
@@ -1533,13 +1534,14 @@ test('UI wiring: original five-tab design, full contributions, gated binding, re
     }
     assert.equal(clientModule.__test.zh.settingsTitle, '自我进化', 'the original title, no 精简 suffix')
     assert.equal(clientModule.__test.zh.tabUsage, '学习状态')
+    assert.equal(clientModule.__test.zh.rsiStageSettled, '回合结算')
     assert.match(clientModule.__test.STYLE, /SegmentedTabs|\.mse-disclosure|@media\(max-width:620px\)/u)
 
     // (1) $mount must receive full contributions; the OLD string form fails like the real host.
     const mounted = []
     const slotsRegistered = []
     let bindNamespacesReady = false
-    const view = { paused: false, hasRoute: true,
+    let view = { paused: false, hasRoute: true,
       entries: [{ id: 'mem_aaaaaaaaaaaaaa11111111', type: 'rule', status: 'user_rule',
         visibility: 'global', scopeHash: 'aa11bb22cc33', instruction: '改插件必须在源码里修改',
         applicability: '修改已安装插件时', exclusions: '', version: 2, parentVersion: 1,
@@ -1668,6 +1670,21 @@ test('UI wiring: original five-tab design, full contributions, gated binding, re
       assert.match(overview, /演示日总结/u, 'daily summary shows the persisted host data')
       assert.match(overview, /600000（约 10 分钟）/u,
         'the interval keeps the raw ms field with a display-only readable minutes hint')
+
+    const healthyView = view
+    view = { storage: { available: false, reason: 'invalid_memory' } }
+    cursor = 0
+    states.length = 0
+    effectRuns.length = 0
+    section.Page(props)
+    await Promise.all(effectRuns)
+    cursor = 0
+    const degraded = JSON.stringify(section.Page(props))
+    assert.match(degraded, /学习库内容校验失败/u)
+    assert.match(degraded, /Switch/u, 'settings remain accessible while storage data is unavailable')
+    assert.doesNotMatch(degraded, /演示日总结|暂无经验|现存规则与经验/u,
+      'unavailable storage never renders the old data as an empty library')
+    view = healthyView
 
       // (3) 经验 tab: real rules with version/scope/status/fix-steps/check/injection counts.
       cursor = 0
@@ -5436,7 +5453,7 @@ test('E6b the replay CLI is offline-only, writes nothing and is not part of the 
   } finally { rmSync(work, { recursive: true, force: true }) }
   // The developer CLI and the replay fixture are public SOURCE but NOT runtime package files.
   const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'))
-  assert.equal(pkg.version, '1.0.0')
+  assert.equal(pkg.version, '1.2.1')
   assert.ok(pkg.files.includes('rebuild/adaptive-recall.mjs'))
   assert.ok(pkg.files.includes('rebuild/adaptive-replay.mjs'))
   assert.ok(pkg.files.includes('rebuild/recall.mjs'))
@@ -6608,6 +6625,8 @@ test('RSI real pre-step: two scoped approvals, exact rollback, and a late old-ve
     assert.ok(JSON.stringify(activeA.messages).includes(methodA.instruction))
     assert.ok(realReceipt(3).offered.some(row => row.id === methodA.id && row.mode === 'method'))
     await nativeFailure(3, 'rsi-a-active-failure', 'list', 'A list-directory failure')
+    assert.equal(w.plugin.engine.store.read().entries.find(row => row.id === methodA.id).status,
+      'needs_revision', 'the native result guards the exact offered edition before turn/end settlement')
     await endTurn(3)
     state = w.plugin.engine.store.read().recallStrategy
     assert.equal(state.generation, 3)
