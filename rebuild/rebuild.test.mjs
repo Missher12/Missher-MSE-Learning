@@ -1486,6 +1486,13 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
   const loaded = []
   const savedWindow = globalThis.window
   const savedDoc = globalThis.document
+  const savedLocalStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  const activityColorValues = new Map()
+  globalThis.localStorage = {
+    getItem: key => activityColorValues.get(key) ?? null,
+    setItem: (key, value) => activityColorValues.set(key, String(value)),
+    removeItem: key => activityColorValues.delete(key),
+  }
   globalThis.window = { __ModuleLoader__: { load: spec => loaded.push(spec) },
     document: { createElement: () => ({ dataset: {}, remove() {} }), head: { append() {} } },
     addEventListener() {}, removeEventListener() {} }
@@ -1600,7 +1607,18 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
       createdAt: Date.parse(`${day.date}T12:00:00Z`),
     }] : [])
     activityEntries.push({ id: 'activity-today-lesson', type: 'lesson', createdAt: activityNow })
+    activityEntries.push({ id: 'activity-before-window', type: 'lesson', updatedAt: activityNow,
+      createdAt: Date.parse(`${emptyActivity.windowStart}T00:00:00Z`) - 86_400_000 })
+    activityEntries.push({ id: 'activity-imported-today', type: 'digest', createdAt: activityNow,
+      importedFrom: 'legacy' })
     view.activity = projectActivity(activityEntries, activityNow, 'UTC')
+      assert.equal(view.activity.today.total, 2, 'imported rows and revisions do not count as today additions')
+      assert.equal(view.activity.retained, 186)
+      assert.equal(view.activity.imported, 1)
+      assert.equal(view.activity.knownNew, 185)
+      assert.deepEqual(clientModule.__test.projectActivityWeeks(view.activity, 'total').at(-1).cumulativeCounts,
+        { total: 185, rule: 92, lesson: 2, digest: 91 },
+        'the final cumulative value includes the pre-window baseline and only new retained entries')
     const ctx = {
       effect(fn) { return typeof fn === 'function' ? fn() : undefined },
       locale: { register: () => true, getLocale: () => ({ active: 'zh' }) },
@@ -1813,20 +1831,114 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
         return found
       }
       const selected53 = await renderActivity(view.activity)
+      assert.equal(typeof clientModule.__test.projectActivityWeeks, 'function',
+        'the daily, weekly and cumulative projections are testable pure client logic')
+      const projectionFixture = {
+        beforeWindow: { total: 2, rule: 1, lesson: 1, digest: 0 },
+        weeks: [
+          { start: '2026-01-05', days: [null, null,
+            { date: '2026-01-07', total: 2, rule: 1, lesson: 0, digest: 1 },
+            { date: '2026-01-08', total: 0, rule: 0, lesson: 0, digest: 0 },
+            { date: '2026-01-09', total: 0, rule: 0, lesson: 0, digest: 0 },
+            { date: '2026-01-10', total: 0, rule: 0, lesson: 0, digest: 0 },
+            { date: '2026-01-11', total: 0, rule: 0, lesson: 0, digest: 0 }] },
+          { start: '2026-01-12', days: [
+            { date: '2026-01-12', total: 1, rule: 0, lesson: 1, digest: 0 },
+            { date: '2026-01-13', total: 3, rule: 0, lesson: 0, digest: 3 },
+            { date: '2026-01-14', total: 0, rule: 0, lesson: 0, digest: 0 },
+            { date: '2026-01-15', total: 0, rule: 0, lesson: 0, digest: 0 },
+            { date: '2026-01-16', total: 0, rule: 0, lesson: 0, digest: 0 },
+            { date: '2026-01-17', total: 0, rule: 0, lesson: 0, digest: 0 },
+            { date: '2026-01-18', total: 0, rule: 0, lesson: 0, digest: 0 }] },
+        ],
+      }
+      const dailyProjection = clientModule.__test.projectActivityWeeks(projectionFixture, 'day')
+      const weeklyProjection = clientModule.__test.projectActivityWeeks(projectionFixture, 'week')
+      const cumulativeProjection = clientModule.__test.projectActivityWeeks(projectionFixture, 'total')
+      assert.deepEqual(dailyProjection.map(week => week.days.map(day => day === null ? null : day.displayTotal)), [
+        [null, null, 2, 0, 0, 0, 0], [1, 3, 0, 0, 0, 0, 0],
+      ], 'daily view keeps each date count in its real weekday position')
+      assert.deepEqual(dailyProjection.map(week => week.days.filter(Boolean).map(day => day.level)), [
+        [4, 0, 0, 0, 0], [2, 5, 0, 0, 0, 0, 0],
+      ], 'daily view uses five intensity levels relative to the daily maximum')
+      assert.deepEqual(weeklyProjection.map(week => week.counts.total), [2, 4],
+        'weekly view aggregates each Monday-based column')
+      assert.deepEqual(weeklyProjection[0].days.map(day => day === null ? null : day.level),
+        [null, null, 3, 3, 3, 3, 3],
+        'weekly view stacks its aggregate from the bottom while keeping clipped dates blank')
+      assert.deepEqual(weeklyProjection[1].counts, { total: 4, rule: 0, lesson: 1, digest: 3 })
+      assert.deepEqual(cumulativeProjection.map(week => week.cumulativeCounts), [
+        { total: 4, rule: 2, lesson: 1, digest: 1 },
+        { total: 8, rule: 2, lesson: 2, digest: 4 },
+      ], 'cumulative view starts at beforeWindow and retains real per-type totals')
+      assert.equal(cumulativeProjection[0].days[2].level, 0,
+        'cumulative columns fill upward from the bottom, not from the top')
+      assert.equal(cumulativeProjection[0].days[3].level, 3)
+      assert.equal(cumulativeProjection[1].days[6].displayTotal, 8)
+      assert.equal(cumulativeProjection[1].days[6].level, 5)
+      const zeroDay = (date) => ({ date, total: 0, rule: 0, lesson: 0, digest: 0 })
+      const partialWeekFixture = {
+        beforeWindow: { total: 1, rule: 1, lesson: 0, digest: 0 },
+        weeks: [
+          { start: '2025-11-10', days: [null,
+            { date: '2025-11-11', total: 1, rule: 1, lesson: 0, digest: 0 },
+            zeroDay('2025-11-12'), zeroDay('2025-11-13'), zeroDay('2025-11-14'),
+            zeroDay('2025-11-15'), zeroDay('2025-11-16')] },
+          { start: '2025-11-17', days: [
+            { date: '2025-11-17', total: 9, rule: 9, lesson: 0, digest: 0 },
+            { date: '2025-11-18', total: 7, rule: 7, lesson: 0, digest: 0 },
+            { date: '2025-11-19', total: 5, rule: 0, lesson: 5, digest: 0 },
+            { date: '2025-11-20', total: 5, rule: 0, lesson: 0, digest: 5 },
+            { date: '2025-11-21', total: 4, rule: 0, lesson: 0, digest: 4 },
+            { date: '2025-11-22', total: 3, rule: 3, lesson: 0, digest: 0 },
+            zeroDay('2025-11-23')] },
+          { start: '2026-11-09', days: [
+            { date: '2026-11-09', total: 1, rule: 1, lesson: 0, digest: 0 },
+            zeroDay('2026-11-10'), null, null, null, null, null] },
+        ],
+        weekSummaries: [
+          { start: '2025-11-10', end: '2025-11-16', total: 2, rule: 2, lesson: 0, digest: 0 },
+          { start: '2025-11-17', end: '2025-11-23', total: 33, rule: 19, lesson: 5, digest: 9 },
+          { start: '2026-11-09', end: '2026-11-10', total: 1, rule: 1, lesson: 0, digest: 0 },
+        ],
+      }
+      const partialWeeks = clientModule.__test.projectActivityWeeks(partialWeekFixture, 'week')
+      const partialCumulative = clientModule.__test.projectActivityWeeks(partialWeekFixture, 'total')
+      assert.equal(partialWeeks[0].visibleCounts.total, 1)
+      assert.equal(partialWeeks[0].counts.total, 2,
+        'weekly first partial period reuses the complete MSE Monday-week summary')
+      assert.equal(partialWeeks[0].end, '2025-11-16')
+      assert.equal(partialWeeks.at(-1).end, '2026-11-10',
+        'the current partial week ends today instead of at a future Sunday')
+      assert.deepEqual(partialCumulative.map(week => week.cumulativeCounts.total), [2, 35, 36],
+        'cumulative mode adds only visible dates to beforeWindow and does not double-count week summaries')
+      assert.deepEqual(partialWeeks.at(-1).days.map(day => day === null ? null : day.level),
+        [1, 1, null, null, null, null, null],
+        'a positive current week remains visible when the seven-row stack is clipped to two real dates')
       const assertActivityGrid = (tree, weekCount) => {
         const cells = []
         const labels = []
+        const chart = findUi(tree, node => node?.props?.className === 'mse-activity-chart')
         const months = findUi(tree, node => node?.props?.className === 'mse-activity-months')
-        walkUi(tree, node => { if (node?.props?.className === 'mse-activity-cell') cells.push(node) })
+        const grid = findUi(tree, node => node?.props?.className === 'mse-activity-grid')
+        walkUi(tree, node => { if (node?.props?.className === 'mse-activity-day') cells.push(node) })
         assert.equal(cells.length, 365, `${weekCount} columns preserve exactly 365 real date buttons`)
         for (const cell of cells) {
           assert.equal(cell.type, 'button', 'each date keeps native keyboard activation')
           assert.equal(cell.props.type, 'button')
           assert.equal(cell.children.length, 0, 'heatmap cells contain no visible count text')
           assert.equal(typeof cell.props.onClick, 'function', 'date selection remains interactive')
-          assert.match(cell.props['aria-label'], /^\d{4}-\d{2}-\d{2}: \d+ 条$/u)
-          assert.match(cell.props.title, /^\d{4}-\d{2}-\d{2} · \d+ 条$/u)
+          assert.equal(typeof cell.props.onFocus, 'function', 'keyboard focus exposes the same date count')
+          assert.match(cell.props['aria-label'], /^\d{4}-\d{2}-\d{2}; .*\d+ 条$/u)
+          assert.match(cell.props.title, /\d+ 条$/u)
         }
+        assert.ok(chart && grid && months, 'the chart renders its grid and month row')
+        const chartOrder = []
+        walkUi(chart, node => {
+          if (node?.props?.className === 'mse-activity-grid') chartOrder.push('grid')
+          if (node?.props?.className === 'mse-activity-months') chartOrder.push('months')
+        })
+        assert.deepEqual(chartOrder, ['grid', 'months'], 'month labels render below the activity heatmap')
         walkUi(months, node => { if (node?.type === 'span') labels.push(node) })
         const ranges = labels.map(node => {
           const match = /^(\d+)\s*\/\s*(\d+)$/u.exec(node.props.style.gridColumn)
@@ -1844,45 +1956,116 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
         return cells
       }
       const cells53 = assertActivityGrid(selected53, 53)
+      assert.doesNotMatch(JSON.stringify(selected53), /新增记录|New entries/u,
+        'the redundant new-entry title is removed')
+      let summaryMetricCount = 0
+      walkUi(findUi(selected53, node => node?.props?.className === 'mse-activity-summary'), node => {
+        if (node?.props?.className === 'mse-activity-metric') summaryMetricCount += 1
+      })
+      assert.equal(summaryMetricCount, 3,
+        'the compact summary bar keeps today, this week and retained values')
+      const activityTabs = []
+      walkUi(selected53, node => { if (node?.props?.role === 'tab'
+        && String(node.props.id ?? '').startsWith('mse-activity-')) activityTabs.push(node) })
+      assert.deepEqual(activityTabs.map(tab => tab.children.join('')), ['每日', '每周', '累计'])
+      assert.equal(activityTabs[0].props['aria-selected'], true)
+      const activityColorMenu = findUi(selected53, node => node?.type === 'Menu'
+        && node?.props?.items?.some(item => item.id === 'violetColor'))
+      assert.ok(activityColorMenu, 'the Usage-inspired palette is available in the activity header')
+      activityColorMenu.props.onSelect('violetColor')
+      assert.equal(activityColorValues.get('dsh.mse-learning.activity-color.v1'), '#8b6ccf',
+        'the palette persists only under MSE renderer-local storage')
+      cursor = 0
+      const violetTree = section.Page({ ...props, initialTab: 'activity' })
+      const chartPanel = findUi(violetTree, node => node?.props?.className === 'mse-activity-chart-panel')
+      assert.equal(chartPanel.props.style['--mse-activity-color'], '#8b6ccf')
+      const violetMenu = findUi(violetTree, node => node?.type === 'Menu'
+        && node?.props?.items?.some(item => item.id === 'themeColor'))
+      violetMenu.props.onSelect('themeColor')
+      assert.equal(activityColorValues.has('dsh.mse-learning.activity-color.v1'), false,
+        'restoring the theme removes only the MSE renderer-local color preference')
       const activityToday = view.activity.todayDate
-      const todayCell = cells53.find(cell => cell.props['aria-label'].startsWith(`${activityToday}:`))
+      const todayCell = cells53.find(cell => cell.props['aria-label'].startsWith(`${activityToday};`))
       assert.ok(todayCell)
-      assert.equal(todayCell.props['aria-label'], `${activityToday}: 2 条`)
+      assert.match(todayCell.props['aria-label'], new RegExp(`^${activityToday}; .*2 条$`, 'u'))
       assert.equal(todayCell.props.title, `${activityToday} · 2 条`)
       assert.equal(todayCell.props['aria-pressed'], true)
-      const activityCounts = findUi(selected53, node => node?.props?.key === 'activity-counts')
+      todayCell.props.onFocus()
+      cursor = 0
+      const focusedTree = section.Page({ ...props, initialTab: 'activity' })
+      const tooltip = findUi(focusedTree, node => node?.props?.role === 'tooltip')
+      assert.ok(tooltip?.children.join('').includes(activityToday)
+        && tooltip.children.join('').includes('2 条'), 'keyboard focus reveals the real date and count')
+      const chartStage = findUi(focusedTree, node => node?.props?.className === 'mse-activity-stage')
+      chartStage.props.onMouseLeave()
+      cursor = 0
+      const stillFocusedTree = section.Page({ ...props, initialTab: 'activity' })
+      assert.ok(findUi(stillFocusedTree, node => node?.props?.role === 'tooltip'),
+        'pointer exit does not hide a keyboard-focused date tooltip')
+      todayCell.props.onBlur()
+      cursor = 0
+      const blurredTree = section.Page({ ...props, initialTab: 'activity' })
+      assert.equal(findUi(blurredTree, node => node?.props?.role === 'tooltip'), null,
+        'the date tooltip closes when keyboard focus leaves the cell')
+      const activitySelection = findUi(focusedTree,
+        node => node?.props?.['data-mse-disclosure'] === 'activity-selection')
+      assert.equal(activitySelection.props.open, false, 'selected range detail remains a short closed row')
+      assert.match(JSON.stringify(activitySelection.children), new RegExp(`${activityToday}.*2 条`, 'u'))
+      const activityCounts = findUi(activitySelection, node => node?.props?.key === 'activity-counts')
       const countFacts = []
       walkUi(activityCounts, node => {
         if (node?.type === 'dt' || node?.type === 'dd') countFacts.push([node.type, node.children.join('')])
       })
-      assert.deepEqual(countFacts, [['dt', '所选区间'], ['dd', activityToday], ['dt', '条'], ['dd', '2'],
-        ['dt', '规则'], ['dd', '1'], ['dt', '经验'], ['dd', '1'], ['dt', '总结'], ['dd', '0']])
+      assert.deepEqual(countFacts, [['dt', '规则'], ['dd', '1'], ['dt', '经验'], ['dd', '1'],
+        ['dt', '总结'], ['dd', '0']])
       const selectedDate = view.activity.days[362].date
-      cells53.find(cell => cell.props['aria-label'].startsWith(`${selectedDate}:`)).props.onClick()
+      cells53.find(cell => cell.props['aria-label'].startsWith(`${selectedDate};`)).props.onClick()
       cursor = 0
       const selectedAfterClick = section.Page({ ...props, initialTab: 'activity' })
       const selectedButton = assertActivityGrid(selectedAfterClick, 53)
-        .find(cell => cell.props['aria-label'].startsWith(`${selectedDate}:`))
+        .find(cell => cell.props['aria-label'].startsWith(`${selectedDate};`))
       assert.equal(selectedButton.props['aria-pressed'], true, 'selection remains bound to its date')
       assert.ok(JSON.stringify(selectedAfterClick).includes(selectedDate), 'selected period remains visible below the chart')
+      const selectWeekTab = findUi(selectedAfterClick,
+        node => node?.props?.id === 'mse-activity-week-tab')
+      selectWeekTab.props.onClick()
+      cursor = 0
+      const selectedWeekly = section.Page({ ...props, initialTab: 'activity' })
+      const weeklyCell = findUi(selectedWeekly, node => node?.props?.['data-activity-date'] === selectedDate)
+      assert.equal(weeklyCell.props['data-activity-mode'], 'week')
+      assert.equal(weeklyCell.props['data-display-total'], 4,
+        'weekly selection projects the Monday-based week aggregate onto its date cells')
+      const selectedWeekTab = findUi(selectedWeekly,
+        node => node?.props?.id === 'mse-activity-week-tab')
+      assert.equal(selectedWeekTab.props['aria-selected'], true)
+      selectedWeekTab.props.onKeyDown({ key: 'ArrowRight', preventDefault() {} })
+      cursor = 0
+      const selectedCumulative = section.Page({ ...props, initialTab: 'activity' })
+      const cumulativeCell = findUi(selectedCumulative,
+        node => node?.props?.['data-activity-date'] === selectedDate)
+      assert.equal(cumulativeCell.props['data-activity-mode'], 'total')
+      assert.equal(cumulativeCell.props['data-display-total'], 183,
+        'cumulative view includes beforeWindow but stops at the selected week')
+      assert.equal(findUi(selectedCumulative, node => node?.props?.id === 'mse-activity-total-tab')
+        .props['aria-selected'], true, 'arrow keys move the selected segmented tab')
 
       const activity54 = { ...view.activity, weeks: [...view.activity.weeks,
         { start: '2026-11-09', days: Array(7).fill(null) }] }
       const selected54 = await renderActivity(activity54)
       assertActivityGrid(selected54, 54)
       assert.match(clientModule.__test.STYLE,
-        /\.mse-activity-layout\{[^}]*width:100%;min-width:376px\}/u,
-        'narrow panes scroll inside the bounded activity container')
+        /\.mse-details \.mse-activity-grid\{[^}]*grid-template-columns:repeat\(var\(--mse-activity-weeks\),minmax\(0,1fr\)\)[^}]*width:100%;min-width:0\}/u,
+        'all 54 columns shrink within the activity panel')
       assert.match(clientModule.__test.STYLE,
-        /\.mse-details \.mse-activity-months,\.mse-details \.mse-activity-grid\{display:grid;grid-template-columns:repeat\(var\(--mse-activity-weeks\),minmax\(0,1fr\)\);column-gap:2px;width:100%\}/u,
-        'month labels and date columns share the same responsive grid tracks')
+        /\.mse-details \.mse-activity-empty\{display:block;width:100%;min-width:0;aspect-ratio:1/u,
+        'non-interactive date placeholders cannot expand the grid')
       assert.match(clientModule.__test.STYLE,
         /\.mse-activity-months span\.mse-activity-month-final\{min-width:max-content;overflow:visible;justify-self:end\}/u,
-        'the last short month label stays complete without extending the grid')
+        'the last short month label stays complete without adding implicit columns')
       assert.match(clientModule.__test.STYLE,
-        /\.mse-activity-scroll\{[^}]*max-width:100%;[^}]*overflow-x:auto/u,
-        'overflow stays inside the activity scroller')
-      assert.match(clientModule.__test.STYLE, /mse-activity-cell:focus-visible\{outline:/u,
+        /\.mse-activity-day\[data-level="5"\]\{background:oklch\(/u,
+        'the activity chart has the fifth Usage-inspired color level')
+      assert.match(clientModule.__test.STYLE, /mse-activity-day:focus-visible\{outline:/u,
         'native keyboard focus remains visible')
 
       // (6) 学习状态 tab: corrections saved/pending/ignored + usage audit — real values.
@@ -2011,6 +2194,8 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
   } finally {
     globalThis.window = savedWindow
     globalThis.document = savedDoc
+    if (savedLocalStorage === undefined) delete globalThis.localStorage
+    else Object.defineProperty(globalThis, 'localStorage', savedLocalStorage)
   }
 })
 

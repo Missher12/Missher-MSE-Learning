@@ -51,13 +51,19 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     settingsTitle: '自我进化', runtimeGroup: '运行设置',
     tabOverview: '常规', tabLessons: '经验', tabRecall: '召回', tabTasks: '任务', tabUsage: '学习状态',
     tabActivity: '活动',
-    activityTitle: '新增记录', activityToday: '今天新增', activityWeek: '本周新增',
-    activityRetained: '当前保留', activityEntries: '条', activityDay: '按日', activityWeekMode: '按周',
-    activityTotal: '累计', activityChart: '最近 365 天的每日新增', activitySelected: '所选区间',
+    activityTitle: '活动', activityToday: '今天新增', activityWeek: '本周新增',
+    activityRetained: '当前保留', activityEntries: '条', activityDay: '每日', activityWeekMode: '每周',
+    activityTotal: '累计', activityChart: '活动热力图',
     activityRule: '规则', activityLesson: '经验', activityDigest: '总结',
     activityHistoryNote: '按当前保留记录的创建时间统计；已删除归档无法补算。',
     activityDetails: '统计口径', activityImported: '导入记录', activityUnknown: '创建时间无效',
     activityFuture: '未来记录（未计入新增）', activityBeforeWindow: '一年窗口前',
+    activityCumulativeThrough: '累计至', activityColorLabel: '活动配色', activityColorMenu: '配色',
+    activityThemeColor: '跟随主题', activityVioletColor: '暮紫', activityBlueColor: '湖蓝',
+    activityTealColor: '青绿', activityAmberColor: '暖金', activityRoseColor: '烟粉',
+    activityCustomColor: '自定义颜色…',
+    activityDayTooltip: '{date} · {count} 条', activityWeekTooltip: '{start} — {end} · {count} 条',
+    activityTotalTooltip: '截至 {date} 累计 · {count} 条',
     adaptiveCandidates: '自适应候选', adaptiveNoCandidates: '暂无候选',
     adaptiveObserving: '观察中', adaptiveApproved: '已启用', adaptiveIsolated: '已停用',
     adaptiveLegacy: '旧版策略（不继承分数）', adaptiveTarget: '目标版本',
@@ -258,15 +264,21 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     finishKindLabel: 'Finish reason', verdictLabel: 'Output diagnosis',
     reasoningSpace: 'Generation limit reached without body text (possibly reasoning output)',
     daysProcessed: 'Days processed', none: 'None',
-    activityTitle: 'New entries', activityToday: 'Added today', activityWeek: 'Added this week',
+    activityTitle: 'Activity', activityToday: 'Added today', activityWeek: 'Added this week',
     activityRetained: 'Retained', activityEntries: 'entries', activityDay: 'Daily', activityWeekMode: 'Weekly',
-    activityTotal: 'All time', activityChart: 'Daily additions over the last 365 days',
-    activitySelected: 'Selected period', activityRule: 'Rules', activityLesson: 'Lessons',
+    activityTotal: 'Cumulative', activityChart: 'Activity heatmap',
+    activityRule: 'Rules', activityLesson: 'Lessons',
     activityDigest: 'Summaries',
     activityHistoryNote: 'Counts use retained entries and original creation dates. Deleted archive history cannot be recovered.',
     activityDetails: 'Counting details', activityImported: 'Imported entries',
     activityUnknown: 'Invalid creation dates', activityFuture: 'Future entries excluded',
     activityBeforeWindow: 'Before this year window', adaptiveCandidates: 'Adaptive candidates',
+    activityCumulativeThrough: 'Cumulative through', activityColorLabel: 'Activity colour',
+    activityColorMenu: 'Colour', activityThemeColor: 'Follow theme', activityVioletColor: 'Dusk violet',
+    activityBlueColor: 'Lake blue', activityTealColor: 'Teal', activityAmberColor: 'Warm gold',
+    activityRoseColor: 'Dusty rose', activityCustomColor: 'Custom colour…',
+    activityDayTooltip: '{date} · {count} entries', activityWeekTooltip: '{start} — {end} · {count} entries',
+    activityTotalTooltip: 'Cumulative through {date} · {count} entries',
     adaptiveNoCandidates: 'No candidates', adaptiveObserving: 'Observing', adaptiveApproved: 'Active',
     adaptiveIsolated: 'Disabled', adaptiveLegacy: 'Legacy policy (evidence not inherited)',
     adaptiveTarget: 'Target version', adaptiveSource: 'Source permission', adaptiveSourceYes: 'Valid',
@@ -275,6 +287,130 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     adaptiveSuccessor: 'A newer v2 policy exists; v1 evidence is not counted.',
     adaptiveTargetCurrent: 'Current version', adaptiveTargetChanged: 'Version changed',
     adaptiveTargetRetired: 'Retired', adaptiveTargetRevision: 'Needs revision',
+  }
+  // Activity chart patterns are adapted from Missher-DSH-Usage-Statistics; all data stays MSE-owned.
+  const ACTIVITY_COLOR_KEY = 'dsh.mse-learning.activity-color.v1'
+  const ACTIVITY_MODES = ['day', 'week', 'total']
+  const ACTIVITY_COLOR_PRESETS = [
+    { id: 'themeColor', color: '', label: 'activityThemeColor' },
+    { id: 'violetColor', color: '#8b6ccf', label: 'activityVioletColor' },
+    { id: 'blueColor', color: '#447fcb', label: 'activityBlueColor' },
+    { id: 'tealColor', color: '#369f97', label: 'activityTealColor' },
+    { id: 'amberColor', color: '#c69749', label: 'activityAmberColor' },
+    { id: 'roseColor', color: '#ca758f', label: 'activityRoseColor' },
+  ]
+  function readActivityColor() {
+    try {
+      const value = globalThis.localStorage?.getItem(ACTIVITY_COLOR_KEY)
+      return typeof value === 'string' && /^#[0-9a-f]{6}$/iu.test(value) ? value.toLowerCase() : ''
+    } catch { return '' }
+  }
+  function writeActivityColor(value) {
+    try {
+      if (value === '') globalThis.localStorage?.removeItem(ACTIVITY_COLOR_KEY)
+      else globalThis.localStorage?.setItem(ACTIVITY_COLOR_KEY, value)
+    } catch { /* Renderer storage can be unavailable; the current choice still works in memory. */ }
+  }
+  function activityCounts(rows) {
+    return rows.reduce((sum, row) => ({ total: sum.total + row.total,
+      rule: sum.rule + row.rule, lesson: sum.lesson + row.lesson, digest: sum.digest + row.digest }),
+    { total: 0, rule: 0, lesson: 0, digest: 0 })
+  }
+  function activityColorLevel(value, maximum) {
+    return value <= 0 || maximum <= 0 ? 0 : Math.min(5, Math.max(1, Math.ceil(5 * value / maximum)))
+  }
+  function projectActivityWeeks(activity, mode) {
+    const selectedMode = ACTIVITY_MODES.includes(mode) ? mode : 'day'
+    const baseline = { total: activity.beforeWindow?.total ?? 0,
+      rule: activity.beforeWindow?.rule ?? 0, lesson: activity.beforeWindow?.lesson ?? 0,
+      digest: activity.beforeWindow?.digest ?? 0 }
+    let running = { ...baseline }
+    const periods = activity.weeks.map(week => {
+      const visibleDays = week.days.filter(Boolean)
+      const visibleCounts = activityCounts(visibleDays)
+      const weekSummary = activity.weekSummaries?.find(row => row.start === week.start)
+      const counts = weekSummary === undefined ? visibleCounts : {
+        total: weekSummary.total, rule: weekSummary.rule, lesson: weekSummary.lesson, digest: weekSummary.digest,
+      }
+      running = { total: running.total + visibleCounts.total, rule: running.rule + visibleCounts.rule,
+        lesson: running.lesson + visibleCounts.lesson, digest: running.digest + visibleCounts.digest }
+      const end = new Date(`${week.start}T00:00:00.000Z`)
+      end.setUTCDate(end.getUTCDate() + 6)
+      return { start: week.start, end: weekSummary?.end ?? end.toISOString().slice(0, 10),
+        actualEnd: visibleDays.at(-1)?.date ?? null, sourceDays: week.days, visibleCounts, counts,
+        cumulativeCounts: { ...running } }
+    })
+    const maximum = selectedMode === 'day'
+      ? Math.max(0, ...periods.flatMap(period => period.sourceDays.filter(Boolean).map(day => day.total)))
+      : selectedMode === 'week'
+        ? Math.max(0, ...periods.map(period => period.counts.total))
+        : Math.max(baseline.total, ...periods.map(period => period.cumulativeCounts.total))
+    return periods.map(period => {
+      const displayTotal = selectedMode === 'day' ? null
+        : selectedMode === 'week' ? period.counts.total : period.cumulativeCounts.total
+      const level = selectedMode === 'day' ? null : activityColorLevel(displayTotal, maximum)
+      const filledRows = selectedMode === 'week'
+        ? (displayTotal <= 0 || maximum <= 0 ? 0
+          : Math.min(7, Math.max(1, Math.ceil(Math.log1p(displayTotal) / Math.log1p(maximum) * 7))))
+        : selectedMode === 'total'
+          ? (displayTotal <= 0 || maximum <= 0 ? 0
+            : Math.min(7, Math.max(1, Math.ceil(displayTotal / maximum * 7)))) : 7
+      const visibleRows = period.sourceDays.flatMap((day, row) => day === null ? [] : [row])
+      const visibleRank = new Map(visibleRows.map((row, index) => [row, index]))
+      const visibleFillCount = Math.min(filledRows, visibleRows.length)
+      return { ...period, days: period.sourceDays.map((day, row) => {
+        if (day === null) return null
+        const dayLevel = selectedMode === 'day' ? activityColorLevel(day.total, maximum)
+          : visibleRank.get(row) >= visibleRows.length - visibleFillCount ? level : 0
+        return { ...day, displayTotal: selectedMode === 'day' ? day.total : displayTotal,
+          level: dayLevel, periodStart: selectedMode === 'day' ? day.date : period.start,
+          periodEnd: selectedMode === 'day' ? day.date
+            : selectedMode === 'week' ? period.end : period.actualEnd ?? day.date }
+      }) }
+    })
+  }
+  function activityTooltipText(dict, mode, day) {
+    const template = mode === 'day' ? dict.activityDayTooltip
+      : mode === 'week' ? dict.activityWeekTooltip : dict.activityTotalTooltip
+    const values = { date: day.periodEnd, start: day.periodStart, end: day.periodEnd,
+      count: String(day.displayTotal) }
+    return template.replace(/\{(date|start|end|count)\}/gu, (_, key) => values[key])
+  }
+  function activityColorSwatch(value) {
+    return h('span', { className: 'mse-activity-color-swatch',
+      style: { '--mse-activity-swatch': value || 'var(--dsw-alias-state-business-primary)' },
+      'aria-hidden': true }, [h('i', { key: '1' }), h('i', { key: '2' }), h('i', { key: '3' })])
+  }
+  function ActivityColorPicker({ color, onChange, dict }) {
+    const [open, setOpen] = React.useState(false)
+    const input = React.useRef(null)
+    const selected = ACTIVITY_COLOR_PRESETS.find(preset => preset.color === color)
+    return h('div', { className: 'mse-activity-color-control' }, [
+      h(Menu, { open, onClose: () => setOpen(false), portal: true, compact: true,
+        selectedId: selected?.id ?? 'customColor', listClassName: 'mse-activity-color-menu',
+        anchor: h('button', { type: 'button', className: 'mse-activity-color-trigger',
+          'aria-label': dict.activityColorLabel, 'aria-haspopup': 'menu', 'aria-expanded': open,
+          onClick: () => setOpen(value => !value) }, [activityColorSwatch(color),
+          h('span', { key: 'label' }, dict.activityColorMenu),
+          h('svg', { key: 'arrow', viewBox: '0 0 16 16', width: 12, height: 12,
+            fill: 'none', 'aria-hidden': true }, h('path', { d: 'm4 6 4 4 4-4',
+            stroke: 'currentColor', strokeWidth: 1.4, strokeLinecap: 'round', strokeLinejoin: 'round' }))]),
+        items: [...ACTIVITY_COLOR_PRESETS.map(preset => ({ id: preset.id,
+          label: dict[preset.label], icon: activityColorSwatch(preset.color) })),
+        { type: 'separator', id: 'custom-separator' },
+        { id: 'customColor', label: dict.activityCustomColor, icon: activityColorSwatch(color) }],
+        onSelect: id => {
+          setOpen(false)
+          if (id === 'customColor') input.current?.click()
+          else {
+            const preset = ACTIVITY_COLOR_PRESETS.find(item => item.id === id)
+            if (preset !== undefined) onChange(preset.color)
+          }
+        } }),
+      h('input', { key: 'custom', ref: input, className: 'mse-activity-color-input',
+        type: 'color', tabIndex: -1, 'aria-label': dict.activityCustomColor,
+        value: color || '#4d6bfe', onChange: event => onChange(event.currentTarget.value.toLowerCase()) }),
+    ])
   }
   const TYPE_ZH = { rule: zh.typeRule, lesson: zh.typeLesson, digest: zh.typeDigest }
   const TYPE_EN = { rule: en.typeRule, lesson: en.typeLesson, digest: en.typeDigest }
@@ -510,22 +646,50 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-error{color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:20px;overflow-wrap:anywhere}
 .mse-details .mse-notice{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px;min-height:20px;overflow-wrap:anywhere}
 .mse-details .mse-inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-width:0}
-.mse-details .mse-activity-scroll{width:100%;max-width:100%;min-width:0;box-sizing:border-box;overflow-x:auto;overscroll-behavior-x:contain;padding:8px 0 12px}
-.mse-details .mse-activity-layout{display:block;width:100%;min-width:376px}
-.mse-details .mse-activity-chart{min-width:0;width:100%}
-.mse-details .mse-activity-months,.mse-details .mse-activity-grid{display:grid;grid-template-columns:repeat(var(--mse-activity-weeks),minmax(0,1fr));column-gap:2px;width:100%}
-.mse-details .mse-activity-months{font-size:9px;line-height:12px;color:var(--dsw-alias-label-secondary);height:18px;align-items:end}
+.mse-details .mse-activity-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));margin:0;overflow:hidden;border:0.5px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-3)}
+.mse-details .mse-activity-metric{display:flex;min-width:0;flex-direction:column;align-items:center;padding:8px 6px;text-align:center}
+.mse-details .mse-activity-metric+.mse-activity-metric{border-left:0.5px solid var(--dsw-alias-border-l2)}
+.mse-details .mse-activity-metric dt,.mse-details .mse-activity-metric dd{max-width:100%;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mse-details .mse-activity-metric dd{font-size:14px;line-height:21px;font-weight:500;font-variant-numeric:tabular-nums}
+.mse-details .mse-activity-metric dd span{margin-left:3px;font-size:10px;font-weight:400;color:var(--dsw-alias-label-tertiary)}
+.mse-details .mse-activity-metric dt{font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary)}
+.mse-details .mse-activity-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:22px 0 16px;min-width:0}
+.mse-details .mse-activity-title{display:flex;align-items:center;gap:8px;min-width:0}
+.mse-details .mse-activity-title h3{margin:0;font-size:15px;line-height:22px;font-weight:500}
+.mse-details .mse-activity-color-control{position:relative;display:flex;min-width:0}
+.mse-details .mse-activity-color-trigger{display:inline-flex;align-items:center;gap:5px;min-height:30px;padding:5px 8px;border:0;border-radius:999px;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:11px;line-height:16px;cursor:pointer}
+.mse-details .mse-activity-color-trigger:hover,.mse-details .mse-activity-color-trigger[aria-expanded="true"]{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.mse-details .mse-activity-color-swatch{display:inline-flex;align-items:center;gap:2px}
+.mse-details .mse-activity-color-swatch i{width:4px;height:11px;border-radius:2px;background:var(--mse-activity-swatch)}
+.mse-details .mse-activity-color-swatch i:first-child{opacity:.35}
+.mse-details .mse-activity-color-swatch i:nth-child(2){opacity:.65}
+.mse-details .mse-activity-color-menu{min-width:176px;border-radius:20px}
+.mse-details .mse-activity-color-input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.mse-details .mse-activity-color-trigger:focus-visible,.mse-details .mse-activity-tabs button:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px}
+.mse-details .mse-activity-tabs{display:inline-flex;flex:none;max-width:100%;gap:2px;padding:3px;border-radius:999px;background:var(--dsw-alias-interactive-bg-hover)}
+.mse-details .mse-activity-tabs button{min-width:0;min-height:28px;padding:4px 10px;border:0;border-radius:999px;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:11px;line-height:18px;white-space:nowrap;cursor:pointer}
+.mse-details .mse-activity-tabs button[aria-selected="true"]{background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary)}
+.mse-details .mse-activity-chart-panel,.mse-details .mse-activity-chart{width:100%;min-width:0}
+.mse-details .mse-activity-chart{margin:0}
+.mse-details .mse-activity-stage{position:relative;width:100%;min-width:0}
+.mse-details .mse-activity-tooltip{position:absolute;z-index:2;top:-28px;left:var(--mse-activity-tooltip-x);max-width:calc(100% - 8px);overflow:hidden;transform:translateX(-50%);border:0;border-radius:8px;padding:5px 9px;background:var(--dsw-alias-bg-layer-3);box-shadow:var(--dsw-shadow-lv1);color:var(--dsw-alias-label-primary);font-size:11px;line-height:18px;pointer-events:none;text-overflow:ellipsis;white-space:nowrap}
+.mse-details .mse-activity-tooltip[data-edge="left"]{left:0;transform:none}
+.mse-details .mse-activity-tooltip[data-edge="right"]{right:0;left:auto;transform:none}
+.mse-details .mse-activity-grid{display:grid;grid-template-columns:repeat(var(--mse-activity-weeks),minmax(0,1fr));grid-template-rows:repeat(7,minmax(0,1fr));grid-auto-flow:column;gap:3px;width:100%;min-width:0}
+.mse-details .mse-activity-week{display:contents}
+.mse-details .mse-activity-day{display:block;appearance:none;width:100%;height:auto;min-width:0;min-height:0;aspect-ratio:1;padding:0;border:0;border-radius:2px;background:var(--dsw-alias-bg-skeleton);font-size:0;line-height:0;cursor:pointer}
+.mse-details .mse-activity-day[data-level="1"]{background:oklch(from var(--mse-activity-color,var(--dsw-alias-state-business-primary)) .89 calc(c * .35) h)}
+.mse-details .mse-activity-day[data-level="2"]{background:oklch(from var(--mse-activity-color,var(--dsw-alias-state-business-primary)) .78 calc(c * .55) h)}
+.mse-details .mse-activity-day[data-level="3"]{background:oklch(from var(--mse-activity-color,var(--dsw-alias-state-business-primary)) .67 calc(c * .75) h)}
+.mse-details .mse-activity-day[data-level="4"]{background:oklch(from var(--mse-activity-color,var(--dsw-alias-state-business-primary)) .56 calc(c * .9) h)}
+.mse-details .mse-activity-day[data-level="5"]{background:oklch(from var(--mse-activity-color,var(--dsw-alias-state-business-primary)) .45 c h)}
+.mse-details .mse-activity-day[aria-pressed="true"]{outline:2px solid var(--dsw-alias-label-primary);outline-offset:1px}
+.mse-details .mse-activity-day:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:2px;z-index:1}
+.mse-details .mse-activity-empty{display:block;width:100%;min-width:0;aspect-ratio:1;background:transparent}
+.mse-details .mse-activity-months{display:grid;grid-template-columns:repeat(var(--mse-activity-weeks),minmax(0,1fr));column-gap:3px;width:100%;min-width:0;margin-top:7px;color:var(--dsw-alias-label-tertiary);font-size:9px;line-height:14px;text-align:left}
 .mse-details .mse-activity-months span{min-width:0;overflow:hidden;white-space:nowrap}
 .mse-details .mse-activity-months span.mse-activity-month-final{min-width:max-content;overflow:visible;justify-self:end}
-.mse-details .mse-activity-week{display:grid;grid-template-rows:repeat(7,auto);row-gap:2px;min-width:0}
-.mse-details .mse-activity-cell{display:block;box-sizing:border-box;width:100%;height:auto;min-width:0;aspect-ratio:1;padding:0;border:0.5px solid var(--dsw-alias-border-l2);border-radius:1px;background:var(--dsw-alias-bg-module-platform)}
-.mse-details .mse-activity-cell[data-level="1"]{background:color-mix(in srgb,var(--dsw-alias-state-success-primary,var(--dsw-alias-label-primary)) 18%,var(--dsw-alias-bg-module-platform))}
-.mse-details .mse-activity-cell[data-level="2"]{background:color-mix(in srgb,var(--dsw-alias-state-success-primary,var(--dsw-alias-label-primary)) 34%,var(--dsw-alias-bg-module-platform))}
-.mse-details .mse-activity-cell[data-level="3"]{background:color-mix(in srgb,var(--dsw-alias-state-success-primary,var(--dsw-alias-label-primary)) 54%,var(--dsw-alias-bg-module-platform))}
-.mse-details .mse-activity-cell[data-level="4"]{background:var(--dsw-alias-state-success-primary,var(--dsw-alias-label-primary));color:var(--dsw-alias-bg-module-platform)}
-.mse-details .mse-activity-cell[aria-pressed="true"]{outline:2px solid var(--dsw-alias-label-primary);outline-offset:1px}
-.mse-details .mse-activity-cell:focus-visible{outline:2px solid var(--dsw-alias-state-success-primary,var(--dsw-alias-label-primary));outline-offset:2px}
-.mse-details .mse-activity-empty{display:block;box-sizing:border-box;width:100%;min-width:0;aspect-ratio:1}
+.mse-details .mse-activity-history{margin:0 0 12px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px;overflow-wrap:anywhere}
 @media(max-width:620px){
 .mse-details .mse-row { gap: 12px; padding: 10px 0; }
 .mse-details .mse-metrics{gap:8px}
@@ -534,6 +698,10 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-summary{flex-basis:calc(100% - 26px)}
 .mse-details .mse-meta{order:3;justify-content:flex-start;flex:1 1 100%}
 .mse-details .mse-definition{grid-template-columns:minmax(70px,auto) minmax(0,1fr);gap:8px 12px}
+}
+@media(max-width:420px){
+.mse-details .mse-activity-header{align-items:flex-start;flex-direction:column;gap:8px}
+.mse-details .mse-activity-grid,.mse-details .mse-activity-months{column-gap:2px}
 }
 .mse-details .mse-picker-trigger { position: relative; justify-content: center; padding-inline: 28px; }
 .mse-details .mse-picker-chevrons { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); }
@@ -719,6 +887,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const [openEntry, setOpenEntry] = React.useState(null)
     const [activityMode, setActivityMode] = React.useState('day')
     const [activityDate, setActivityDate] = React.useState(null)
+    const [activityColor, setActivityColorState] = React.useState(readActivityColor())
+    const [activityTooltip, setActivityTooltip] = React.useState(null)
+    const activityTabRefs = React.useRef([])
     const [shell, setShell] = React.useState({ status: 'idle', value: null, error: null })
     // Three-state like the original: "we could not read it" is NOT "it is running".
     const [controlState, setControlState] = React.useState({ status: 'unknown', paused: null })
@@ -1084,28 +1255,42 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 
     // ── 活动 ─────────────────────────────────────────────────────────────────────────
     const activity = view?.activity ?? null
+    const activityProjection = activity === null ? [] : projectActivityWeeks(activity, activityMode)
     const selectedActivityDate = activity?.days.some(day => day.date === activityDate)
       ? activityDate : activity?.todayDate ?? null
     const selectedActivityDay = activity?.days.find(day => day.date === selectedActivityDate) ?? null
-    const selectedActivityWeekStart = selectedActivityDate === null ? null : (() => {
-      const day = new Date(`${selectedActivityDate}T00:00:00.000Z`)
-      day.setUTCDate(day.getUTCDate() - ((day.getUTCDay() + 6) % 7))
-      return day.toISOString().slice(0, 10)
-    })()
-    const selectedActivityWeek = activity?.weekSummaries?.find(row => row.start === selectedActivityWeekStart)
-      ?? (selectedActivityWeekStart === null ? null : selectedActivityWeekStart === activity?.week?.start
-        ? activity?.week : { start: selectedActivityWeekStart,
-          end: selectedActivityWeekStart === activity?.week?.start ? activity.todayDate : (() => {
-            const day = new Date(`${selectedActivityWeekStart}T00:00:00.000Z`)
-            day.setUTCDate(day.getUTCDate() + 6)
-            return day.toISOString().slice(0, 10)
-          })(), total: 0, rule: 0, lesson: 0, digest: 0 })
+    const selectedActivityPeriod = activityProjection.find(period =>
+      period.sourceDays.some(day => day?.date === selectedActivityDate)) ?? null
     const selectedActivityCounts = activityMode === 'day' ? selectedActivityDay
-      : activityMode === 'week' ? selectedActivityWeek
-        : activity === null ? null : { ...activity.knownTypes, total: activity.knownNew }
-    const selectedActivityRange = activityMode === 'day' ? selectedActivityDate
-      : activityMode === 'week' && selectedActivityWeek !== null && selectedActivityWeek !== undefined
-        ? `${selectedActivityWeek.start} — ${selectedActivityWeek.end}` : dict.activityTotal
+      : activityMode === 'week' ? selectedActivityPeriod?.counts
+        : selectedActivityPeriod?.cumulativeCounts
+    const selectedActivitySummary = selectedActivityCounts === null || selectedActivityCounts === undefined
+      ? '—' : activityMode === 'day'
+        ? `${selectedActivityDate} · ${selectedActivityCounts.total} ${dict.activityEntries}`
+        : activityMode === 'week'
+          ? `${selectedActivityPeriod.start} — ${selectedActivityPeriod.end} · ${selectedActivityCounts.total} ${dict.activityEntries}`
+          : `${dict.activityCumulativeThrough} ${selectedActivityPeriod.actualEnd ?? activity.todayDate} · ${selectedActivityCounts.total} ${dict.activityEntries}`
+    const updateActivityMode = mode => {
+      setActivityMode(mode)
+      setActivityTooltip(null)
+    }
+    const onActivityModeKey = (event, index) => {
+      let next = null
+      if (event.key === 'ArrowRight') next = (index + 1) % ACTIVITY_MODES.length
+      else if (event.key === 'ArrowLeft') next = (index + ACTIVITY_MODES.length - 1) % ACTIVITY_MODES.length
+      else if (event.key === 'Home') next = 0
+      else if (event.key === 'End') next = ACTIVITY_MODES.length - 1
+      if (next === null) return
+      event.preventDefault()
+      updateActivityMode(ACTIVITY_MODES[next])
+      activityTabRefs.current[next]?.focus()
+    }
+    const updateActivityColor = value => {
+      if (value !== '' && !/^#[0-9a-f]{6}$/iu.test(value)) return
+      const normalized = value.toLowerCase()
+      setActivityColorState(normalized)
+      writeActivityColor(normalized)
+    }
     const activityBlock = activity === null ? null : (() => {
       const visibleDate = week => week.days.find(day => day !== null)
       const monthPositions = []
@@ -1123,56 +1308,90 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         className: index === monthPositions.length - 1 ? 'mse-activity-month-final' : undefined,
         style: { gridColumn: `${position.start} / ${monthPositions[index + 1]?.start
           ?? activity.weeks.length + 1}` } }, position.label))
-      const cells = activity.weeks.map(week => h('div', { key: week.start, className: 'mse-activity-week',
-        role: 'group', 'aria-label': week.start }, week.days.map((day, index) => {
+      const showActivityTooltip = (day, weekIndex, source) => {
+        const text = activityTooltipText(dict, activityMode, day)
+        setActivityTooltip({ text, source, edge: weekIndex < 8 ? 'left'
+          : weekIndex >= activity.weeks.length - 8 ? 'right' : 'middle',
+        x: `${(weekIndex + 0.5) / activity.weeks.length * 100}%` })
+      }
+      const cells = activityProjection.map((week, weekIndex) => h('div', { key: week.start,
+        className: 'mse-activity-week' }, week.days.map((day, index) => {
         if (day === null) return h('span', { key: `${week.start}-${index}`,
           className: 'mse-activity-empty', 'aria-hidden': true })
-        const level = day.total === 0 ? 0 : day.total === 1 ? 1 : day.total <= 3 ? 2 : day.total <= 7 ? 3 : 4
-        return h('button', { key: day.date, type: 'button', className: 'mse-activity-cell',
-          'data-level': level, 'aria-label': `${day.date}: ${day.total} ${dict.activityEntries}`,
+        const tooltipText = activityTooltipText(dict, activityMode, day)
+        return h('button', { key: day.date, type: 'button', className: 'mse-activity-day',
+          'data-activity-date': day.date, 'data-activity-mode': activityMode,
+          'data-display-total': day.displayTotal, 'data-level': day.level,
+          'aria-label': `${day.date}; ${tooltipText}`,
           'aria-pressed': day.date === selectedActivityDate,
-          title: `${day.date} · ${day.total} ${dict.activityEntries}`,
-          onClick: () => setActivityDate(day.date) })
+          title: tooltipText,
+          onClick: () => setActivityDate(day.date),
+          onMouseEnter: () => showActivityTooltip(day, weekIndex, 'hover'),
+          onFocus: () => showActivityTooltip(day, weekIndex, 'focus'),
+          onBlur: () => setActivityTooltip(null) })
       })))
       const detail = selectedActivityCounts === null ? null : definition('activity-counts', [
-        [dict.activitySelected, selectedActivityRange ?? '—'],
-        [dict.activityEntries, String(selectedActivityCounts.total ?? 0)],
         [dict.activityRule, String(selectedActivityCounts.rule ?? 0)],
         [dict.activityLesson, String(selectedActivityCounts.lesson ?? 0)],
         [dict.activityDigest, String(selectedActivityCounts.digest ?? 0)],
       ], { left: true })
+      const summary = [
+        [dict.activityToday, activity.today.total],
+        [dict.activityWeek, activity.week.total],
+        [dict.activityRetained, activity.retained],
+      ].map(([label, value]) => h('div', { key: label, className: 'mse-activity-metric' }, [
+        h('dd', { key: 'value' }, [String(value), h('span', { key: 'unit' }, dict.activityEntries)]),
+        h('dt', { key: 'label' }, label),
+      ]))
+      const tabs = ACTIVITY_MODES.map((mode, index) => {
+        const label = mode === 'day' ? dict.activityDay
+          : mode === 'week' ? dict.activityWeekMode : dict.activityTotal
+        return h('button', { key: mode, id: `mse-activity-${mode}-tab`, type: 'button', role: 'tab',
+          'aria-selected': activityMode === mode, 'aria-controls': 'mse-activity-panel',
+          tabIndex: activityMode === mode ? 0 : -1, ref: node => { activityTabRefs.current[index] = node },
+          onClick: () => updateActivityMode(mode), onKeyDown: event => onActivityModeKey(event, index) }, label)
+      })
       return h(React.Fragment, null, [
-        h('div', { key: 'metrics', className: 'mse-metrics' }, [
-          metric(dict.activityToday, String(activity.today.total), dict.activityEntries),
-          metric(dict.activityWeek, String(activity.week.total), dict.activityEntries),
-          metric(dict.activityRetained, String(activity.retained), dict.activityEntries),
+        h('dl', { key: 'metrics', className: 'mse-activity-summary' }, summary),
+        h('div', { key: 'header', className: 'mse-activity-header' }, [
+          h('div', { key: 'title', className: 'mse-activity-title' }, [
+            h('h3', { key: 'heading' }, dict.activityTitle),
+            h(ActivityColorPicker, { key: 'color', color: activityColor,
+              onChange: updateActivityColor, dict }),
+          ]),
+          h('div', { key: 'tabs', className: 'mse-activity-tabs', role: 'tablist',
+            'aria-label': dict.activityTitle }, tabs),
         ]),
-        h('div', { key: 'toolbar', className: 'mse-inline', style: { justifyContent: 'space-between' } }, [
-          h(Picker, { key: 'mode', label: dict.activityTitle, prefix: dict.activityTitle,
-            value: activityMode, testId: 'activity-mode',
-            options: [{ id: 'day', label: dict.activityDay }, { id: 'week', label: dict.activityWeekMode },
-              { id: 'total', label: dict.activityTotal }], onChange: setActivityMode }),
-          h('span', { key: 'window', className: 'mse-unit' }, `${activity.windowStart} — ${activity.todayDate}`),
+        h('div', { key: 'chart-panel', id: 'mse-activity-panel',
+          className: 'mse-activity-chart-panel', role: 'tabpanel',
+          'aria-labelledby': `mse-activity-${activityMode}-tab`,
+          style: { '--mse-activity-color': activityColor || 'var(--dsw-alias-state-business-primary)' } }, [
+          h('div', { key: 'chart', className: 'mse-activity-chart',
+            style: { '--mse-activity-weeks': activity.weeks.length } }, [
+            h('div', { key: 'stage', className: 'mse-activity-stage',
+              onMouseLeave: () => setActivityTooltip(current => current?.source === 'hover' ? null : current) }, [
+              activityTooltip === null ? null : h('div', { key: 'tooltip', className: 'mse-activity-tooltip',
+                'data-edge': activityTooltip.edge, role: 'tooltip',
+                style: { '--mse-activity-tooltip-x': activityTooltip.x } }, activityTooltip.text),
+              h('div', { key: 'grid', className: 'mse-activity-grid', role: 'group',
+                'aria-label': dict.activityChart }, cells),
+            ]),
+            h('div', { key: 'months', className: 'mse-activity-months', 'aria-hidden': true }, months),
+          ]),
         ]),
-        h('div', { key: 'scroll', className: 'mse-activity-scroll' },
-          h('div', { className: 'mse-activity-layout', role: 'group', 'aria-label': dict.activityChart },
-            h('div', { key: 'chart', className: 'mse-activity-chart',
-              style: { '--mse-activity-weeks': activity.weeks.length } }, [
-              h('div', { key: 'months', className: 'mse-activity-months' }, months),
-              h('div', { key: 'grid', className: 'mse-activity-grid' }, cells),
-            ]))),
-        detail,
-        h('p', { key: 'note', className: 'mse-hint' }, dict.activityHistoryNote),
-        disclosure('activity-details', dict.activityDetails, definition('activity-meta', [
-          [dict.activityImported, String(activity.imported)],
-          [dict.activityUnknown, String(activity.unknownCreatedAt)],
-          [dict.activityFuture, String(activity.futureExcluded)],
-          [dict.activityBeforeWindow, `${activity.beforeWindow.total} · ${dict.activityEntries}`],
-        ], { left: true }), { id: 'activity-details' }),
+        disclosure('activity-selection', selectedActivitySummary, detail, { id: 'activity-selection' }),
+        disclosure('activity-details', dict.activityDetails, h(React.Fragment, null, [
+          h('p', { key: 'policy', className: 'mse-activity-history' }, dict.activityHistoryNote),
+          definition('activity-meta', [
+            [dict.activityImported, String(activity.imported)],
+            [dict.activityUnknown, String(activity.unknownCreatedAt)],
+            [dict.activityFuture, String(activity.futureExcluded)],
+            [dict.activityBeforeWindow, `${activity.beforeWindow.total} · ${dict.activityEntries}`],
+          ], { left: true }),
+        ]), { id: 'activity-details' }),
       ])
     })()
     const activityPanel = h(React.Fragment, { key: 'activity' }, [
-      h('h2', { key: 'title', className: 'mse-section-title' }, dict.activityTitle),
       activityBlock ?? h('p', { key: 'loading', className: 'mse-hint' }, dict.loading),
     ])
 
@@ -1377,6 +1596,6 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     __test: { NS, SETTINGS_ID, BUNDLE, TABS, STYLE, STATUS_CONTRIB, CONTROL_CONTRIB, zh,
       STATUS_ZH, TYPE_ZH, REASON_ZH, WAIT_ZH, en,
       row, disclosure, definition, metric, Picker, settingsTabNavigation, callRemote,
-      useFormSnapshot, MsePanel, BundlePage },
+      useFormSnapshot, projectActivityWeeks, activityTooltipText, MsePanel, BundlePage },
   }
 } })
