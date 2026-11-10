@@ -2,7 +2,7 @@
 
 <h1>MSE Learning · 自我进化</h1>
 
-<p><img src="../docs/images/overview.svg" alt="MSE Learning 功能示意" width="100%"></p>
+<p><img src="../docs/images/cover-v2.png" alt="MSE Learning · 持久学习（品牌插画）" width="100%"></p>
 
 <p>让长期纠正和失败经验，在后续相关任务中派上用场。</p>
 

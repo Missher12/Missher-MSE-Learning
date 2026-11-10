@@ -1,5 +1,7 @@
 # MSE Learning
 
+![MSE Learning · 持久学习（品牌插画）](docs/images/cover-v2.png)
+
 MSE learns standing corrections and lessons from actual failures in DSH. **1.2.1 candidate** preserves the existing learning store, settings, and five-page interface, corrects ranking for saved user rules in task-related recall, and adds local inspect, explicit export, retired-entry archiving, and recovery to a new directory. The first effective step 1 combines the turn-fact and route writes in one transaction while retaining file and directory sync durability. The adaptive recall page shows recent persisted decisions and bounded native-event diagnostics. Diagnostics contain only fixed reasons and shortened identifiers; they omit content, commands, and paths, and clear on restart. Store capacity remains bounded and old lessons are never deleted automatically. The two-method, one-warning, 768 UTF-8 byte limit remains in effect. The host reports the installed version.
 
 Ordinary user corrections no longer require a remember keyword. Suspected corrections enter a bounded, source-bound extraction after the turn; concrete reusable rules persist and recall in later related sessions/projects. Negations and project limits are retained; one-off requests, questions and quoted logs are not automatically promoted. The status page shows saved, pending and ignored extraction results. This uses the existing learning model route and switches, not a model call for every message.
