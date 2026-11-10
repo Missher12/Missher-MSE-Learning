@@ -22,6 +22,7 @@ import { mechanismKey, resolveMethodVersion, versionWindow, selectHistory, rende
 import { MAX_STORE_BYTES } from '../src/store.mjs'
 import { publicFiles } from '../scripts/public-set.mjs'
 import { localDayKey } from './time.mjs'
+import { projectActivity } from './activity.mjs'
 import { apply } from './dsh.mjs'
 
 const PROBES = fileURLToPath(new URL('.probes', import.meta.url))
@@ -1592,6 +1593,14 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
           { at: 1, status: 'saved', contextOmitted: null, decisions: [{ durability: 'durable',
             scope: 'project', basis: 'context_turn_2;上一轮项目约束', result: 'saved', reason: null }] },
         ] } }
+    const activityNow = Date.UTC(2026, 10, 3, 12)
+    const emptyActivity = projectActivity([], activityNow, 'UTC')
+    const activityEntries = emptyActivity.days.flatMap((day, index) => index % 2 === 0 ? [{
+      id: `activity-${index}`, type: index % 4 === 0 ? 'rule' : 'digest',
+      createdAt: Date.parse(`${day.date}T12:00:00Z`),
+    }] : [])
+    activityEntries.push({ id: 'activity-today-lesson', type: 'lesson', createdAt: activityNow })
+    view.activity = projectActivity(activityEntries, activityNow, 'UTC')
     const ctx = {
       effect(fn) { return typeof fn === 'function' ? fn() : undefined },
       locale: { register: () => true, getLocale: () => ({ active: 'zh' }) },
@@ -1780,6 +1789,101 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
         'the copy states the single known-cost truncation retry')
       assert.match(tasksTree, /未知费用不重发，审计重试需人工操作/u,
         'unknown-cost calls are not resent and audited retries require a manual action')
+
+      // (5b) 活动页以 53/54 周响应式方格展示全年；数字仅留在无障碍名称与所选统计中。
+      const renderActivity = async activity => {
+        view = { ...view, activity }
+        cursor = 0
+        states.length = 0
+        effectRuns.length = 0
+        const activityProps = { ...props, initialTab: 'activity' }
+        section.Page(activityProps)
+        await Promise.all(effectRuns)
+        for (let tick = 0; tick < 12; tick += 1) await Promise.resolve()
+        cursor = 0
+        return section.Page(activityProps)
+      }
+      const walkUi = (node, visit) => {
+        if (Array.isArray(node)) { for (const kid of node) walkUi(kid, visit); return }
+        if (node !== null && typeof node === 'object') { visit(node); walkUi(node.children ?? [], visit) }
+      }
+      const findUi = (tree, predicate) => {
+        let found = null
+        walkUi(tree, node => { if (found === null && predicate(node)) found = node })
+        return found
+      }
+      const selected53 = await renderActivity(view.activity)
+      const assertActivityGrid = (tree, weekCount) => {
+        const cells = []
+        const labels = []
+        const months = findUi(tree, node => node?.props?.className === 'mse-activity-months')
+        walkUi(tree, node => { if (node?.props?.className === 'mse-activity-cell') cells.push(node) })
+        assert.equal(cells.length, 365, `${weekCount} columns preserve exactly 365 real date buttons`)
+        for (const cell of cells) {
+          assert.equal(cell.type, 'button', 'each date keeps native keyboard activation')
+          assert.equal(cell.props.type, 'button')
+          assert.equal(cell.children.length, 0, 'heatmap cells contain no visible count text')
+          assert.equal(typeof cell.props.onClick, 'function', 'date selection remains interactive')
+          assert.match(cell.props['aria-label'], /^\d{4}-\d{2}-\d{2}: \d+ 条$/u)
+          assert.match(cell.props.title, /^\d{4}-\d{2}-\d{2} · \d+ 条$/u)
+        }
+        walkUi(months, node => { if (node?.type === 'span') labels.push(node) })
+        const ranges = labels.map(node => {
+          const match = /^(\d+)\s*\/\s*(\d+)$/u.exec(node.props.style.gridColumn)
+          assert.ok(match, 'month label uses a closed, explicit grid interval')
+          return { start: Number(match[1]), end: Number(match[2]) }
+        })
+        assert.equal(ranges[0].start, 1, 'month labels begin at the first week column')
+        assert.equal(ranges.at(-1).end, weekCount + 1, 'last month ends at the grid boundary')
+        assert.ok(ranges.every((range, index) => range.end > range.start
+          && range.end <= weekCount + 1
+          && (index === ranges.length - 1 || range.end === ranges[index + 1].start)),
+        'month labels neither overlap nor create implicit columns')
+        assert.equal(labels.at(-1).props.className, 'mse-activity-month-final',
+          'the final short month label stays complete and right-aligned')
+        return cells
+      }
+      const cells53 = assertActivityGrid(selected53, 53)
+      const activityToday = view.activity.todayDate
+      const todayCell = cells53.find(cell => cell.props['aria-label'].startsWith(`${activityToday}:`))
+      assert.ok(todayCell)
+      assert.equal(todayCell.props['aria-label'], `${activityToday}: 2 条`)
+      assert.equal(todayCell.props.title, `${activityToday} · 2 条`)
+      assert.equal(todayCell.props['aria-pressed'], true)
+      const activityCounts = findUi(selected53, node => node?.props?.key === 'activity-counts')
+      const countFacts = []
+      walkUi(activityCounts, node => {
+        if (node?.type === 'dt' || node?.type === 'dd') countFacts.push([node.type, node.children.join('')])
+      })
+      assert.deepEqual(countFacts, [['dt', '所选区间'], ['dd', activityToday], ['dt', '条'], ['dd', '2'],
+        ['dt', '规则'], ['dd', '1'], ['dt', '经验'], ['dd', '1'], ['dt', '总结'], ['dd', '0']])
+      const selectedDate = view.activity.days[362].date
+      cells53.find(cell => cell.props['aria-label'].startsWith(`${selectedDate}:`)).props.onClick()
+      cursor = 0
+      const selectedAfterClick = section.Page({ ...props, initialTab: 'activity' })
+      const selectedButton = assertActivityGrid(selectedAfterClick, 53)
+        .find(cell => cell.props['aria-label'].startsWith(`${selectedDate}:`))
+      assert.equal(selectedButton.props['aria-pressed'], true, 'selection remains bound to its date')
+      assert.ok(JSON.stringify(selectedAfterClick).includes(selectedDate), 'selected period remains visible below the chart')
+
+      const activity54 = { ...view.activity, weeks: [...view.activity.weeks,
+        { start: '2026-11-09', days: Array(7).fill(null) }] }
+      const selected54 = await renderActivity(activity54)
+      assertActivityGrid(selected54, 54)
+      assert.match(clientModule.__test.STYLE,
+        /\.mse-activity-layout\{[^}]*width:100%;min-width:376px\}/u,
+        'narrow panes scroll inside the bounded activity container')
+      assert.match(clientModule.__test.STYLE,
+        /\.mse-details \.mse-activity-months,\.mse-details \.mse-activity-grid\{display:grid;grid-template-columns:repeat\(var\(--mse-activity-weeks\),minmax\(0,1fr\)\);column-gap:2px;width:100%\}/u,
+        'month labels and date columns share the same responsive grid tracks')
+      assert.match(clientModule.__test.STYLE,
+        /\.mse-activity-months span\.mse-activity-month-final\{min-width:max-content;overflow:visible;justify-self:end\}/u,
+        'the last short month label stays complete without extending the grid')
+      assert.match(clientModule.__test.STYLE,
+        /\.mse-activity-scroll\{[^}]*max-width:100%;[^}]*overflow-x:auto/u,
+        'overflow stays inside the activity scroller')
+      assert.match(clientModule.__test.STYLE, /mse-activity-cell:focus-visible\{outline:/u,
+        'native keyboard focus remains visible')
 
       // (6) 学习状态 tab: corrections saved/pending/ignored + usage audit — real values.
       cursor = 0

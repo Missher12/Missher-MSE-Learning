@@ -510,22 +510,22 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-error{color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:20px;overflow-wrap:anywhere}
 .mse-details .mse-notice{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px;min-height:20px;overflow-wrap:anywhere}
 .mse-details .mse-inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-width:0}
-.mse-details .mse-activity-scroll{width:100%;max-width:100%;overflow-x:auto;overscroll-behavior-x:contain;padding:8px 0 12px}
-.mse-details .mse-activity-layout{display:flex;gap:8px;width:max-content}
-.mse-details .mse-activity-weekdays{display:grid;grid-template-rows:repeat(7,15px);gap:4px;padding-top:22px;font-size:9px;line-height:15px;color:var(--dsw-alias-label-tertiary);text-align:center}
-.mse-details .mse-activity-chart{width:max-content}
-.mse-details .mse-activity-months,.mse-details .mse-activity-grid{display:grid;grid-template-columns:repeat(var(--mse-activity-weeks),15px);gap:4px;width:max-content}
-.mse-details .mse-activity-months{font-size:10px;line-height:16px;color:var(--dsw-alias-label-secondary);height:18px}
-.mse-details .mse-activity-months span{white-space:nowrap;overflow:visible}
-.mse-details .mse-activity-week{display:grid;grid-template-rows:repeat(7,15px);gap:4px}
-.mse-details .mse-activity-cell{width:15px;height:15px;min-width:15px;padding:0;border:0.5px solid var(--dsw-alias-border-l2);border-radius:3px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);font:inherit;font-size:8px;line-height:14px;text-align:center;font-variant-numeric:tabular-nums}
+.mse-details .mse-activity-scroll{width:100%;max-width:100%;min-width:0;box-sizing:border-box;overflow-x:auto;overscroll-behavior-x:contain;padding:8px 0 12px}
+.mse-details .mse-activity-layout{display:block;width:100%;min-width:376px}
+.mse-details .mse-activity-chart{min-width:0;width:100%}
+.mse-details .mse-activity-months,.mse-details .mse-activity-grid{display:grid;grid-template-columns:repeat(var(--mse-activity-weeks),minmax(0,1fr));column-gap:2px;width:100%}
+.mse-details .mse-activity-months{font-size:9px;line-height:12px;color:var(--dsw-alias-label-secondary);height:18px;align-items:end}
+.mse-details .mse-activity-months span{min-width:0;overflow:hidden;white-space:nowrap}
+.mse-details .mse-activity-months span.mse-activity-month-final{min-width:max-content;overflow:visible;justify-self:end}
+.mse-details .mse-activity-week{display:grid;grid-template-rows:repeat(7,auto);row-gap:2px;min-width:0}
+.mse-details .mse-activity-cell{display:block;box-sizing:border-box;width:100%;height:auto;min-width:0;aspect-ratio:1;padding:0;border:0.5px solid var(--dsw-alias-border-l2);border-radius:1px;background:var(--dsw-alias-bg-module-platform)}
 .mse-details .mse-activity-cell[data-level="1"]{background:color-mix(in srgb,var(--dsw-alias-state-success-primary,var(--dsw-alias-label-primary)) 18%,var(--dsw-alias-bg-module-platform))}
 .mse-details .mse-activity-cell[data-level="2"]{background:color-mix(in srgb,var(--dsw-alias-state-success-primary,var(--dsw-alias-label-primary)) 34%,var(--dsw-alias-bg-module-platform))}
 .mse-details .mse-activity-cell[data-level="3"]{background:color-mix(in srgb,var(--dsw-alias-state-success-primary,var(--dsw-alias-label-primary)) 54%,var(--dsw-alias-bg-module-platform))}
 .mse-details .mse-activity-cell[data-level="4"]{background:var(--dsw-alias-state-success-primary,var(--dsw-alias-label-primary));color:var(--dsw-alias-bg-module-platform)}
 .mse-details .mse-activity-cell[aria-pressed="true"]{outline:2px solid var(--dsw-alias-label-primary);outline-offset:1px}
 .mse-details .mse-activity-cell:focus-visible{outline:2px solid var(--dsw-alias-state-success-primary,var(--dsw-alias-label-primary));outline-offset:2px}
-.mse-details .mse-activity-empty{width:15px;height:15px}
+.mse-details .mse-activity-empty{display:block;box-sizing:border-box;width:100%;min-width:0;aspect-ratio:1}
 @media(max-width:620px){
 .mse-details .mse-row { gap: 12px; padding: 10px 0; }
 .mse-details .mse-metrics{gap:8px}
@@ -1108,16 +1108,21 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         ? `${selectedActivityWeek.start} — ${selectedActivityWeek.end}` : dict.activityTotal
     const activityBlock = activity === null ? null : (() => {
       const visibleDate = week => week.days.find(day => day !== null)
-      const months = activity.weeks.map((week, index) => {
+      const monthPositions = []
+      let priorMonth = null
+      activity.weeks.forEach((week, index) => {
         const first = visibleDate(week)
-        const prior = index === 0 ? null : visibleDate(activity.weeks[index - 1])
         const month = first?.date.slice(0, 7)
-        const priorMonth = prior?.date.slice(0, 7)
-        if (first === undefined || month === priorMonth) return null
+        if (first === undefined || month === priorMonth) return
         const label = new Date(`${first.date}T00:00:00.000Z`).toLocaleDateString(
           locale === 'en' ? 'en-US' : 'zh-CN', { timeZone: 'UTC', month: 'short' })
-        return h('span', { key: week.start, style: { gridColumn: `${index + 1} / span 4` } }, label)
+        monthPositions.push({ key: week.start, start: index + 1, label })
+        priorMonth = month
       })
+      const months = monthPositions.map((position, index) => h('span', { key: position.key,
+        className: index === monthPositions.length - 1 ? 'mse-activity-month-final' : undefined,
+        style: { gridColumn: `${position.start} / ${monthPositions[index + 1]?.start
+          ?? activity.weeks.length + 1}` } }, position.label))
       const cells = activity.weeks.map(week => h('div', { key: week.start, className: 'mse-activity-week',
         role: 'group', 'aria-label': week.start }, week.days.map((day, index) => {
         if (day === null) return h('span', { key: `${week.start}-${index}`,
@@ -1127,7 +1132,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           'data-level': level, 'aria-label': `${day.date}: ${day.total} ${dict.activityEntries}`,
           'aria-pressed': day.date === selectedActivityDate,
           title: `${day.date} · ${day.total} ${dict.activityEntries}`,
-          onClick: () => setActivityDate(day.date) }, String(day.total))
+          onClick: () => setActivityDate(day.date) })
       })))
       const detail = selectedActivityCounts === null ? null : definition('activity-counts', [
         [dict.activitySelected, selectedActivityRange ?? '—'],
@@ -1150,16 +1155,12 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           h('span', { key: 'window', className: 'mse-unit' }, `${activity.windowStart} — ${activity.todayDate}`),
         ]),
         h('div', { key: 'scroll', className: 'mse-activity-scroll' },
-          h('div', { className: 'mse-activity-layout', role: 'group', 'aria-label': dict.activityChart }, [
-            h('div', { key: 'weekdays', className: 'mse-activity-weekdays', 'aria-hidden': true },
-              (locale === 'en' ? ['M', '', 'W', '', 'F', '', 'S'] : ['一', '', '三', '', '五', '', '日'])
-                .map((label, index) => h('span', { key: index }, label))),
+          h('div', { className: 'mse-activity-layout', role: 'group', 'aria-label': dict.activityChart },
             h('div', { key: 'chart', className: 'mse-activity-chart',
               style: { '--mse-activity-weeks': activity.weeks.length } }, [
               h('div', { key: 'months', className: 'mse-activity-months' }, months),
               h('div', { key: 'grid', className: 'mse-activity-grid' }, cells),
-            ]),
-          ])),
+            ]))),
         detail,
         h('p', { key: 'note', className: 'mse-hint' }, dict.activityHistoryNote),
         disclosure('activity-details', dict.activityDetails, definition('activity-meta', [

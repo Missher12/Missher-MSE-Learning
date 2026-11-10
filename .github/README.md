@@ -7,7 +7,7 @@
 <p>让长期纠正和失败经验，在后续相关任务中派上用场。</p>
 
 <p>
-  <a href="https://github.com/Missher12/Missher-MSE-Learning/releases/tag/v1.3.0"><img src="https://img.shields.io/badge/%E7%89%88%E6%9C%AC-1.3.0-4D6BFE?style=flat-square" alt="版本: 1.3.0"></a>
+  <a href="https://github.com/Missher12/Missher-MSE-Learning/releases/tag/v1.3.1"><img src="https://img.shields.io/badge/%E7%89%88%E6%9C%AC-1.3.1-4D6BFE?style=flat-square" alt="版本: 1.3.1"></a>
   <a href="https://github.com/Missher12/Missher-MSE-Learning"><img src="https://img.shields.io/badge/%E6%96%87%E6%A1%A3-%E4%B8%AD%E6%96%87-4D6BFE?style=flat-square" alt="文档: 中文"></a>
   <a href="https://github.com/Missher12/Missher-MSE-Learning/blob/main/LICENSE"><img src="https://img.shields.io/badge/%E8%AE%B8%E5%8F%AF-MIT-6B7280?style=flat-square" alt="许可: MIT"></a>
 </p>
@@ -19,7 +19,7 @@
 ---
 
 <!-- current-source -->
-当前开发源码：**1.3.0** · [分支 `main`](https://github.com/Missher12/Missher-MSE-Learning/tree/main)。安装包以实际 Release 为准。
+当前源码：**1.3.1** · [分支 `main`](https://github.com/Missher12/Missher-MSE-Learning/tree/main) · [安装包与验收](https://github.com/Missher12/Missher-MSE-Learning/releases/tag/v1.3.1)。
 <!-- /current-source -->
 
 ## 功能一览
@@ -34,7 +34,7 @@
 
 ## 快速开始
 
-1. 从 [Releases](https://github.com/Missher12/Missher-MSE-Learning/releases/tag/v1.3.0) 下载对应版本的 `.tgz` 安装包。
+1. 从 [Releases](https://github.com/Missher12/Missher-MSE-Learning/releases) 下载对应版本的 `.tgz` 安装包。
 2. 在 DSH **插件 → 添加插件** 中选择下载的文件，安装并启用；按宿主提示重新加载或正常重启。
 3. 打开 **设置 → 自我进化**，查看规则、经验、学习状态与暂停开关。
 
