@@ -1,4 +1,11 @@
-# 验证记录（当前本地候选 1.2.1）
+# 验证记录（当前包 1.2.2）
+
+## 1.2.2
+
+- 冻结 1.2.1 基线中，同特征 observing v1 未创建 successor；补丁后的独立复核仅 observing 建立 1 个 fresh v2，isolated、needs_revision/guarded 与 cancelled 均为 0 个。v2 初始为 positives 1、controls 0、observing；旧 v1 行不变。
+- 后续复核序列为 discovery `1/0` → holdout `2/0` → control `2/1`（positives/controls）；v2 保持 observing，legacy v1 逐字段未变。旧历史 counters 3/4 未被继承。继续增加第二项独立增益与第二项负控后，v2 自动批准；实际引擎选择该方法时注入 117 字节。可归因的竞争目标反例使策略自动隔离，下一回合不再选用。此闭环在隔离临时库运行，没有给生产候选注入测试证据。
+- 临时副本 read/write 复核仅作用于副本：format 4，46 条经验与 4 条策略均保留；读取不重写文件。真实生产库、配置与 provider 未触碰。
+- 本机定向验证：adaptive engine 全文件 13/13、原生 Cordis bridge 1/1、既有原生诊断 1/1；源码用例为 `rebuild/adaptive-engine.test.mjs`、`rebuild/adaptive-legacy-host.test.mjs`、`rebuild/rsi-native-diagnostics.test.mjs`。Cordis 检查使用真实上下文与临时状态，provider stub 禁止模型调用，不能据此声称生产候选已经自动达标。完整仓库套件和真实模型回归未运行。
 
 ## 1.2.1 候选
 
