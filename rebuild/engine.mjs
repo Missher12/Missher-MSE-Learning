@@ -146,6 +146,10 @@ const adaptivePolicyTarget = (doc, policy) => {
   return entry?.type === 'lesson' && entry.status !== 'retired'
     && entry.lesson?.problemId === policy.objective ? entry : null
 }
+const hasAdaptiveV2Successor = (adaptive, policy) => policy?.schema === 'mse-adaptive-recall-v1'
+  && adaptive.policies.some(row => row.schema === 'mse-adaptive-recall-v2'
+    && row.scope === policy.scope && row.entryId === policy.entryId
+    && row.version === policy.version && row.objective === policy.objective)
 const adaptiveEntryVisible = (entry, projectScope, environment) => entry.visibility === 'global'
   || (entry.originScope === projectScope && entry.originEnvironment === environment)
 function matchingCurrentMethods(doc, { problemId, signature, projectScope, environment, now,
@@ -160,7 +164,10 @@ function matchingCurrentMethods(doc, { problemId, signature, projectScope, envir
 function pruneAdaptiveState(doc) {
   const adaptive = doc.recallStrategy.adaptive
   adaptive.policies = adaptive.policies.filter(policy => policy.qualification === RECALL_QUALIFICATION.id
-    && adaptivePolicyTarget(doc, policy) !== null)
+    && (adaptivePolicyTarget(doc, policy) !== null
+      || policy.schema === 'mse-adaptive-recall-v1'
+        && resolveMethodVersion(doc, policy.entryId, policy.version)?.record.lesson?.problemId
+          === policy.objective))
   adaptive.probes = adaptive.probes.filter(probe => {
     const receipt = doc.receipts.find(row => row.turnKey === probe.turnKey)
     const fact = doc.turnFacts.find(row => row.turnKey === probe.turnKey)
@@ -189,7 +196,8 @@ function adaptiveDiscoveryAllowed(existing, generated) {
   const sameFeatures = policy => policy.features.length === generated.features.length
     && policy.features.every((id, index) => id === generated.features[index])
   return existing.every(policy => policy.schema === 'mse-adaptive-recall-v1'
-    && policy.mode === 'isolated' && !sameFeatures(policy))
+    && (policy.mode === 'observing'
+      || policy.mode === 'isolated' && !sameFeatures(policy)))
 }
 function adaptiveEditionAdmitted(entry, sourceAdmit) {
   const origins = editionSources(entry)
@@ -433,6 +441,11 @@ function settleAdaptiveRecall(doc, { turnKey, sessionId, outcome, receipt, allow
       && matches[0].version === signal.version
     if (!adaptiveEditionAdmitted(target, sourceAdmit) || nativeSignal && matches.some(entry => !adaptiveEditionAdmitted(entry, sourceAdmit))) {
       decision(policyId, signal.entryId, signal.version, 'unknown', 'source_revoked')
+      continue
+    }
+    if (policy?.schema === 'mse-adaptive-recall-v1' && policy.mode === 'observing'
+      && hasAdaptiveV2Successor(adaptive, policy)) {
+      decision(policyId, signal.entryId, signal.version, 'rejected', 'already_tracked')
       continue
     }
     if (signal.kind === 'discovery') {
@@ -2091,10 +2104,18 @@ export class RebuildEngine {
                   entryId: unique.id, version: unique.version, result: 'feature_refused',
                   reason: 'insufficient_safe_features', at: observedAt })
               } else {
-                stageAdaptiveSignal(probe, { policyId: generated.id, kind: 'discovery',
+                const staged = stageAdaptiveSignal(probe, { policyId: generated.id, kind: 'discovery',
                   entryId: unique.id, version: unique.version, objective: generated.objective,
                   problemId: out.id, signature: capsule.signature, features: generated.features,
                   reason: 'unique_native_method_match', at: observedAt })
+                if (staged) {
+                  const legacyIds = new Set(existing.filter(policy =>
+                    policy.schema === 'mse-adaptive-recall-v1' && policy.mode === 'observing')
+                    .map(policy => policy.id))
+                  probe.pending = probe.pending.filter(signal => !(legacyIds.has(signal.policyId)
+                    && signal.kind === 'holdout' && signal.entryId === unique.id
+                    && signal.version === unique.version))
+                }
               }
             }
           } else if (targets.length > 1) {
@@ -2446,6 +2467,7 @@ export class RebuildEngine {
           const scopedPolicies = adaptive.policies.filter(policy => policy.scope === strategyScope
             && policy.qualification === RECALL_QUALIFICATION.id
             && ['observing', 'approved'].includes(policy.mode)
+            && !(policy.mode === 'observing' && hasAdaptiveV2Successor(adaptive, policy))
             && adaptivePolicyTarget(doc, policy) !== null
             && adaptivePolicySourcesAdmitted(doc, policy, sourceAdmit))
             .sort((left, right) => Number(left.schema === 'mse-adaptive-recall-v2')

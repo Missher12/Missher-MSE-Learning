@@ -225,7 +225,7 @@ test('revoking an admitted source before settlement cannot promote the policy', 
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('an isolated legacy v1 null policy permits one distinct task-aware v2 discovery', () => {
+test('legacy v1 history permits a distinct task-aware v2 successor without inherited evidence', () => {
   const { root, engine, targetX, targetY, fail, prepare, settle } = buildEngine()
   const legacyPolicy = (target, session, turnId, mode) => {
     const prepared = prepare(session, turnId, target === targetX ? '测试 JSON 输出。' : '部署 API 服务。')
@@ -270,9 +270,264 @@ test('an isolated legacy v1 null policy permits one distinct task-aware v2 disco
     settle('legacy-observing-session', 'legacy-observing-turn')
     policies = engine.store.read().recallStrategy.adaptive.policies
     assert.equal(policies.find(row => row.id === blocked.legacy.id).mode, 'observing')
-    assert.equal(policies.some(row => row.entryId === targetY.id
-      && row.schema === 'mse-adaptive-recall-v2'), false,
-    'an existing non-isolated legacy method is not duplicated')
+    const successor = policies.find(row => row.entryId === targetY.id
+      && row.schema === 'mse-adaptive-recall-v2')
+    assert.ok(successor, 'an observing v1 row cannot permanently block a real distinct v2 discovery')
+    assert.equal(successor.positives, 1)
+    assert.equal(successor.negativeControls, 0)
+    assert.deepEqual(successor.samples.map(row => row.turnKey), [blocked.prepared.turnKey])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('one legacy discovery turn is not counted as an independent v1 holdout', () => {
+  const { root, engine, targetX, fail, prepare, settle } = buildEngine()
+  try {
+    const seed = prepare('legacy-seed-session', 'legacy-seed-turn', 'API 调用遇到阻塞，请定位原因')
+    const seedProbe = engine.store.read().recallStrategy.adaptive.probes
+      .find(row => row.turnKey === seed.turnKey)
+    const legacy = synthesizeAdaptivePolicy({ scope: seedProbe.scope,
+      qualification: RECALL_QUALIFICATION.id, entry: targetX, queryFeatures: ['api'],
+      turnKey: seedProbe.turnKey, session: seedProbe.session, queryKey: seedProbe.query,
+      now: 1_800_000_000_000 })
+    engine.store.transaction(doc => {
+      doc.entries = doc.entries.filter(row => row.id === targetX.id)
+      doc.recallStrategy.adaptive.policies.push(legacy)
+      doc.recallStrategy.adaptive.probes = doc.recallStrategy.adaptive.probes
+        .filter(row => row.turnKey !== seed.turnKey)
+      return true
+    })
+
+    const turn = prepare('legacy-successor-session', 'successor-turn',
+      'API 请求返回异常结果，帮我排查接口调用问题')
+    const probe = engine.store.read().recallStrategy.adaptive.probes
+      .find(row => row.turnKey === turn.turnKey)
+    assert.ok(probe.shadowPolicies.includes(legacy.id), 'the legacy observer is actually shadowed')
+    assert.notEqual(probe.query, legacy.firstQuery, 'the real user query is independent')
+    fail('legacy-successor-session', 'successor-turn', 'legacy-successor-failure', failureX)
+    settle('legacy-successor-session', 'successor-turn')
+
+    const policies = engine.store.read().recallStrategy.adaptive.policies
+    const oldPolicy = policies.find(row => row.id === legacy.id)
+    const successor = policies.find(row => row.entryId === targetX.id
+      && row.schema === 'mse-adaptive-recall-v2')
+    assert.equal(oldPolicy.positives, 1, 'the discovery event cannot also grow the legacy holdout count')
+    assert.equal(oldPolicy.samples.length, 1)
+    assert.equal(successor.positives, 1, 'the new v2 discovery is not an independent gain')
+    assert.equal(successor.negativeControls, 0)
+    assert.equal(successor.samples.length, 1)
+    assert.equal(successor.samples[0].result, 'discovery_hit')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('a bridged v1 observer stops collecting later holdouts and controls', () => {
+  const { root, engine, targetX, fail, prepare, settle } = buildEngine()
+  try {
+    const seed = prepare('legacy-bridge-seed', 'seed', '测试 JSON 输出。')
+    const seedProbe = engine.store.read().recallStrategy.adaptive.probes
+      .find(row => row.turnKey === seed.turnKey)
+    const legacy = synthesizeAdaptivePolicy({ scope: seedProbe.scope,
+      qualification: RECALL_QUALIFICATION.id, entry: targetX, queryFeatures: ['json', 'test'],
+      turnKey: seed.turnKey, session: seedProbe.session, queryKey: seedProbe.query,
+      now: 1_800_000_000_000 })
+    legacy.positives = 3
+    legacy.negativeControls = 4
+    engine.store.transaction(doc => { doc.recallStrategy.adaptive.policies.push(legacy); return true })
+    const originalLegacy = structuredClone(legacy)
+    settle('legacy-bridge-seed', 'seed', 'unknown')
+
+    prepare('legacy-bridge-discovery', 'discovery', '测试 JSON 输出。')
+    fail('legacy-bridge-discovery', 'discovery', 'legacy-bridge-discovery-failure', failureX)
+    settle('legacy-bridge-discovery', 'discovery')
+    let state = engine.store.read().recallStrategy.adaptive
+    let successor = state.policies.find(row => row.entryId === targetX.id
+      && row.schema === 'mse-adaptive-recall-v2')
+    assert.ok(successor)
+    assert.equal(successor.positives, 1)
+
+    const holdout = prepare('legacy-bridge-holdout', 'holdout', 'JSON 单测输出')
+    const holdoutProbe = engine.store.read().recallStrategy.adaptive.probes
+      .find(row => row.turnKey === holdout.turnKey)
+    assert.deepEqual(holdoutProbe.taskFeatures, ['json', 'test'])
+    assert.ok(holdoutProbe.shadowPolicies.includes(successor.id))
+    assert.ok(!holdoutProbe.shadowPolicies.includes(legacy.id), 'the bridged v1 observer is no longer tracked')
+    fail('legacy-bridge-holdout', 'holdout', 'legacy-bridge-holdout-failure', failureX)
+    settle('legacy-bridge-holdout', 'holdout')
+
+    const control = prepare('legacy-bridge-control', 'control', '绘制图表并调整配色')
+    const controlProbe = engine.store.read().recallStrategy.adaptive.probes
+      .find(row => row.turnKey === control.turnKey)
+    assert.ok(controlProbe.controlPolicies.includes(successor.id))
+    assert.ok(!controlProbe.controlPolicies.includes(legacy.id), 'the bridged v1 gets no duplicate control')
+    fail('legacy-bridge-control', 'control', 'legacy-bridge-control-failure', failureZ)
+    settle('legacy-bridge-control', 'control')
+
+    state = engine.store.read().recallStrategy.adaptive
+    successor = state.policies.find(row => row.id === successor.id)
+    assert.equal(successor.positives, 2, 'only the v2 successor gains the independent holdout')
+    assert.equal(successor.negativeControls, 1, 'only the v2 successor receives the control')
+    assert.equal(successor.mode, 'observing', 'one holdout/control pair cannot auto-approve')
+    assert.deepEqual(state.policies.find(row => row.id === legacy.id), originalLegacy,
+      'the previous v1 evidence is retained verbatim')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('settlement refuses a legacy holdout when its v2 successor appeared after preparation', () => {
+  const { root, engine, targetX, fail, prepare, settle } = buildEngine()
+  try {
+    const seed = prepare('legacy-race-seed', 'seed', '测试 JSON 输出。')
+    const seedProbe = engine.store.read().recallStrategy.adaptive.probes
+      .find(row => row.turnKey === seed.turnKey)
+    const legacy = synthesizeAdaptivePolicy({ scope: seedProbe.scope,
+      qualification: RECALL_QUALIFICATION.id, entry: targetX, queryFeatures: ['json', 'test'],
+      turnKey: seed.turnKey, session: seedProbe.session, queryKey: seedProbe.query,
+      now: 1_800_000_000_000 })
+    legacy.positives = 3
+    legacy.negativeControls = 4
+    engine.store.transaction(doc => { doc.recallStrategy.adaptive.policies.push(legacy); return true })
+    const originalLegacy = structuredClone(legacy)
+    settle('legacy-race-seed', 'seed', 'unknown')
+
+    prepare('legacy-race-inflight', 'holdout', 'JSON 单测输出')
+    const oldProbe = engine.store.read().recallStrategy.adaptive.probes.at(-1)
+    assert.ok(oldProbe.shadowPolicies.includes(legacy.id))
+    prepare('legacy-race-discovery', 'discovery', '测试 JSON 输出。')
+    fail('legacy-race-discovery', 'discovery', 'legacy-race-discovery-failure', failureX)
+    settle('legacy-race-discovery', 'discovery')
+    let state = engine.store.read().recallStrategy.adaptive
+    const successor = state.policies.find(row => row.entryId === targetX.id
+      && row.schema === 'mse-adaptive-recall-v2')
+    assert.ok(successor)
+
+    fail('legacy-race-inflight', 'holdout', 'legacy-race-holdout-failure', failureX)
+    settle('legacy-race-inflight', 'holdout')
+    state = engine.store.read().recallStrategy.adaptive
+    assert.deepEqual(state.policies.find(row => row.id === legacy.id), originalLegacy,
+      'settlement checks the successor even when the prepared probe only knew v1')
+    assert.equal(state.policies.find(row => row.id === successor.id).positives, 1,
+      'a pre-successor probe cannot manufacture v2 holdout evidence')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('an observing same-feature legacy v1 can bridge while an isolated one remains blocked', () => {
+  const makeCase = mode => {
+    const fixture = buildEngine()
+    const { root, engine, targetX, fail, prepare, settle } = fixture
+    try {
+      const seed = prepare(`legacy-${mode}-seed`, 'seed', '请测试 JSON 输出是否正确')
+      const seedProbe = engine.store.read().recallStrategy.adaptive.probes
+        .find(row => row.turnKey === seed.turnKey)
+      let entry
+      engine.store.transaction(doc => {
+        doc.entries = doc.entries.filter(row => row.id === targetX.id)
+        entry = doc.entries.find(row => row.id === targetX.id)
+        doc.recallStrategy.adaptive.probes = doc.recallStrategy.adaptive.probes
+          .filter(row => row.turnKey !== seed.turnKey)
+        return true
+      })
+      const legacy = synthesizeAdaptivePolicy({ scope: seedProbe.scope,
+        qualification: RECALL_QUALIFICATION.id, entry, queryFeatures: ['json', 'test'],
+        turnKey: seed.turnKey, session: seedProbe.session, queryKey: seedProbe.query, now: 1_800_000_000_000 })
+      legacy.mode = mode
+      if (mode === 'isolated') {
+        legacy.generation = 1
+        legacy.rejections = 1
+        legacy.reason = 'native_recurrence'
+      }
+      engine.store.transaction(doc => { doc.recallStrategy.adaptive.policies.push(legacy); return true })
+
+      const turn = prepare(`legacy-${mode}-successor`, 'successor', '测试一下 JSON 输出是否正确')
+      const candidateProbe = engine.store.read().recallStrategy.adaptive.probes
+        .find(row => row.turnKey === turn.turnKey)
+      assert.deepEqual(candidateProbe.taskFeatures, ['json', 'test'])
+      assert.notEqual(candidateProbe.query, legacy.firstQuery)
+      if (mode === 'observing') assert.ok(candidateProbe.shadowPolicies.includes(legacy.id),
+        JSON.stringify({ features: legacy.features, entryId: legacy.entryId,
+          offered: candidateProbe.offered, baseline: candidateProbe.baselineOffers,
+          comparisons: candidateProbe.comparisons, controls: candidateProbe.controlPolicies }))
+      fail(`legacy-${mode}-successor`, 'successor', 'legacy-successor-failure', failureX)
+      settle(`legacy-${mode}-successor`, 'successor')
+      const policies = engine.store.read().recallStrategy.adaptive.policies
+      const successor = policies.find(row => row.entryId === targetX.id
+        && row.schema === 'mse-adaptive-recall-v2')
+      if (mode === 'observing') {
+        assert.ok(successor, 'same-feature v1 observing history permits a fresh v2 candidate')
+        assert.deepEqual(successor.features, legacy.features)
+        assert.equal(successor.positives, 1)
+        assert.equal(successor.negativeControls, 0)
+      } else {
+        assert.equal(successor, undefined, 'same-feature isolated v1 remains a discovery boundary')
+      }
+      assert.equal(policies.find(row => row.id === legacy.id).mode, mode)
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }
+  makeCase('observing')
+  makeCase('isolated')
+})
+
+test('legacy evidence survives a normal revision and cannot discover against needs_revision', () => {
+  const { root, engine, targetX, fail, prepare, settle } = buildEngine()
+  try {
+    engine.setRoute({ provider: 'test', model: 'local' })
+    const seed = prepare('legacy-revision-seed', 'seed', '测试 JSON 输出。')
+    const seedProbe = engine.store.read().recallStrategy.adaptive.probes
+      .find(row => row.turnKey === seed.turnKey)
+    const legacy = synthesizeAdaptivePolicy({ scope: seedProbe.scope,
+      qualification: RECALL_QUALIFICATION.id, entry: targetX, queryFeatures: ['json', 'test'],
+      turnKey: seed.turnKey, session: seedProbe.session, queryKey: seedProbe.query,
+      now: 1_800_000_000_000 })
+    legacy.positives = 3
+    legacy.negativeControls = 4
+    engine.store.transaction(doc => { doc.recallStrategy.adaptive.policies.push(legacy); return true })
+    const originalLegacy = structuredClone(legacy)
+
+    const recurrence = prepare('revision-session', 'recurrence',
+      '文档字段版本不一致时，先核对字段版本，再验证发布记录')
+    assert.ok(recurrence.offered.some(row => row.id === targetX.id && row.version === 1
+      && row.mode === 'method'))
+    fail('revision-session', 'recurrence', 'revision-recurrence', failureX)
+    settle('revision-session', 'recurrence')
+    assert.equal(engine.store.read().entries.find(row => row.id === targetX.id).status, 'needs_revision')
+
+    const guarded = prepare('guarded-legacy-session', 'guarded', '测试 JSON 输出。')
+    assert.ok(!guarded.offered.some(row => row.id === targetX.id && row.mode === 'method'))
+    fail('guarded-legacy-session', 'guarded', 'guarded-legacy-failure', failureX)
+    settle('guarded-legacy-session', 'guarded')
+    let state = engine.store.read()
+    assert.equal(state.recallStrategy.adaptive.policies.find(row => row.id === legacy.id)
+      .positives, 3, 'the guarded target cannot extend legacy evidence')
+    assert.equal(state.recallStrategy.adaptive.policies.filter(row => row.schema === 'mse-adaptive-recall-v2')
+      .length, 0, 'needs_revision cannot seed a v2 successor')
+
+    const work = engine.beginWork()
+    assert.equal(work?.kind, 'revise')
+    const evidenceIds = JSON.parse(work.request.text).evidenceIds
+    engine.markDispatched(work.ticket)
+    const revised = engine.finishWork({ ticket: work.ticket,
+      usage: { input: 10, output: 20, total: 30 }, result: {
+        schema: 'mse-failure-lesson-v1', applicability: 'API endpoint rejected by server',
+        failurePattern: 'API request was rejected by server',
+        rootCause: { summary: 'API server rejected the endpoint request', basis: 'observed',
+          evidenceIds: [evidenceIds[0]] },
+        repairSteps: ['Check the API endpoint and server response',
+          'Retry the request with the current field version'],
+        verification: { check: 'Run API endpoint validation', expected: 'Server accepts the request' },
+        instruction: 'When the API server rejects a request, verify the endpoint and current field version',
+      } })
+    assert.equal(revised.revision, 'replaced')
+    assert.equal(revised.version, 2)
+
+    prepare('legacy-current-v2-session', 'new-discovery', '测试 JSON 输出。')
+    fail('legacy-current-v2-session', 'new-discovery', 'current-v2-failure', failureX)
+    settle('legacy-current-v2-session', 'new-discovery')
+    state = engine.store.read()
+    const retainedLegacy = state.recallStrategy.adaptive.policies.find(row => row.id === legacy.id)
+    assert.deepEqual(retainedLegacy, originalLegacy, 'archiving the old version preserves its v1 row verbatim')
+    const successor = state.recallStrategy.adaptive.policies.find(row => row.entryId === targetX.id
+      && row.version === 2 && row.schema === 'mse-adaptive-recall-v2')
+    assert.ok(successor, 'a new current edition can learn through a normal revision')
+    assert.equal(successor.positives, 1)
+    assert.equal(successor.negativeControls, 0)
+    assert.equal(successor.mode, 'observing')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
