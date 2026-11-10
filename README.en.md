@@ -1,5 +1,7 @@
 # MSE Learning
 
+![MSE Learning · 持久学习（品牌插画）](docs/images/cover-v2.png)
+
 MSE learns reusable corrections and failure lessons for DSH. **1.3.0** adds activity, adaptive evidence, and pytest checks.
 
 Open Settings → Self-evolution to review six pages. Read-only views make no model calls. Background work may incur charges; unknown-cost calls are never replayed automatically.

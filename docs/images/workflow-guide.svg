@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="470" viewBox="0 0 1200 470" role="img" aria-labelledby="title description">
+<title id="title">MSE Learning · 使用流程</title>
+<desc id="description">明确纠正，长期与临时要求分开，保留项目与否定范围；保存范围，规则带来源和版本，引用与提问不变成规则；整理经验，独立失败再考虑反思，假设与已证实分开；相关参考，只带入有关经验，可查看、暂停和修正</desc>
+<defs><linearGradient id="background" x2="1" y2="1"><stop stop-color="#faf8f5"/><stop offset="1" stop-color="#f3f0fa"/></linearGradient></defs>
+<style>text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;fill:#272433}.title{font-size:42px;font-weight:650}.subtitle{font-size:23px;fill:#6c6678}.step{font-size:27px;font-weight:600}.body{font-size:21px;fill:#625d6d}.number{font-size:22px;font-weight:600;fill:#746294}.label{font-size:19px;fill:#827790}.group{font-size:28px;font-weight:600}.item{font-size:25px;fill:#474252}</style>
+<rect width="1200" height="470" rx="24" fill="url(#background)"/>
+
+<text x="44" y="69" class="title" >MSE Learning · 使用流程</text>
+<text x="44" y="111" class="subtitle" >操作示意 · 从入口到结果，按当前任务选择需要的步骤</text>
+<rect x="44" y="158" width="257" height="230" rx="18" fill="#fff" stroke="#e0dae9"/>
+<circle cx="80" cy="197" r="19" fill="#eee8f7"/>
+<text x="80" y="205" class="number" text-anchor="middle">01</text>
+<text x="68" y="258" class="step" >明确纠正</text>
+<text x="68" y="306" class="body" >长期与临时要求分开</text>
+<text x="68" y="343" class="body" >保留项目与否定范围</text>
+<path d="M308 270h13m-6-6 6 6-6 6" stroke="#a396b7" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="329" y="158" width="257" height="230" rx="18" fill="#fff" stroke="#e0dae9"/>
+<circle cx="365" cy="197" r="19" fill="#eee8f7"/>
+<text x="365" y="205" class="number" text-anchor="middle">02</text>
+<text x="353" y="258" class="step" >保存范围</text>
+<text x="353" y="306" class="body" >规则带来源和版本</text>
+<text x="353" y="343" class="body" >引用与提问不变成规则</text>
+<path d="M593 270h13m-6-6 6 6-6 6" stroke="#a396b7" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="614" y="158" width="257" height="230" rx="18" fill="#fff" stroke="#e0dae9"/>
+<circle cx="650" cy="197" r="19" fill="#eee8f7"/>
+<text x="650" y="205" class="number" text-anchor="middle">03</text>
+<text x="638" y="258" class="step" >整理经验</text>
+<text x="638" y="306" class="body" >独立失败再考虑反思</text>
+<text x="638" y="343" class="body" >假设与已证实分开</text>
+<path d="M878 270h13m-6-6 6 6-6 6" stroke="#a396b7" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="899" y="158" width="257" height="230" rx="18" fill="#fff" stroke="#e0dae9"/>
+<circle cx="935" cy="197" r="19" fill="#eee8f7"/>
+<text x="935" y="205" class="number" text-anchor="middle">04</text>
+<text x="923" y="258" class="step" >相关参考</text>
+<text x="923" y="306" class="body" >只带入有关经验</text>
+<text x="923" y="343" class="body" >可查看、暂停和修正</text>
+<text x="44" y="435" class="label" >图解说明流程，不代表界面截图；完整步骤与注意事项见下方正文。</text>
+</svg>

@@ -17,6 +17,7 @@
     "adapters/dsh/usage.mjs",
     "cordis.patch.yml",
     "docs/AUTONOMY_0.15.0.md",
+    "docs/images/cover-v2.png",
     "rebuild/adaptive-operations.mjs",
     "rebuild/adaptive-recall.mjs",
     "rebuild/adaptive-replay.mjs",
