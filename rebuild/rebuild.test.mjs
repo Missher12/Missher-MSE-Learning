@@ -1480,7 +1480,7 @@ test('F5 one blocked candidate (known-failed material / missing source) never pa
 })
 
 // ── UI-VISIBILITY-20261029: the client must really reach the real page slots ───────────────
-test('UI wiring: original five-tab design, full contributions, gated binding, real data rendered', async () => {
+test('UI wiring: six-tab design, full contributions, gated binding, real data rendered', async () => {
   const { TYPERT } = await import('./typert.mjs')
   const loaded = []
   const savedWindow = globalThis.window
@@ -1527,9 +1527,16 @@ test('UI wiring: original five-tab design, full contributions, gated binding, re
       }
       throw new Error(`unexpected require: ${id}`)
     })
-    // The original design: host primitives required, five tabs, original labels.
-    assert.deepEqual(clientModule.__test.TABS, ['overview', 'lessons', 'recall', 'tasks', 'usage'])
-    for (const key of ['tabOverview', 'tabLessons', 'tabRecall', 'tabTasks', 'tabUsage']) {
+    // The original design and the retained-history activity page use host primitives.
+    assert.deepEqual(clientModule.__test.TABS, ['overview', 'lessons', 'recall', 'tasks', 'usage', 'activity'])
+    for (const dict of [clientModule.__test.zh, clientModule.__test.en]) {
+      const navigation = clientModule.__test.settingsTabNavigation('overview', () => {}, dict, false)
+      const items = navigation.props.items
+      assert.equal(items.length, 6, 'each locale renders all six tabs')
+      assert.deepEqual(items.map(item => item.value), clientModule.__test.TABS)
+      assert.equal(new Set(items.map(item => item.id)).size, 6, 'each locale uses unique tab ids')
+    }
+    for (const key of ['tabOverview', 'tabLessons', 'tabRecall', 'tabTasks', 'tabUsage', 'tabActivity']) {
       assert.ok(typeof clientModule.__test.zh[key] === 'string' && clientModule.__test.zh[key] !== '')
     }
     assert.equal(clientModule.__test.zh.settingsTitle, '自我进化', 'the original title, no 精简 suffix')
@@ -1666,7 +1673,7 @@ test('UI wiring: original five-tab design, full contributions, gated binding, re
       assert.match(overview, /刷新/u)
       assert.match(overview, /运行中/u)
       assert.match(overview, /Switch/u, 'the learning switch uses the host Switch control')
-      assert.match(overview, /常规|经验|召回|任务|用量\/学习状态/u, 'the original five tabs')
+      assert.match(overview, /常规|经验|召回|任务|活动|用量\/学习状态/u, 'all six settings tabs')
       assert.match(overview, /演示日总结/u, 'daily summary shows the persisted host data')
       assert.match(overview, /600000（约 10 分钟）/u,
         'the interval keeps the raw ms field with a display-only readable minutes hint')
@@ -1769,8 +1776,10 @@ test('UI wiring: original five-tab design, full contributions, gated binding, re
       const retryButtons = (tasksTree.match(/"children":\["审计重试"\]/gu) ?? []).length
       assert.equal(retryButtons, 2, 'retry on the two known-cost failures (truncated, model_failed) ONLY — '
         + 'never on unknown cost, never after a saved success')
-      assert.match(tasksTree, /最多有一次有界自动重试/u,
-        'the copy states the one bounded known-cost truncation retry, not a blanket never-retry')
+      assert.match(tasksTree, /已知费用的截断仅自动重试一次/u,
+        'the copy states the single known-cost truncation retry')
+      assert.match(tasksTree, /未知费用不重发，审计重试需人工操作/u,
+        'unknown-cost calls are not resent and audited retries require a manual action')
 
       // (6) 学习状态 tab: corrections saved/pending/ignored + usage audit — real values.
       cursor = 0
@@ -1787,7 +1796,7 @@ test('UI wiring: original five-tab design, full contributions, gated binding, re
       }
       assert.match(usageTree, /"children":\["1"\]/u, 'saved count renders as its own aligned number')
       assert.match(usageTree, /"children":\["2"\]/u, 'pending count renders as its own aligned number')
-      assert.match(usageTree, /可复用的纠正会在空闲时整理为长期规则/u, 'one short readable explanation line')
+      assert.match(usageTree, /可复用纠正会在空闲时整理为长期规则/u, 'one short readable explanation line')
       assert.match(usageTree, /保存规则说明/u, 'the full judgement stays readable in an expansion')
       assert.match(usageTree, /通用空话被拒绝/u)
       assert.match(usageTree, /忽略原因/u)
@@ -1806,21 +1815,37 @@ test('UI wiring: original five-tab design, full contributions, gated binding, re
         'the complete basis survives in the span title')
       assert.ok(usageTree.includes('"title":"current_message;普通工作方法"'),
         'model/basis text stays complete in title')
-      assert.match(usageTree, /上下文省略:上下文单条过长/u, 'contextOmitted code reads Chinese')
+      assert.match(usageTree, /上下文省略: ?上下文单条过长/u, 'contextOmitted code reads Chinese')
       // Observable actual-Panel evidence for the log: the decision <span>s and their titles.
       {
-        const findCd = node => {
-          if (Array.isArray(node)) { for (const kid of node) { const hit = findCd(kid); if (hit) return hit } return null }
+        const findDecisionDisclosure = node => {
+          if (Array.isArray(node)) { for (const kid of node) { const hit = findDecisionDisclosure(kid); if (hit) return hit } return null }
           if (node !== null && typeof node === 'object') {
-            if (node?.props?.key === 'cd') return node
-            return findCd(node.children ?? [])
+            if (node?.props?.['data-mse-disclosure'] === 'corr-decisions') return node
+            return findDecisionDisclosure(node.children ?? [])
           }
           return null
         }
-        const cd = findCd(JSON.parse(usageTree))
-        assert.ok(cd, 'the recent-decisions paragraph is a real rendered node')
-        const spans = (cd.children?.[0] ?? []).filter(x => x?.type === 'span')
+        const tree = JSON.parse(usageTree)
+        const decisionDisclosure = findDecisionDisclosure(tree)
+        assert.ok(decisionDisclosure, 'recent decisions use the existing details disclosure')
+        assert.equal(decisionDisclosure.props.open, false, 'the full decision audit stays collapsed by default')
+        let decisionParagraph = null
+        const walk = (node, visit) => {
+          if (Array.isArray(node)) { for (const kid of node) walk(kid, visit); return }
+          if (node !== null && typeof node === 'object') { visit(node); walk(node.children ?? [], visit) }
+        }
+        walk(decisionDisclosure, node => {
+          if (node?.type === 'p' && JSON.stringify(node).includes('current_message;普通工作方法')) {
+            decisionParagraph = node
+          }
+        })
+        assert.ok(decisionParagraph, 'the current basis is rendered in the real decision paragraph')
+        const spans = []
+        walk(decisionParagraph, node => { if (node?.type === 'span') spans.push(node) })
         assert.equal(spans.length, 3, 'all three decision spans render as elements, not strings')
+        assert.match(spans[0].children.join(''), /当前消息；普通工作方法/u)
+        assert.match(spans[1].children.join(''), /临时限定，不长期保存/u)
         console.log('UI-DECISION-TEXT', JSON.stringify(spans.map(span => ({
           title: span.props.title, text: (span.children ?? []).join('') }))))
       }
@@ -5129,15 +5154,19 @@ test('E4b the status face shows the version window and last revision reason with
   const after = engine.statusView().entries.find(item => item.id === entryId)
   assert.equal(after.guard, true)
   assert.equal(after.methodStats.recurrences, 1)
-  // The five existing tabs stay exactly five; the new labels are detail-only additions.
+  // The original five tabs remain and Activity is added as a sixth page.
   const clientSrc = readFileSync(new URL('./client.js', import.meta.url), 'utf8')
-  for (const key of ['tabOverview', 'tabLessons', 'tabRecall', 'tabTasks', 'tabUsage']) {
+  for (const key of ['tabOverview', 'tabLessons', 'tabRecall', 'tabTasks', 'tabUsage', 'tabActivity']) {
     assert.match(clientSrc, new RegExp(key, 'u'))
   }
   assert.match(clientSrc, /versionWindowLabel/u)
   assert.match(clientSrc, /coverageSinceUpgrade/u)
   assert.match(clientSrc, /recentRevision/u)
-  assert.equal((clientSrc.match(/tab[A-Z][A-Za-z]+:/gu) ?? []).length, 5, 'no sixth tab was added')
+  const tabDefinition = clientSrc.match(/const TABS = \[([^\]]+)\]/u)
+  assert.ok(tabDefinition, 'the client defines its navigation ids once')
+  const tabIds = [...tabDefinition[1].matchAll(/'([^']+)'/gu)].map(match => match[1])
+  assert.deepEqual(tabIds, ['overview', 'lessons', 'recall', 'tasks', 'usage', 'activity'])
+  assert.equal(new Set(tabIds).size, 6, 'all six navigation ids are unique')
 })
 
 // ── EVOLUTION016 (Task 5): real capacity paths, emoji/history bounds, restart & old libraries ──
@@ -5427,11 +5456,13 @@ test('E6b the replay CLI is offline-only, writes nothing and is not part of the 
   const repo = fileURLToPath(new URL('..', import.meta.url))
   const cli = join(repo, 'scripts', 'replay-recall.mjs')
   const fixture = join(repo, 'tests', 'fixtures', 'recall-cases.json')
+  const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'))
   const before = hashFile(fixture)
   const work = mkdtempSync(join(tmpdir(), 'mse-replay-cli-'))
   try {
     const baselineRun = execFileSync(process.execPath, [cli], { cwd: work, encoding: 'utf8' })
     const baseline = JSON.parse(baselineRun)
+    assert.equal(baseline.packageVersion, pkg.version, 'the CLI reports the version from the real package manifest')
     assert.equal(baseline.ranker, 'baseline')
     assert.equal(baseline.modelCalls, 0, 'no model call')
     assert.equal(baseline.liveStoreReads, 0, 'no live store read')
@@ -5452,8 +5483,6 @@ test('E6b the replay CLI is offline-only, writes nothing and is not part of the 
     assert.equal(hashFile(fixture), before, 'the frozen fixture is never rewritten')
   } finally { rmSync(work, { recursive: true, force: true }) }
   // The developer CLI and the replay fixture are public SOURCE but NOT runtime package files.
-  const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'))
-  assert.equal(pkg.version, '1.2.1')
   assert.ok(pkg.files.includes('rebuild/adaptive-recall.mjs'))
   assert.ok(pkg.files.includes('rebuild/adaptive-replay.mjs'))
   assert.ok(pkg.files.includes('rebuild/recall.mjs'))
@@ -6449,8 +6478,8 @@ test('CS18 the existing UI corrections area really reads the new bounded decisio
   const client = readFileSync(new URL('./client.js', import.meta.url), 'utf8')
   assert.ok(client.includes('recentDecisions') && client.includes('corrContextOmitted'),
     'the existing corrections status region consumes the new read-only field')
-  assert.ok(client.includes('basisTextOf(decision.basis)') && client.includes('REASON_ZH[decision.reason]'),
-    'the basis and rejection reason really render through the Chinese vocabulary')
+  assert.ok(client.includes('basisText(decision.basis)') && client.includes('reasonLabels[decision.reason]'),
+    'the folded decision audit sends the real basis and reason through the current localized render helpers')
   assert.ok(client.includes('临时限定，不长期保存') && client.includes('引用第'),
     'fixed codes and prior-turn basis have Chinese display text')
 })

@@ -1,8 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { agentEvents } from '@deepseek-ai/dsh-agent'
 import { buildEngine, failureX, trainApiPolicy } from '../scripts/rsi/adaptive-engine-fixture.mjs'
 
 test('native events expose bounded RSI pending, settlement, refusal and restart diagnostics', async () => {
@@ -142,6 +143,104 @@ test('native events expose bounded RSI pending, settlement, refusal and restart 
   } finally {
     fiber?.dispose()
     nextFiber?.dispose()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('same-turn adapter reload restores an in-flight adaptive probe without reinjection', async () => {
+  const { Context, Service } = await import('@deepseek-ai/cordis')
+  const dir = mkdtempSync(join(homedir(), '.mse-rsi-reopen-'))
+  const stateRoot = join(dir, 'mse-learning')
+  const sessionId = 'native-rsi-reopen-session'
+  let firstFiber
+  let secondFiber
+  try {
+    const makeContext = async () => {
+      const ctx = new Context().root
+      ctx.provide('agents', {})
+      ctx.provide('tools', {})
+      ctx.provide('llm', { async * stream() { throw new Error('provider must remain unused') } })
+      ctx.provide('dshHomePath', () => stateRoot)
+      class WorkspaceRegistryMirror extends Service {
+        constructor(c) { super(c, 'workspaceRegistry') }
+        list() { return [{ path: realpathSync(dir), sessionIds: [sessionId] }] }
+      }
+      await ctx.plugin(WorkspaceRegistryMirror)
+      const bundle = (await import('./root.mjs')).default
+      const fiber = ctx.registry.plugin(bundle, { wakeIntervalMs: 60_000 })
+      await fiber
+      return { ctx, fiber, api: ctx.get('mseRebuild') }
+    }
+    const first = await makeContext()
+    firstFiber = first.fiber
+    first.api.engine.recordCorrection({
+      text: '生成 JSON 配置时先校验字段和解析结果，避免不完整写入', sessionId: 'seed', turnId: 'seed',
+    })
+    const session = { id: sessionId, header: { cwd: dir }, events: [],
+      get seq() { return this.events.length }, eventAt(index) { return this.events[index] } }
+    const firstEvent = async event => {
+      session.events.push(event)
+      await first.ctx.parallel('session/event', session, event)
+    }
+    const prompt = '生成 JSON 配置时校验字段完整性，先检查解析结果再写入'
+    const firstMessage = { id: 'user-1-first', role: 'user', source: { kind: 'user' },
+      content: [{ type: 'text', text: prompt }] }
+    await firstEvent({ type: 'turn/start', data: { turn: 1 } })
+    await firstEvent({ type: 'user/message', data: firstMessage })
+    const initial = await agentEvents(first.ctx, { session }).waterfall('agent/pre-step', {
+      step: 1, turn: 1, messages: [firstMessage],
+    }, () => Promise.resolve({ kind: 'enter', messages: [firstMessage] }))
+    assert.equal(initial.kind, 'enter')
+    assert.equal(initial.messages.length, 2, 'the first step injects the matched rule')
+    const firstDoc = first.api.engine.store.read()
+    const receiptCount = firstDoc.receipts.length
+    const injectedCounts = firstDoc.entries.map(entry => [entry.id, entry.injected])
+    const turnKey = firstDoc.recallStrategy.adaptive.probes.at(-1)?.turnKey
+    assert.ok(firstDoc.recallStrategy.adaptive.probes.some(row => row.turnKey === turnKey),
+      'the active step persisted its bounded adaptive probe')
+
+    firstFiber.dispose()
+    firstFiber = null
+    const second = await makeContext()
+    secondFiber = second.fiber
+    const replayMessage = { id: 'user-1-reopened', role: 'user', source: { kind: 'user' },
+      content: [{ type: 'text', text: prompt }] }
+    const secondEvent = async event => {
+      session.events.push(event)
+      await second.ctx.parallel('session/event', session, event)
+    }
+    await secondEvent({ type: 'turn/start', data: { turn: 1 } })
+    await secondEvent({ type: 'user/message', data: replayMessage })
+
+    const bytesBeforePrepare = readFileSync(second.api.engine.store.path)
+    const duplicate = second.api.engine.prepare({ sessionId, turnId: '1', projectKey: dir,
+      prompt, strategyEligible: true })
+    const storedProbe = second.api.engine.store.read().recallStrategy.adaptive.probes
+      .find(row => row.turnKey === turnKey)
+    assert.equal(duplicate.reason, 'same_turn_dedup')
+    assert.deepEqual(duplicate.rsiProbe, {
+      turnKey: storedProbe.turnKey, activePolicies: storedProbe.activePolicies,
+      shadowPolicies: storedProbe.shadowPolicies, controlPolicies: storedProbe.controlPolicies,
+      offered: storedProbe.offered, baselineOffers: storedProbe.baselineOffers, at: storedProbe.at,
+    })
+    assert.deepEqual(readFileSync(second.api.engine.store.path), bytesBeforePrepare,
+      'engine prepare returns the projection without committing')
+
+    const replayed = await agentEvents(second.ctx, { session }).waterfall('agent/pre-step', {
+      step: 1, turn: 1, messages: [replayMessage],
+    }, () => Promise.resolve({ kind: 'enter', messages: [replayMessage] }))
+    assert.equal(replayed.kind, 'enter')
+    assert.equal(replayed.messages.length, 1, 'the duplicate step does not inject the rule again')
+    const replayDoc = second.api.engine.store.read()
+    assert.equal(replayDoc.receipts.length, receiptCount, 'the duplicate step adds no receipt')
+    assert.deepEqual(replayDoc.entries.map(entry => [entry.id, entry.injected]), injectedCounts,
+      'the duplicate step does not change injection counts')
+    assert.ok(second.api.statusView().rsiDiagnostics.recent.some(row =>
+      row.stage === 'probe' && row.reason === 'probe_created'),
+    'the native adapter resumes diagnostics from the persisted probe projection')
+  } finally {
+    firstFiber?.dispose()
+    secondFiber?.dispose()
     rmSync(dir, { recursive: true, force: true })
   }
 })

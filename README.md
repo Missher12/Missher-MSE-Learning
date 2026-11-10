@@ -1,5 +1,16 @@
 # MSE Learning
 
+MSE 为 DSH 学习可复用纠正与失败经验。**1.3.0** 新增活动统计、候选证据和 pytest 检查。
+
+在「设置 → 自我进化」查看六页状态。只读查看不调用模型；后台复盘与总结可能产生费用，未知费用不会自动重发。
+
+发布与验证记录见 [发布记录](https://github.com/Missher12/Missher-MSE-Learning/blob/main/PUBLICATION.md) 和 [验证记录](https://github.com/Missher12/Missher-MSE-Learning/blob/main/VALIDATION.md)。
+
+<details>
+<summary>使用说明与历史记录</summary>
+
+### 1.2.2 历史说明
+
 MSE 为 DSH 积累长期纠正和具体失败经验。**1.2.2**保留现有学习库、配置和五页界面，在 1.2.1 的基础上修复旧版自适应观察策略阻塞新版候选的问题：旧 v1 证据保留，新的 v2 独立收集证据；同一失败不会重复计入，已隔离策略仍受保护。首个有效 step 1 仍将回合事实和路由合并为一次事务写入，并保留文件与目录同步持久化。自适应召回页显示最近持久化决定和有限的原生事件诊断；诊断只留固定原因与短标识，不留正文、命令或路径，重启后清空。存储容量仍有界，系统不会自动删除旧经验；两条方法加一条警示及 768 UTF-8 字节限制保持不变。本机安装版本以宿主加载信息为准。
 
 ## 工作方式
@@ -88,3 +99,5 @@ rebuild.23 仅统一设置入口显示名为「自我进化」（英文 Self-evo
 rebuild.24 只清理公开工作树：移除已退出运行路径的旧核心、旧测试、旧文档与 Hermes 适配（Git 历史保留），同步打包脚本断言并加官方 DSH 徽章；18 个运行模块字节不变。
 
 [![powered by dsh](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
+
+</details>

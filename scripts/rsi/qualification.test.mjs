@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {cpSync,mkdtempSync,readFileSync,writeFileSync,rmSync} from 'node:fs'
-import {join} from 'node:path'
+import {join, relative, sep} from 'node:path'
 import {tmpdir} from 'node:os'
 import {fileURLToPath} from 'node:url'
 import {verifyRecallQualification} from './verify-qualification.mjs'
@@ -11,7 +11,12 @@ test('a release with the same selector must still establish a gain on its curren
   const copy=mkdtempSync(join(tmpdir(),'mse-qualification-'))
   try{
     for(const path of ['scripts/rsi','src','rebuild','tests/fixtures']){
-      cpSync(join(root,path),join(copy,path),{recursive:true})
+      const source=join(root,path)
+      cpSync(source,join(copy,path),{recursive:true,filter:item=>{
+        if(path!=='rebuild') return true
+        const rel=relative(source,item)
+        return rel!=='.probes'&&!rel.startsWith(`.probes${sep}`)
+      }})
     }
     assert.equal(verifyRecallQualification(copy).ok,true)
     const fixture=join(copy,'tests/fixtures/rsi/auto-independent-controls.json')

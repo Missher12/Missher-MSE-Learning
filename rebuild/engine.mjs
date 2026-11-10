@@ -46,6 +46,7 @@ import { developmentCheckMatchesVerification, developmentCheckIdForCommand }
   from './checker.mjs'
 import { replayAdaptivePolicy } from './adaptive-replay.mjs'
 import { localDayKey } from './time.mjs'
+import { projectActivity } from './activity.mjs'
 
 export const DEFAULT_CONTEXT_BYTES = 768
 // MSE21-FIX1: ONE digest request carries at most 64 facts; the day ledger must be able to hold
@@ -101,6 +102,12 @@ const adaptiveQueryFor = (policy, probe) => policy?.schema === 'mse-adaptive-rec
   ? probe.taskQuery ?? probe.query : probe.query
 const offerProjection = selection => (selection?.offered ?? []).map(row =>
   ({ id: row.id, version: row.version, mode: row.mode }))
+const adaptiveProbeTrace = probe => ({ turnKey: probe.turnKey,
+  activePolicies: [...(probe.activePolicies ?? [])],
+  shadowPolicies: [...(probe.shadowPolicies ?? [])],
+  controlPolicies: [...(probe.controlPolicies ?? [])],
+  offered: offerProjection({ offered: probe.offered }),
+  baselineOffers: offerProjection({ offered: probe.baselineOffers }), at: probe.at })
 function adaptiveProtectedOffers(doc, selection, additional = []) {
   const rows = offerProjection(selection)
   const protectedRows = rows.filter(row => row.mode === 'guard'
@@ -243,6 +250,36 @@ const isolatedStrategyMethod = (rows, scope, offer) => rows.some(row => row.mode
   && row.scope === scope && row.qualification === RECALL_QUALIFICATION.id
   && row.id === offer.id && row.version === offer.version)
 
+function adaptivePolicyReadiness(doc, policy, sourceAdmit, replay) {
+  const v2 = policy.schema === 'mse-adaptive-recall-v2'
+  const entry = doc.entries.find(row => row.id === policy.entryId) ?? null
+  const targetCurrent = entry !== null && entry.type === 'lesson' && entry.status !== 'retired'
+    && entry.version === policy.version && entry.lesson?.problemId === policy.objective
+  const sourceAdmitted = targetCurrent ? adaptivePolicySourcesAdmitted(doc, policy, sourceAdmit) : null
+  const blockers = []
+  if (entry === null) blockers.push('target_missing')
+  else if (entry.status === 'retired') blockers.push('target_retired')
+  else if (entry.type !== 'lesson' || entry.version !== policy.version
+    || entry.lesson?.problemId !== policy.objective) blockers.push('target_version_stale')
+  else if (entry.status === 'needs_revision') blockers.push('needs_revision')
+  if (sourceAdmitted === false) blockers.push('source_unadmitted')
+  if (v2) {
+    if (replay.regressions > 0) blockers.push('replay_counterexample')
+    if (replay.incomplete > 0) blockers.push('replay_incomplete')
+    if (replay.independentGains < 2) blockers.push('awaiting_independent_gains')
+    if (replay.independentControls < 2) blockers.push('awaiting_independent_controls')
+  } else blockers.push('legacy_v1')
+  return { schema: v2 ? 'v2' : 'v1', mode: policy.mode,
+    independentGains: v2 ? replay.independentGains : null,
+    requiredIndependentGains: v2 ? 2 : null,
+    independentControls: v2 ? replay.independentControls : null,
+    requiredIndependentControls: v2 ? 2 : null,
+    replayReason: replay.reason, replayApproved: replay.approved,
+    targetCurrent, targetStatus: entry?.status ?? null, targetVersion: entry?.version ?? null,
+    sourceAdmitted, legacySuccessor: !v2 && hasAdaptiveV2Successor(doc.recallStrategy.adaptive, policy),
+    blockers }
+}
+
 function recallStrategyStatusView(doc, sourceAdmit = () => false) {
   const current = new Map(doc.entries.filter(entry => entry.type === 'lesson'
     && entry.status !== 'retired' && typeof entry.lesson?.problemId === 'string'
@@ -252,8 +289,9 @@ function recallStrategyStatusView(doc, sourceAdmit = () => false) {
   const modes = ['shadow', 'matched', 'active', 'approved', 'isolated']
   const counts = Object.fromEntries(modes.map(mode => [mode,
     rows.filter(row => row.mode === mode).length]))
-  const adaptive = doc.recallStrategy.adaptive.policies.filter(policy =>
-    policy.qualification === RECALL_QUALIFICATION.id && adaptivePolicyTarget(doc, policy) !== null)
+  const adaptivePolicies = doc.recallStrategy.adaptive.policies.filter(policy =>
+    policy.qualification === RECALL_QUALIFICATION.id)
+  const adaptive = adaptivePolicies.filter(policy => adaptivePolicyTarget(doc, policy) !== null)
   const adaptiveCounts = Object.fromEntries(['observing', 'approved', 'isolated'].map(mode =>
     [mode, adaptive.filter(policy => policy.mode === mode).length]))
   const shortId = value => value === null ? null
@@ -265,12 +303,16 @@ function recallStrategyStatusView(doc, sourceAdmit = () => false) {
       decisions: doc.recallStrategy.adaptive.decisions.slice(-8).reverse().map(row => ({
         policyId: shortId(row.policyId), entryId: shortId(row.entryId), version: row.version,
         result: row.result, reason: row.reason, at: row.at })),
-      recent: adaptive.slice(-8).reverse().map(policy => ({ id: policy.id, entryId: policy.entryId,
-        version: policy.version, mode: policy.mode, features: policy.features,
-        positives: policy.positives, negativeControls: policy.negativeControls,
-        rejections: policy.rejections, reason: policy.reason,
-        sourceAdmitted: adaptivePolicySourcesAdmitted(doc, policy, sourceAdmit),
-        replay: replayAdaptivePolicy(policy) })) } }
+      recent: adaptivePolicies.slice(-8).reverse().map(policy => {
+        const replay = replayAdaptivePolicy(policy)
+        return { id: policy.id, entryId: policy.entryId, version: policy.version,
+          mode: policy.mode, features: policy.features,
+          positives: policy.positives, negativeControls: policy.negativeControls,
+          rejections: policy.rejections, reason: policy.reason,
+          sourceAdmitted: adaptivePolicyTarget(doc, policy) === null ? null
+            : adaptivePolicySourcesAdmitted(doc, policy, sourceAdmit),
+          replay, readiness: adaptivePolicyReadiness(doc, policy, sourceAdmit, replay) }
+      }) } }
 }
 
 function appendRecallStrategyRows(doc, additions) {
@@ -1789,7 +1831,9 @@ export class RebuildEngine {
       return { storage: { available: false, reason: error.code } }
     }
     const lastDay = doc.digest.days[doc.digest.days.length - 1] ?? null
+    const now = this.now()
     return {
+      activity: projectActivity(doc.entries, now),
       storage: { available: true, reason: this.store.lastCommitDurability === 'unconfirmed'
         ? 'durability_unconfirmed' : doc.entries.length >= ENTRY_LIMIT ? 'entry_capacity' : null },
       entries: doc.entries.filter(entry => entry.status !== 'retired').map(entry => ({
@@ -1803,8 +1847,8 @@ export class RebuildEngine {
         evidenceIds: entry.lesson?.evidenceIds ?? null, evidenceHash: entry.evidenceHash,
         // EVOLUTION016: the CURRENT edition's own window, the guard flag and the last revision —
         // read-only projections for the EXISTING detail rows (no new page, no new column).
-        methodStats: versionWindow(entry, this.now()),
-        guard: methodNeedsGuard(entry, this.now()),
+        methodStats: versionWindow(entry, now),
+        guard: methodNeedsGuard(entry, now),
         recentRevision: (() => {
           const rows = (doc.methodHistory ?? []).filter(row => row.entryId === entry.id)
           if (rows.length === 0) return null
@@ -2219,7 +2263,19 @@ export class RebuildEngine {
     const typeSummary = checkId === 'typescript-noemit-v1' && summary?.kind === 'typescript_noemit'
       && Number.isSafeInteger(summary.diagnostics) && summary.diagnostics >= 0
       && summary.diagnostics <= 256
-    check(summary === null || nodeSummary || typeSummary, 'invalid_check_summary')
+    const pytestSummary = checkId === 'pytest-summary-v1' && summary?.kind === 'pytest'
+      && Object.keys(summary).every(key => ['kind', 'tests', 'passed', 'failed', 'errors',
+        'skipped', 'xfailed', 'xpassed', 'deselected'].includes(key))
+      && ['tests', 'passed', 'failed', 'errors', 'skipped', 'xfailed', 'xpassed', 'deselected']
+        .every(key => Number.isSafeInteger(summary[key]) && summary[key] >= 0 && summary[key] <= 1_000_000)
+      && summary.tests > 0 && summary.errors === 0
+      && summary.tests === summary.passed + summary.failed + summary.skipped
+        + summary.xfailed + summary.xpassed
+      && (passed ? summary.passed === summary.tests && summary.failed === 0 && summary.skipped === 0
+        && summary.xfailed === 0 && summary.xpassed === 0 && summary.deselected === 0
+        : summary.failed > 0)
+    check((summary === null && checkId !== 'pytest-summary-v1') || nodeSummary || typeSummary
+      || pytestSummary, 'invalid_check_summary')
     const turnKey = turnKeyOf(sessionId, turnId)
     const eventIdHash = digestOf(['check-event', eventId])
     return this.store.transaction(doc => {
@@ -2361,7 +2417,7 @@ export class RebuildEngine {
     const observedCheck = typeof command === 'string'
       ? developmentCheckIdForCommand(command) : checkId
     if (typeof observedCheck !== 'string'
-      || !['node-test-runner-spec-v1', 'typescript-noemit-v1'].includes(observedCheck)) return []
+      || !['node-test-runner-spec-v1', 'typescript-noemit-v1', 'pytest-summary-v1'].includes(observedCheck)) return []
     const turnKey = turnKeyOf(sessionId, turnId)
     const doc = this.store.read()
     const receipt = doc.receipts.find(row => row.turnKey === turnKey)
@@ -2394,9 +2450,11 @@ export class RebuildEngine {
       return this.store.transaction(doc => {
         const hasStrategyTurn = doc.recallStrategy.rows.some(row => row.turnKey === turnKey
           && ['shadow', 'matched', 'active'].includes(row.mode))
-        const hasAdaptiveProbe = doc.recallStrategy.adaptive.probes.some(row => row.turnKey === turnKey)
-        if (doc.turnUsage.some(row => row.turnKey === turnKey) || hasStrategyTurn || hasAdaptiveProbe) {
-          return noCommit({ ok: true, context: '', reason: 'same_turn_dedup' })
+        const existingAdaptiveProbe = doc.recallStrategy.adaptive.probes.find(row => row.turnKey === turnKey)
+        if (doc.turnUsage.some(row => row.turnKey === turnKey) || hasStrategyTurn
+          || existingAdaptiveProbe !== undefined) {
+          return noCommit({ ok: true, context: '', reason: 'same_turn_dedup',
+            ...(existingAdaptiveProbe === undefined ? {} : { rsiProbe: adaptiveProbeTrace(existingAdaptiveProbe) }) })
         }
         const now = this.now()
         const selectorOptions = { prompt, scope, environment, maxBytes: this.maxContextBytes, now,
@@ -2449,6 +2507,7 @@ export class RebuildEngine {
             }
           }
         }
+        let rsiProbeTrace = null
         if (adaptiveAdmitted && this.#materialOk(prompt, null) === true
           && adaptive.probes.length < ADAPTIVE_RECALL_PROBE_LIMIT) {
           const strategyScope = strategyScopeOf(scope, environment)
@@ -2515,11 +2574,13 @@ export class RebuildEngine {
               }
             } else if (shadowPolicies.length < 8) shadowPolicies.push(policy.id)
           }
-          adaptive.probes.push({ turnKey, scope: strategyScope, projectScope: scope, environment,
+          const probe = { turnKey, scope: strategyScope, projectScope: scope, environment,
             session, query, taskQuery, features: queryFeatures, taskFeatures,
             baselineOffers: offerProjection(adaptiveBaseline), offered: offerProjection(selected), shadowPolicies,
             controlPolicies: controlPolicies.slice(0, 8), activePolicies, comparisons,
-            pending: [], at: now })
+            pending: [], at: now }
+          adaptive.probes.push(probe)
+          rsiProbeTrace = adaptiveProbeTrace(probe)
           adaptiveWriteAttempted = true
         }
         const { lines, bytes, offered } = selected
@@ -2540,7 +2601,8 @@ export class RebuildEngine {
             }
           }
         }
-        return { ok: true, context: lines.join(''), bytes, offered, turnKey }
+        return { ok: true, context: lines.join(''), bytes, offered, turnKey,
+          ...(typeof rsiProbeTrace === 'object' && rsiProbeTrace !== null ? { rsiProbe: rsiProbeTrace } : {}) }
       })
     } catch (error) {
       if (!storageFailure(error)) throw error

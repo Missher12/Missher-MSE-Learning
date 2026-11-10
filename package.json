@@ -1,7 +1,7 @@
 {
   "name": "@missher/dsh-mse-learning",
-  "version": "1.2.2",
-  "description": "MSE learning (rebuilt slim chain): trusted user/tool facts → bounded recall → evidence-bound lessons → daily digest. An upgrade of the mse-learning bundle.",
+  "version": "1.3.0",
+  "description": "Native DSH learning from corrections and concrete failures, with adaptive recall evidence and activity history.",
   "type": "module",
   "private": true,
   "main": "./rebuild/root.mjs",
@@ -20,6 +20,7 @@
     "rebuild/adaptive-operations.mjs",
     "rebuild/adaptive-recall.mjs",
     "rebuild/adaptive-replay.mjs",
+    "rebuild/activity.mjs",
     "rebuild/checker.mjs",
     "rebuild/client.js",
     "rebuild/config.mjs",

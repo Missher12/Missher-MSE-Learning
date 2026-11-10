@@ -3,8 +3,8 @@
  *
  * 视觉与结构按原实现恢复：宿主自己的设置组件（Button/Switch/SegmentedTabs/Input/Menu/StateDot/
  * 图标，来自平台静态模块表）、原 STYLE（同一字号/行高/16px 行距/0.5px 发丝分隔/折叠详情/窄屏
- * compact Picker 选项卡与 media query）、原 settingsTabNavigation 五页（常规、经验、召回、任务、
- * 学习状态）、原 row/disclosure/definition/metric/Picker 原语、原生状态点与刷新按钮。
+ * compact Picker 选项卡与 media query）、原 settingsTabNavigation 六页（常规、经验、召回、任务、
+ * 学习状态、活动）、原 row/disclosure/definition/metric/Picker 原语、原生状态点与刷新按钮。
  * 内部只接精简新引擎：状态经 `mseRebuildStatus`（网关 RemoteResult {ok,value} 套宿主业务
  * {ok:true,view}，两层都解，失败绝不显示假状态），暂停/审计重试经 `mseRebuildControl`，设置开关
  * 走真实 ConfigForm（getSnapshot/subscribe + mutate(ops, revision) 修订栅栏，失败可读回滚）。
@@ -23,9 +23,10 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
   const NS = 'mse-learning'
   const BUNDLE = '@missher/dsh-mse-learning'
   const SETTINGS_ID = 'mse-learning'
-  const TABS = ['overview', 'lessons', 'recall', 'tasks', 'usage']
+  const TABS = ['overview', 'lessons', 'recall', 'tasks', 'usage', 'activity']
   const tabLabel = (id, dict) => id === 'overview' ? dict.tabOverview : id === 'lessons' ? dict.tabLessons
-    : id === 'recall' ? dict.tabRecall : id === 'tasks' ? dict.tabTasks : dict.tabUsage
+    : id === 'recall' ? dict.tabRecall : id === 'tasks' ? dict.tabTasks
+      : id === 'activity' ? dict.tabActivity : dict.tabUsage
 
   // rc.4 $mount takes a FULL contribution {package, descriptors}; these mirror the package's
   // Host typert manifest (rebuild/typert.mjs) — the same methods the real gateway reflects.
@@ -49,6 +50,22 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
   const zh = {
     settingsTitle: '自我进化', runtimeGroup: '运行设置',
     tabOverview: '常规', tabLessons: '经验', tabRecall: '召回', tabTasks: '任务', tabUsage: '学习状态',
+    tabActivity: '活动',
+    activityTitle: '新增记录', activityToday: '今天新增', activityWeek: '本周新增',
+    activityRetained: '当前保留', activityEntries: '条', activityDay: '按日', activityWeekMode: '按周',
+    activityTotal: '累计', activityChart: '最近 365 天的每日新增', activitySelected: '所选区间',
+    activityRule: '规则', activityLesson: '经验', activityDigest: '总结',
+    activityHistoryNote: '按当前保留记录的创建时间统计；已删除归档无法补算。',
+    activityDetails: '统计口径', activityImported: '导入记录', activityUnknown: '创建时间无效',
+    activityFuture: '未来记录（未计入新增）', activityBeforeWindow: '一年窗口前',
+    adaptiveCandidates: '自适应候选', adaptiveNoCandidates: '暂无候选',
+    adaptiveObserving: '观察中', adaptiveApproved: '已启用', adaptiveIsolated: '已停用',
+    adaptiveLegacy: '旧版策略（不继承分数）', adaptiveTarget: '目标版本',
+    adaptiveSource: '来源许可', adaptiveSourceYes: '有效', adaptiveSourceNo: '未获许可',
+    adaptiveSourceUnknown: '无法确认', adaptiveReplay: '回放', adaptiveGain: '独立命中',
+    adaptiveControl: '无关对照', adaptiveBlockers: '当前原因', adaptiveSuccessor: '已有新版后继，旧版证据不计入。',
+    adaptiveTargetCurrent: '当前版本', adaptiveTargetChanged: '版本已变化', adaptiveTargetRetired: '已停用',
+    adaptiveTargetRevision: '待修订',
     refresh: '刷新', refreshing: '读取中…', loading: '读取中…',
     statusUnreadable: '状态不可读', loadFailed: '读取失败',
     storageInvalidMemory: '学习库内容校验失败，已暂停读写与后台学习。',
@@ -59,19 +76,19 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     storageBusy: '另一进程正在写入，本次写入已跳过。',
     storageWarning: '学习库状态',
     effectiveRunning: '运行中', effectivePaused: '已暂停',
-    learning: '学习开关', learningHint: '关闭后只记录事实，不再产生新的反思、每日总结或纠正提取。',
+    learning: '学习开关', learningHint: '关闭后停止后台复盘、每日总结与纠正提取。',
     enabledOn: '已开启', enabledOff: '已关闭',
-    pauseControl: '后台暂停', pauseHint: '暂停只停止后台任务；前台记录与已存经验照常注入。',
+    pauseControl: '后台任务', pauseHint: '暂停仅停止后台任务；前台采集与召回继续。',
     pause: '暂停', resume: '恢复',
     settingsSaveFailed: '设置未保存，已重新读取真实状态。',
     wakeInterval: '空闲触发间隔（毫秒）', wakeSave: '保存',
-    dailySection: '最近每日总结', dailyHint: '本地 23:00 后空闲自动汇总，一天一次；空白日跳过；停机积压与晚到事实在后续空闲逐个补做。',
+    dailySection: '最近每日总结', dailyHint: '每日总结在空闲时运行。',
     moreSection: '更多信息',
     moreHowTitle: '工作原理', moreHow: '前台只记录可信用户消息与真实工具结果；反思、修订、每日总结和纠正提取都在空闲后台槽运行，打开本页不发起模型请求。',
     moreSaveTitle: '普通纠正何时保存', moreSave: '明确表达长期意图且非临时任务要求的纠正才直接长期保存；普通纠正先入持久审计队列，再经提取门做原话核对、否定保留与范围核对，确认可复用才长期保存——「别再」不是无条件全局保存；一次性调整和不确定的只留回合事实，忽略原因可读，不会伪装成已保存。',
     moreScopeTitle: '作用范围', moreScope: '全局经验跨项目注入；带「仅本项目/仓库/文件」条件的规则只在本项目注入，不会外泄。',
     moreCheckTitle: '检查边界', moreCheck: '只跑本次改动影响的检查，不重复运行已经通过的测试；未知费用的调用不会自动重发。',
-    entriesSection: '记住的规则与经验', entriesHint: '用户明确纠错立即长期保存；真实失败经验在两次独立同类观察后形成，仍须具体证据。长期规则不机械过期。',
+    entriesSection: '规则与经验', entriesHint: '规则来自明确纠正；失败经验需独立观察与具体证据。',
     filterType: '类型', filterStatus: '状态', allOption: '全部',
     typeRule: '用户规则', typeLesson: '失败经验', typeDigest: '每日总结',
     statusActive: '生效', statusSuperseded: '已被新版取代',
@@ -83,10 +100,10 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     windowInjected: '本版注入', windowChecks: '本版检查通过/失败',
     recentRevisionLabel: '最近修订原因', recentRevisionNone: '暂无修订',
     modeGuard: '警示', modeMethod: '方法', modeLegacy: '旧格式回执',
-    recallSection: '注入记录', recallHint: '每次注入都有凭据：提供了哪些经验的哪个版本，以及回合结局。',
+    recallSection: '注入记录', recallHint: '历史回执可展开。',
     offeredVersions: '提供版本', outcomeUnknown: '未判定', outcomeCompleted: '完成', outcomeAborted: '中止',
     outcomeVerified: '检查通过', outcomeFailed: '存在失败', outcomeCancelled: '已取消',
-    rsiSection: '自适应召回诊断', rsiHint: '只显示已登记工作区中实际发生的 RSI 探针；运行诊断仅保存在当前进程，重启后清空，已结算决定仍保留。',
+    rsiSection: '自适应召回', rsiHint: '展开候选可查看依据。',
     rsiPersisted: '最近持久化决定', rsiRuntime: '最近运行记录', rsiNone: '暂无记录',
     rsiStageAdmission: '来源检查', rsiStageProbe: '探针', rsiStageToolResult: '工具结果',
     rsiStagePending: '待结算', rsiStageSettled: '回合结算',
@@ -114,7 +131,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     rsiReasonCounterexampleChild: '反例修订已建立',
     settledYes: '已结算', settledNo: '在途', historicalEntry: '历史经验', fullId: '完整标识',
     summaryLabel: '摘要', fullText: '完整原文', requestLabel: '请求标识', rawCode: '原始结果码',
-    tasksSection: '后台请求', tasksHint: '反思、修订、每日总结与纠正提取共用同一个在途槽；一次已知费用的输出截断最多有一次有界自动重试，未知费用与其它失败都不会自动重发，可发起人工审计重试。',
+    tasksSection: '后台请求', tasksHint: '未知费用的请求不会自动重发。',
     inFlightNow: '在途', waitReasonLine: '等待原因', unknownCostHeld: '未知费用保留',
     taskKindReflect: '反思', taskKindRevise: '修订', taskKindDigest: '每日总结', taskKindExtract: '纠正提取',
     taskStatusSettled: '已结算', taskStatusRunning: '在途',
@@ -126,7 +143,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     collectionWorkspaces: '注册工作区', collectionSkipped: '最近跳过', collectionNone: '无跳过记录',
     collectionUnknown: '未知', revisionsSection: '最近规则变更', revisionRetired: '停用',
     revisionNone: '暂无规则变更',
-    correctionsShort: '可复用的纠正会在空闲时整理为长期规则。',
+    correctionsShort: '可复用纠正会在空闲时整理为长期规则。',
     correctionsFullTitle: '保存规则说明',
     correctionsFull: '明确表达长期意图且非临时任务要求的纠正才直接长期保存；普通纠正先入持久审计队列，再经提取门做原话核对、否定保留与范围核对，确认可复用才长期保存——「别再」不是无条件全局保存；一次性调整和不确定的只留回合事实，忽略原因可读，不会伪装成已保存。',
     saved: '已保存', pendingCorr: '待处理', dispatchedCorr: '提取中', ignoredReasons: '忽略原因',
@@ -136,7 +153,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     existingSection: '现存经验', existingCount: '现存规则与经验', existingInjected: '注入合计',
     existingRecurrences: '复发合计', existingScopeNote: '按当前现存经验统计，不是全历史总量。',
     goLessons: '查看经验列表',
-    auditedRetry: '审计重试', auditedRetryHint: '对已核对的失败材料发起一次人工重试；绝不自动重发。',
+    auditedRetry: '审计重试', auditedRetryHint: '已知费用的截断仅自动重试一次；未知费用不重发，审计重试需人工操作。',
     noEntries: '暂无经验。', noRecall: '暂无注入记录。', noTasks: '暂无后台请求。',
     lastSummaryLine: '总结', dailyState: '每日状态', lastDoneDay: '最后完成日', backlogDays: '待补日',
     dailyPartialLine: '部分完成（未核验来源的事实已安全排除）', dailyExcludedLine: '排除',
@@ -145,9 +162,126 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     reasoningSpace: '生成达到上限、未收到正文（可能用于推理）',
     daysProcessed: '已处理日', none: '无',
   }
+  const en = {
+    settingsTitle: 'Self-evolution', runtimeGroup: 'Runtime settings',
+    tabOverview: 'Overview', tabLessons: 'Lessons', tabRecall: 'Recall', tabTasks: 'Tasks',
+    tabUsage: 'Learning', tabActivity: 'Activity', refresh: 'Refresh', refreshing: 'Loading…', loading: 'Loading…',
+    statusUnreadable: 'Status unavailable', loadFailed: 'Could not load',
+    storageInvalidMemory: 'Memory validation failed. Writes and background learning are paused.',
+    storageInvalidStore: 'Memory path is unsafe. Writes and background learning are paused.',
+    storageUnavailable: 'Memory is unavailable. Background learning is paused.',
+    storageCapacity: 'Memory is full. Existing data is kept; new entries are on hold.',
+    storageDurability: 'The latest write committed, but durability is unconfirmed.',
+    storageBusy: 'Another process is writing. This write was skipped.', storageWarning: 'Memory status',
+    effectiveRunning: 'Running', effectivePaused: 'Paused', learning: 'Learning',
+    learningHint: 'Off stops background reflection, daily summaries, and correction extraction.',
+    enabledOn: 'On', enabledOff: 'Off', pauseControl: 'Background work',
+    pauseHint: 'Pause stops background work; foreground collection and recall continue.',
+    pause: 'Pause', resume: 'Resume', settingsSaveFailed: 'Settings were not saved; current state was reloaded.',
+    wakeInterval: 'Idle interval (ms)', wakeSave: 'Save', dailySection: 'Latest daily summary',
+    dailyHint: 'Daily summaries run while idle.',
+    moreSection: 'Details', moreHowTitle: 'How it works',
+    moreHow: 'Foreground events record trusted user messages and tool results. Reflection, revision, summaries, and correction extraction run in idle background slots. Opening this page makes no model calls.',
+    moreSaveTitle: 'When corrections are saved',
+    moreSave: 'Only explicit, reusable corrections are saved as rules. Other corrections are audited and checked against the original wording, negation, and scope first. One-off or uncertain changes remain turn facts.',
+    moreScopeTitle: 'Scope', moreScope: 'Global rules can be recalled across projects. Project-specific rules stay within that project.',
+    moreCheckTitle: 'Checks', moreCheck: 'Only checks relevant to the change are run. Calls with unknown cost are never replayed automatically.',
+    entriesSection: 'Rules and lessons',
+    entriesHint: 'Rules come from explicit corrections; lessons need independent observations and concrete evidence.',
+    filterType: 'Type', filterStatus: 'Status', allOption: 'All', typeRule: 'User rule',
+    typeLesson: 'Lesson', typeDigest: 'Daily summary', statusActive: 'Active', statusSuperseded: 'Superseded',
+    version: 'Version', scope: 'Scope', scopeGlobal: 'Global', scopeScoped: 'This project',
+    fixSteps: 'Fix steps', checkMethod: 'Verification', injectedCount: 'Offered', recurrenceCount: 'Recurrences',
+    evidenceHash: 'Evidence ID', updatedAt: 'Updated', applicabilityLine: 'Applies when',
+    versionWindowLabel: 'Current version', coverageComplete: 'Complete since this version was created',
+    coverageSinceUpgrade: 'Since upgrade only; older version attribution is unknown',
+    windowInjected: 'Current version offers', windowChecks: 'Current version checks (pass/fail)',
+    recentRevisionLabel: 'Latest revision', recentRevisionNone: 'No revisions',
+    modeGuard: 'Warning', modeMethod: 'Method', modeLegacy: 'Legacy receipt', recallSection: 'Recall receipts',
+    recallHint: 'Expand past receipts when needed.', offeredVersions: 'Versions offered',
+    outcomeUnknown: 'Unknown', outcomeCompleted: 'Completed', outcomeAborted: 'Aborted',
+    outcomeVerified: 'Verified', outcomeFailed: 'Failed', outcomeCancelled: 'Cancelled',
+    rsiSection: 'Adaptive recall',
+    rsiHint: 'Expand a candidate for its evidence.',
+    rsiPersisted: 'Recent saved decisions', rsiRuntime: 'Recent runtime events', rsiNone: 'No records',
+    rsiStageAdmission: 'Source check', rsiStageProbe: 'Probe', rsiStageToolResult: 'Tool result',
+    rsiStagePending: 'Pending', rsiStageSettled: 'Settled', rsiResultCreated: 'Policy created',
+    rsiResultHoldout: 'Independent hit', rsiResultControl: 'Negative control', rsiResultApproved: 'Approved',
+    rsiResultRejected: 'Rejected', rsiResultIsolated: 'Isolated', rsiResultUnknown: 'Unknown',
+    rsiResultFeatureRefused: 'Insufficient features', rsiReasonProbeCreated: 'Real probe recorded',
+    rsiReasonFailureAdmitted: 'Failure evidence accepted', rsiReasonFailureDuplicate: 'Duplicate failure evidence',
+    rsiReasonFailureRejected: 'Failure evidence rejected', rsiReasonSourceRefused: 'Source no longer admitted',
+    rsiReasonMaterialRefused: 'Material rejected', rsiReasonOutputIncomplete: 'Tool output incomplete',
+    rsiReasonCancelled: 'Tool call cancelled', rsiReasonNoFailure: 'No tool failure',
+    rsiReasonPendingSignal: 'Awaiting settlement', rsiReasonNoPendingSignal: 'No pending signal',
+    rsiReasonStorageUnavailable: 'Memory unavailable', rsiReasonNoDecision: 'No adaptive decision',
+    rsiReasonUnknownOutcome: 'Outcome unknown', rsiReasonUniqueNative: 'Unique native failure match',
+    rsiReasonIndependentSame: 'Independent same-objective hit', rsiReasonSameSession: 'Repeated session or task',
+    rsiReasonCompeting: 'Another method explains the failure', rsiReasonRecurrence: 'Same failure recurred',
+    rsiReasonCheckerFailure: 'Native check failed', rsiReasonCancelledUnknown: 'Cancelled or unknown result',
+    rsiReasonSourceRevoked: 'Source permission revoked', rsiReasonMaterialRevoked: 'Material permission revoked',
+    rsiReasonPolicyStale: 'Policy version is stale', rsiReasonInsufficientFeatures: 'Insufficient safe features',
+    rsiReasonAlreadyTracked: 'Policy already tracked', rsiReasonNotAdditive: 'No added value',
+    rsiReasonAmbiguousFailure: 'Failure target is ambiguous', rsiReasonBaselineExplains: 'Baseline explains failure',
+    rsiReasonStaleProbe: 'Probe expired', rsiReasonProbeCapacity: 'Probe capacity reached',
+    rsiReasonUnmatchedObjective: 'Objective did not match', rsiReasonAwaitingControl: 'Awaiting negative control',
+    rsiReasonStrategyDisabled: 'Strategy disabled', rsiReasonRevisionLimit: 'Revision limit reached',
+    rsiReasonSameMechanism: 'Repeated revision mechanism', rsiReasonCounterexampleChild: 'Counterexample revision created',
+    settledYes: 'Settled', settledNo: 'In progress', historicalEntry: 'Historical lesson', fullId: 'Full ID',
+    summaryLabel: 'Summary', fullText: 'Full text', requestLabel: 'Request ID', rawCode: 'Result code',
+    tasksSection: 'Background requests',
+    tasksHint: 'Unknown-cost calls are never replayed automatically.',
+    inFlightNow: 'In flight', waitReasonLine: 'Waiting', unknownCostHeld: 'Unknown cost held',
+    taskKindReflect: 'Reflection', taskKindRevise: 'Revision', taskKindDigest: 'Daily summary',
+    taskKindExtract: 'Correction extraction', taskStatusSettled: 'Settled', taskStatusRunning: 'In progress',
+    usageTokens: 'Known tokens', usageCalls: 'Calls', usageUnknownCost: 'Unknown cost',
+    usageTotalRequests: 'Requests / settled', usageSettled: 'settled',
+    usageAuditSection: 'Usage (last 24 hours)', usageAuditNote: 'Counts reflect measured calls and tokens; unmeasured usage is not shown as zero.',
+    correctionsSection: 'Correction extraction', collectionSection: 'Collection',
+    collectionScopeTitle: 'Workspaces and skips', collectionWorkspaces: 'Registered workspaces',
+    collectionSkipped: 'Recently skipped', collectionNone: 'No skipped events', collectionUnknown: 'Unknown',
+    revisionsSection: 'Recent rule changes', revisionRetired: 'Retired', revisionNone: 'No rule changes',
+    correctionsShort: 'Reusable corrections are organized into rules while idle.',
+    correctionsFullTitle: 'Rule saving', correctionsFull: 'Only explicit, reusable corrections are saved as rules. Other corrections are checked against original wording, negation, and scope; one-off or uncertain changes remain turn facts.',
+    saved: 'Saved', pendingCorr: 'Pending', dispatchedCorr: 'Extracting', ignoredReasons: 'Ignored because',
+    correctionsDecision: 'Recent decisions', corrDurable: 'Reusable', corrOneOff: 'One-off',
+    corrUncertain: 'Uncertain', corrGlobal: 'Global', corrProject: 'Project', corrScopeUnknown: 'Scope unknown',
+    corrSaved: 'Saved', corrIgnored: 'Ignored', corrContextOmitted: 'Context omitted',
+    existingSection: 'Retained entries', existingCount: 'Rules and lessons', existingInjected: 'Offers',
+    existingRecurrences: 'Recurrences', existingScopeNote: 'Counts cover currently retained entries only.',
+    goLessons: 'View lessons', auditedRetry: 'Audited retry',
+    auditedRetryHint: 'Known-cost truncation gets one automatic retry; unknown-cost calls are not resent, audited retries require a manual action.',
+    noEntries: 'No entries.', noRecall: 'No recall receipts.', noTasks: 'No background requests.',
+    lastSummaryLine: 'Summary', dailyState: 'Daily status', lastDoneDay: 'Last completed day',
+    backlogDays: 'Days pending', dailyPartialLine: 'Partial; unverified facts were excluded',
+    dailyExcludedLine: 'Excluded', nextStepLabel: 'Next step', outputBytesLabel: 'Output bytes',
+    finishKindLabel: 'Finish reason', verdictLabel: 'Output diagnosis',
+    reasoningSpace: 'Generation limit reached without body text (possibly reasoning output)',
+    daysProcessed: 'Days processed', none: 'None',
+    activityTitle: 'New entries', activityToday: 'Added today', activityWeek: 'Added this week',
+    activityRetained: 'Retained', activityEntries: 'entries', activityDay: 'Daily', activityWeekMode: 'Weekly',
+    activityTotal: 'All time', activityChart: 'Daily additions over the last 365 days',
+    activitySelected: 'Selected period', activityRule: 'Rules', activityLesson: 'Lessons',
+    activityDigest: 'Summaries',
+    activityHistoryNote: 'Counts use retained entries and original creation dates. Deleted archive history cannot be recovered.',
+    activityDetails: 'Counting details', activityImported: 'Imported entries',
+    activityUnknown: 'Invalid creation dates', activityFuture: 'Future entries excluded',
+    activityBeforeWindow: 'Before this year window', adaptiveCandidates: 'Adaptive candidates',
+    adaptiveNoCandidates: 'No candidates', adaptiveObserving: 'Observing', adaptiveApproved: 'Active',
+    adaptiveIsolated: 'Disabled', adaptiveLegacy: 'Legacy policy (evidence not inherited)',
+    adaptiveTarget: 'Target version', adaptiveSource: 'Source permission', adaptiveSourceYes: 'Valid',
+    adaptiveSourceNo: 'Not admitted', adaptiveSourceUnknown: 'Unknown', adaptiveReplay: 'Replay',
+    adaptiveGain: 'Independent hits', adaptiveControl: 'Unrelated controls', adaptiveBlockers: 'Current blockers',
+    adaptiveSuccessor: 'A newer v2 policy exists; v1 evidence is not counted.',
+    adaptiveTargetCurrent: 'Current version', adaptiveTargetChanged: 'Version changed',
+    adaptiveTargetRetired: 'Retired', adaptiveTargetRevision: 'Needs revision',
+  }
   const TYPE_ZH = { rule: zh.typeRule, lesson: zh.typeLesson, digest: zh.typeDigest }
+  const TYPE_EN = { rule: en.typeRule, lesson: en.typeLesson, digest: en.typeDigest }
   const STATUS_ZH = { user_rule: zh.statusActive, pending: '待验证', check_passed: zh.statusActive,
     needs_revision: '需修订', superseded: zh.statusSuperseded }
+  const STATUS_EN = { user_rule: en.statusActive, pending: 'Pending review', check_passed: en.statusActive,
+    needs_revision: 'Needs revision', superseded: en.statusSuperseded }
   const STORAGE_REASON_ZH = { invalid_memory: zh.storageInvalidMemory,
     invalid_store: zh.storageInvalidStore, state_unavailable: zh.storageUnavailable,
     invalid_state_root: zh.storageUnavailable, capacity: zh.storageCapacity,
@@ -223,6 +357,19 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
   // MSE21: a REAL next step for a settled task (never a fake dash / generic failure).
   const NEXT_ZH = { in_flight: '调用中', retry_pending: '已知费用，待唯一重试',
     exhausted_needs_evidence: '已用尽，需新证据或人工审计', unknown_cost_hold: '未知费用持有，不会自动重放' }
+  const WAIT_EN = { paused: 'Paused', in_flight: 'Another background task is running', busy: 'Foreground work is active',
+    done_today: 'Summary already completed today', no_activity: 'Empty day skipped', no_route: 'No model route available',
+    digest_sources_unverified: 'Daily sources could not be verified; skipped safely',
+    digest_facts_filtered: 'Some unverified facts were excluded', source_unproven: 'Waiting for attributable evidence',
+    digest_ledger_full: 'Daily ledger is full', reflection_truncation_exhausted: 'Output remained truncated; new evidence or review is needed',
+    reflection_compaction_exhausted: 'Output could not fit; new evidence or review is needed',
+    no_source_route: 'No route for the source session', same_material_needs_audited_retry: 'This material needs a manual audited retry',
+    unknown_cost_never_auto_replayed: 'Unknown-cost call held; it will not be replayed',
+    background_error_invalid_memory: 'Background result failed validation; check diagnostics', entry_capacity: 'Memory is full; new lessons are on hold',
+    background_error_unexpected: 'Background learning failed; check diagnostics', null: '—' }
+  const NEXT_EN = { in_flight: 'Running', retry_pending: 'One known-cost retry pending',
+    exhausted_needs_evidence: 'No retries remain; new evidence or review is needed',
+    unknown_cost_hold: 'Unknown-cost call held; no replay' }
   const OUTCOME_ZH = { completed: zh.outcomeCompleted, aborted: zh.outcomeAborted,
     verified: zh.outcomeVerified, failed: zh.outcomeFailed, cancelled: zh.outcomeCancelled,
     unknown: zh.outcomeUnknown }
@@ -255,6 +402,24 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     awaiting_negative_control: zh.rsiReasonAwaitingControl, strategy_disabled: zh.rsiReasonStrategyDisabled,
     revision_limit: zh.rsiReasonRevisionLimit, same_mechanism_rejected: zh.rsiReasonSameMechanism,
     counterexample_child: zh.rsiReasonCounterexampleChild }
+  const RSI_REASON_EN = { probe_created: 'Real probe recorded', failure_admitted: 'Failure evidence accepted',
+    failure_duplicate: 'Duplicate failure evidence', failure_rejected: 'Failure evidence rejected',
+    source_refused: 'Source no longer admitted', material_refused: 'Material rejected',
+    output_incomplete: 'Tool output incomplete', cancelled: 'Tool call cancelled', no_failure: 'No tool failure',
+    pending_signal: 'Awaiting settlement', no_pending_signal: 'No pending signal', storage_unavailable: 'Memory unavailable',
+    no_adaptive_decision: 'No adaptive decision', unknown_outcome: 'Outcome unknown',
+    unique_native_method_match: 'Unique native failure match', independent_same_objective: 'Independent same-objective hit',
+    same_session_or_query: 'Repeated session or query', competing_method_failure: 'Another method explains the failure',
+    same_signature_recurrence: 'Same failure recurred', native_checker_failure: 'Native check failed',
+    cancelled_or_unknown: 'Cancelled or unknown result', source_revoked: 'Source permission revoked',
+    material_revoked: 'Material permission revoked', policy_stale: 'Policy version is stale',
+    insufficient_safe_features: 'Insufficient safe features', already_tracked: 'Policy already tracked',
+    candidate_not_additive: 'No added value', ambiguous_native_failure: 'Failure target is ambiguous',
+    baseline_explains_failure: 'Baseline explains failure', stale_probe: 'Probe expired',
+    probe_capacity: 'Probe capacity reached', independent_unmatched_objective: 'Objective did not match',
+    awaiting_negative_control: 'Awaiting negative control', strategy_disabled: 'Strategy disabled',
+    revision_limit: 'Revision limit reached', same_mechanism_rejected: 'Repeated revision mechanism',
+    counterexample_child: 'Counterexample revision created' }
   // Chinese reads first; the original code stays in parentheses for tracing.
   const TERMINAL_ZH = { saved: '已保存', committed: '已入库', linked: '已关联', skipped: '已跳过',
     entry_capacity: '经验容量已满，新条目未保存',
@@ -269,6 +434,17 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     model_failed: '模型调用失败' }
   const terminalZh = code => code === null || code === undefined ? null
     : TERMINAL_ZH[code] ? `${TERMINAL_ZH[code]}（${code}）` : code
+  const TERMINAL_EN = { saved: 'Saved', committed: 'Committed', linked: 'Linked', skipped: 'Skipped',
+    entry_capacity: 'Entry capacity reached; not saved', truncated: 'Output truncated',
+    output_too_large: 'Output too large', attempt_aborted: 'Attempt aborted', invalid_result: 'Invalid output',
+    model_unparseable: 'Output could not be parsed', connection_reset: 'Connection reset', timeout: 'Timed out',
+    paused: 'Paused', aborted: 'Aborted', audit_retry_accepted: 'Audited retry accepted',
+    same_material_needs_audited_retry: 'Manual audited retry required', unknown_cost: 'Unknown cost; held',
+    invalid_lesson: 'Lesson failed validation', needs_compaction: 'Text exceeded limit',
+    not_grounded_evidence: 'Output was not grounded in evidence', problem_not_reflectable: 'Problem cannot be reflected',
+    revision_already_attempted: 'Evidence already tried', reflection_interrupted: 'Reflection interrupted',
+    attempt_in_flight: 'Attempt already in flight', not_reviseable: 'Cannot revise', no_digest: 'No daily activity',
+    failed: 'Failed', model_failed: 'Model call failed' }
   // Success/normal endings NEVER get a retry button; unknown cost never gets one either.
   const OK_TERMINALS = new Set(['saved', 'committed', 'linked', 'skipped', 'audit_retry_accepted'])
   const summaryText = (text, max = 96) => {
@@ -334,6 +510,22 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-error{color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:20px;overflow-wrap:anywhere}
 .mse-details .mse-notice{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px;min-height:20px;overflow-wrap:anywhere}
 .mse-details .mse-inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-width:0}
+.mse-details .mse-activity-scroll{width:100%;max-width:100%;overflow-x:auto;overscroll-behavior-x:contain;padding:8px 0 12px}
+.mse-details .mse-activity-layout{display:flex;gap:8px;width:max-content}
+.mse-details .mse-activity-weekdays{display:grid;grid-template-rows:repeat(7,15px);gap:4px;padding-top:22px;font-size:9px;line-height:15px;color:var(--dsw-alias-label-tertiary);text-align:center}
+.mse-details .mse-activity-chart{width:max-content}
+.mse-details .mse-activity-months,.mse-details .mse-activity-grid{display:grid;grid-template-columns:repeat(var(--mse-activity-weeks),15px);gap:4px;width:max-content}
+.mse-details .mse-activity-months{font-size:10px;line-height:16px;color:var(--dsw-alias-label-secondary);height:18px}
+.mse-details .mse-activity-months span{white-space:nowrap;overflow:visible}
+.mse-details .mse-activity-week{display:grid;grid-template-rows:repeat(7,15px);gap:4px}
+.mse-details .mse-activity-cell{width:15px;height:15px;min-width:15px;padding:0;border:0.5px solid var(--dsw-alias-border-l2);border-radius:3px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);font:inherit;font-size:8px;line-height:14px;text-align:center;font-variant-numeric:tabular-nums}
+.mse-details .mse-activity-cell[data-level="1"]{background:color-mix(in srgb,var(--dsw-alias-state-success-primary,var(--dsw-alias-label-primary)) 18%,var(--dsw-alias-bg-module-platform))}
+.mse-details .mse-activity-cell[data-level="2"]{background:color-mix(in srgb,var(--dsw-alias-state-success-primary,var(--dsw-alias-label-primary)) 34%,var(--dsw-alias-bg-module-platform))}
+.mse-details .mse-activity-cell[data-level="3"]{background:color-mix(in srgb,var(--dsw-alias-state-success-primary,var(--dsw-alias-label-primary)) 54%,var(--dsw-alias-bg-module-platform))}
+.mse-details .mse-activity-cell[data-level="4"]{background:var(--dsw-alias-state-success-primary,var(--dsw-alias-label-primary));color:var(--dsw-alias-bg-module-platform)}
+.mse-details .mse-activity-cell[aria-pressed="true"]{outline:2px solid var(--dsw-alias-label-primary);outline-offset:1px}
+.mse-details .mse-activity-cell:focus-visible{outline:2px solid var(--dsw-alias-state-success-primary,var(--dsw-alias-label-primary));outline-offset:2px}
+.mse-details .mse-activity-empty{width:15px;height:15px}
 @media(max-width:620px){
 .mse-details .mse-row { gap: 12px; padding: 10px 0; }
 .mse-details .mse-metrics{gap:8px}
@@ -456,7 +648,66 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
   function MsePanel(props) {
     const locale = typeof props.useLocale === 'function'
       ? props.useLocale(snapshot => snapshot.active) : props.locale
-    const dict = locale === 'en' ? { ...zh, settingsTitle: 'Self-evolution', runtimeGroup: 'Runtime settings' } : zh
+    const dict = locale === 'en' ? { ...zh, ...en } : zh
+    const dateText = at => Number.isFinite(at) ? new Date(at).toLocaleString(
+      locale === 'en' ? 'en-US' : 'zh-CN', { hour12: false }) : '—'
+    const colon = locale === 'en' ? ': ' : '：'
+    const listSeparator = locale === 'en' ? ', ' : '、'
+    const typeLabels = locale === 'en' ? TYPE_EN : TYPE_ZH
+    const statusLabels = locale === 'en' ? STATUS_EN : STATUS_ZH
+    const storageReasonLabels = locale === 'en' ? { ...STORAGE_REASON_ZH,
+      invalid_memory: en.storageInvalidMemory, invalid_store: en.storageInvalidStore,
+      state_unavailable: en.storageUnavailable, invalid_state_root: en.storageUnavailable,
+      capacity: en.storageCapacity, entry_capacity: en.storageCapacity,
+      durability_unconfirmed: en.storageDurability, lock_busy: en.storageBusy,
+      ENOSPC: en.storageCapacity, EIO: en.storageUnavailable, EACCES: en.storageUnavailable,
+      EROFS: en.storageUnavailable, transaction_async: en.storageUnavailable,
+      transaction_reentry: en.storageUnavailable } : STORAGE_REASON_ZH
+    const waitLabels = locale === 'en' ? WAIT_EN : WAIT_ZH
+    const nextLabels = locale === 'en' ? NEXT_EN : NEXT_ZH
+    const kindLabels = locale === 'en' ? { reflect: en.taskKindReflect, revise: en.taskKindRevise,
+      digest: en.taskKindDigest, extract: en.taskKindExtract } : KIND_ZH
+    const outcomeLabels = locale === 'en' ? { completed: en.outcomeCompleted, aborted: en.outcomeAborted,
+      verified: en.outcomeVerified, failed: en.outcomeFailed, cancelled: en.outcomeCancelled,
+      unknown: en.outcomeUnknown } : OUTCOME_ZH
+    const stageLabels = locale === 'en' ? { admission: en.rsiStageAdmission, probe: en.rsiStageProbe,
+      tool_result: en.rsiStageToolResult, pending: en.rsiStagePending, settled: en.rsiStageSettled } : RSI_STAGE_ZH
+    const resultLabels = locale === 'en' ? { created: en.rsiResultCreated, holdout_hit: en.rsiResultHoldout,
+      negative_control: en.rsiResultControl, approved: en.rsiResultApproved, rejected: en.rsiResultRejected,
+      isolated: en.rsiResultIsolated, unknown: en.rsiResultUnknown,
+      feature_refused: en.rsiResultFeatureRefused } : RSI_RESULT_ZH
+    const rsiReasonLabels = locale === 'en' ? RSI_REASON_EN : RSI_REASON_ZH
+    const terminalLabel = code => locale === 'en'
+      ? code === null || code === undefined ? null : TERMINAL_EN[code] ?? code : terminalZh(code)
+    const reasonLabels = locale === 'en' ? { ...REASON_ZH, no_correction: 'Not a reusable correction',
+      one_off: 'One-off adjustment', uncertain: 'Durability is uncertain', generic_advice: 'Generic advice rejected',
+      negation_or_scope_dropped: 'Negation or scope was lost; rejected', evidence_not_verbatim: 'Evidence did not match the original wording',
+      invalid_result: 'Invalid output; rejected', duplicate: 'Duplicate; not saved again', unknown_cost: 'Unknown cost; held without replay',
+      extract_invalid: 'Invalid extraction; rejected', session_unattributed: 'Session is not in a registered workspace',
+      registry_unavailable: 'Workspace registry is unavailable', turn_material_outside: 'Turn referenced an external file',
+      material_outside_reference: 'Material referenced an external file', tool_material_outside: 'Tool material referenced an external path',
+      tool_output_outside: 'Failure output referenced an external path', source_unverified: 'Source could not be verified',
+      material_unverified: 'External material could not be verified', store_unavailable: 'Memory is unavailable; write skipped',
+      entry_capacity: 'Memory is full; entry was held or rejected', user_correction: 'Rule retired after user correction',
+      temporary_scope: 'Temporary scope; not saved as a rule', model_uncertain: 'Durability uncertain; not saved',
+      scope_uncertain: 'Scope unclear; not saved' } : REASON_ZH
+    const revisionLabels = locale === 'en' ? { matched_recurrence: 'Similar failure recurred',
+      matched_recurrence_late: 'Late similar failure', check_failed: 'Check failed',
+      check_failed_late: 'Late check failure', check_passed: 'Check passed',
+      check_passed_late: 'Late check pass', legacy_superseded_partial: 'Legacy snapshot was partial',
+      user_correction: 'User correction', retired: 'Retired' } : REVISION_REASON_ZH
+    const basisLabels = locale === 'en' ? { current_message: 'Current message',
+      scope_conservative_project: 'Conservative project scope', legacy_intent: 'Legacy intent',
+      model_one_off: 'Model judged one-off', model_uncertain: 'Model judged uncertain',
+      legacy_uncertain: 'Legacy uncertain', temporary_sentence: 'Temporary wording',
+      invalid_row: 'Invalid model row', project_without_attributed_cwd: 'Project attribution unknown',
+      scope_uncertain_no_project: 'Scope unclear; no project', invalid_rows: 'Invalid model rows' } : BASIS_ZH
+    const basisText = value => String(value ?? '').split(';').filter(Boolean).map(part => {
+      const turn = part.match(/^context_turn_(.+)$/u)
+      return turn === null ? (basisLabels[part] ?? part) : `${locale === 'en' ? 'Turn ' : '引用第'}${turn[1]}${locale === 'en' ? '' : '轮'}`
+    }).join(locale === 'en' ? '; ' : '；')
+    const contextOmittedText = value => String(value ?? '').split(',').filter(Boolean)
+      .map(code => reasonLabels[code] ?? code).join(locale === 'en' ? '; ' : '；')
     const call = props.call
     const control = props.control
     const form = props.form
@@ -466,6 +717,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const [reloadToken, setReloadToken] = React.useState(0)
     const [filter, setFilter] = React.useState({ type: '', status: '' })
     const [openEntry, setOpenEntry] = React.useState(null)
+    const [activityMode, setActivityMode] = React.useState('day')
+    const [activityDate, setActivityDate] = React.useState(null)
     const [shell, setShell] = React.useState({ status: 'idle', value: null, error: null })
     // Three-state like the original: "we could not read it" is NOT "it is running".
     const [controlState, setControlState] = React.useState({ status: 'unknown', paused: null })
@@ -499,7 +752,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           const view = business.view ?? null
           if (view?.storage?.available === false) {
             setShell({ status: 'error', value: null,
-              error: STORAGE_REASON_ZH[view.storage.reason] ?? zh.statusUnreadable })
+              error: storageReasonLabels[view.storage.reason] ?? dict.statusUnreadable })
             setControlState({ status: 'unknown', paused: null })
           } else {
             setShell({ status: 'ready', value: view, error: null })
@@ -559,6 +812,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 
     const view = shell.status === 'ready' ? shell.value : null
     const state = shell.status === 'error' ? 'error' : shell.status === 'idle' ? 'loading' : 'ready'
+    const dailyBacklog = view?.daily?.backlog ?? []
+    const dailyPartial = (view?.daily?.daysProcessed ?? []).filter(item => item.partial)
 
     // ── 常规 ──────────────────────────────────────────────────────────────────────────────
     const runtimeSettings = [
@@ -587,17 +842,19 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       h('h2', { key: 'sec', className: 'mse-section-title' }, dict.dailySection),
       h('p', { key: 'dh', className: 'mse-hint' }, dict.dailyHint),
       view === null ? null : row('daily',
-        `${dict.waitReasonLine}：${WAIT_ZH[view.daily?.waitReason ?? null] ?? view.daily?.waitReason ?? '—'}`,
-        `${dict.backlogDays}：${(view.daily?.backlog ?? []).length === 0 ? dict.none : (view.daily.backlog ?? []).join('、')}`,
+        `${dict.waitReasonLine}: ${waitLabels[view.daily?.waitReason ?? null] ?? view.daily?.waitReason ?? '—'}`,
+        `${dailyBacklog.length}${locale === 'en' ? ' days pending' : ' 天待补'}`,
         null, { stacked: true }),
-      (view?.daily?.daysProcessed ?? []).some(row => row.partial)
-        ? h('p', { key: 'dph', className: 'mse-hint' },
-          `${dict.dailyPartialLine}：` + view.daily.daysProcessed.filter(row => row.partial)
-            .map(row => `${row.day}（${dict.dailyExcludedLine} ${row.excluded}）`).join('、'))
-        : null,
+      view === null || (dailyBacklog.length === 0 && dailyPartial.length === 0) ? null
+        : disclosure('daily-detail', `${dict.backlogDays} · ${dailyBacklog.length + dailyPartial.length}`,
+          definition('daily-audit', [
+            [dict.backlogDays, dailyBacklog.length === 0 ? dict.none : dailyBacklog.join(listSeparator)],
+            dailyPartial.length === 0 ? null : [dict.dailyPartialLine,
+              dailyPartial.map(item => `${item.day} (${dict.dailyExcludedLine} ${item.excluded})`).join(listSeparator)],
+          ], { left: true }), { id: 'daily-detail' }),
       view?.daily?.lastSummary?.summary
-        ? row('summary', `${dict.lastSummaryLine} ${view.daily.lastSummary.day}`, view.daily.lastSummary.summary,
-          null, { stacked: true })
+        ? disclosure('summary', `${dict.lastSummaryLine} · ${view.daily.lastSummary.day}`,
+          h('p', { className: 'mse-detail-text' }, view.daily.lastSummary.summary), { id: 'last-summary' })
         : null,
       h('h2', { key: 'secm', className: 'mse-section-title' }, dict.moreSection),
       disclosure('more-how', dict.moreHowTitle, h('p', { className: 'mse-hint' }, dict.moreHow),
@@ -613,7 +870,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     // ── 经验 ──────────────────────────────────────────────────────────────────────────────
     const entries = view?.entries ?? []
     const shown = entries.filter(entry => (filter.type === '' || entry.type === filter.type)
-      && (filter.status === '' || (STATUS_ZH[entry.status] ?? entry.status) === filter.status))
+      && (filter.status === '' || (statusLabels[entry.status] ?? entry.status) === filter.status))
     const lessonsPanel = h(React.Fragment, { key: 'lessons' }, [
       h('h2', { key: 'sec', className: 'mse-section-title' }, [
         h('span', { key: 't' }, dict.entriesSection),
@@ -621,12 +878,13 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           h(Picker, { key: 'type', label: dict.filterType, prefix: dict.filterType,
             value: filter.type, testId: 'filter-type',
             options: [{ id: '', label: dict.allOption },
-              ...Object.entries(TYPE_ZH).map(([id, label]) => ({ id, label }))],
+              ...Object.entries(typeLabels).map(([id, label]) => ({ id, label }))],
             onChange: value => setFilter(current => ({ ...current, type: value })) }),
           h(Picker, { key: 'status', label: dict.filterStatus, prefix: dict.filterStatus,
             value: filter.status, testId: 'filter-status',
             options: [{ id: '', label: dict.allOption },
-              ...[dict.statusActive, dict.statusSuperseded, '待验证', '需修订'].map(label => ({ id: label, label }))],
+              ...[dict.statusActive, dict.statusSuperseded, statusLabels.pending, statusLabels.needs_revision]
+                .map(label => ({ id: label, label }))],
             onChange: value => setFilter(current => ({ ...current, status: value })) }),
         ]),
       ]),
@@ -640,15 +898,15 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         : shown.map(entry => disclosure(`e-${entry.id}`,
           summaryText(entry.instruction, 64),
           h(React.Fragment, null, [
-            h('p', { key: 'full', className: 'mse-detail-text' }, `${dict.fullText}：${entry.instruction}`),
+            h('p', { key: 'full', className: 'mse-detail-text' }, `${dict.fullText}${colon}${entry.instruction}`),
             definition('d', [
               [dict.version, `${entry.version}${entry.parentVersion ? ` ← ${entry.parentVersion}` : ''}`],
               [dict.scope, entry.visibility === 'scoped'
                 ? `${dict.scopeScoped}（${entry.scopeHash ?? '—'}）` : dict.scopeGlobal],
-              [dict.filterStatus, STATUS_ZH[entry.status] ?? entry.status],
+              [dict.filterStatus, statusLabels[entry.status] ?? entry.status],
               [dict.injectedCount, String(entry.injected)],
               [dict.recurrenceCount, String(entry.recurrences)],
-              [dict.updatedAt, atText(entry.updatedAt)],
+              [dict.updatedAt, dateText(entry.updatedAt)],
               entry.evidenceHash ? [dict.evidenceHash, String(entry.evidenceHash).slice(0, 12)] : null,
               entry.applicability ? [dict.applicabilityLine, entry.applicability] : null,
               // EVOLUTION016: appended rows inside the SAME detail disclosure — no new page,
@@ -661,17 +919,17 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
                 + `${dict.windowChecks} ${entry.methodStats?.checkPasses ?? 0}/${entry.methodStats?.checkFails ?? 0}`],
               entry.recentRevision
                 ? [dict.recentRevisionLabel, `v${entry.recentRevision.version} · `
-                  + `${revisionReasonText(entry.recentRevision.reason)} · ${atText(entry.recentRevision.at)}`]
+                  + `${revisionLabels[entry.recentRevision.reason] ?? entry.recentRevision.reason} · ${dateText(entry.recentRevision.at)}`]
                 : [dict.recentRevisionLabel, dict.recentRevisionNone],
             ], { left: true }),
             Array.isArray(entry.steps) && entry.steps.length > 0
               ? h('p', { key: 's', className: 'mse-hint' },
-                `${dict.fixSteps}：${entry.steps.join('；')}`) : null,
+                `${dict.fixSteps}${colon}${entry.steps.join(locale === 'en' ? '; ' : '；')}`) : null,
             entry.check?.check ? h('p', { key: 'c', className: 'mse-hint' },
-              `${dict.checkMethod}：${entry.check.check}`) : null,
+              `${dict.checkMethod}${colon}${entry.check.check}`) : null,
           ]), { id: `e-${entry.id}`, open: openEntry === entry.id,
             onToggle: open => setOpenEntry(open ? entry.id : null), stackMeta: true,
-            meta: [TYPE_ZH[entry.type] ?? entry.type, STATUS_ZH[entry.status] ?? entry.status,
+            meta: [typeLabels[entry.type] ?? entry.type, statusLabels[entry.status] ?? entry.status,
               entry.guard ? dict.modeGuard : null,
               entry.visibility === 'scoped' ? dict.scopeScoped : dict.scopeGlobal,
               `v${entry.version}`, `${dict.injectedCount} ${entry.injected}`] })),
@@ -679,12 +937,74 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 
     // ── 召回 ──────────────────────────────────────────────────────────────────────────────
     const recall = view?.recall ?? []
+    const adaptivePolicies = view?.recallStrategy?.adaptive?.recent ?? []
+    const blockerLabels = locale === 'en' ? {
+      target_missing: 'Target record removed', target_retired: 'Target retired',
+      target_version_stale: 'Target version changed', needs_revision: 'Target lesson needs revision',
+      source_unadmitted: 'Source not admitted', replay_counterexample: 'Replay found a counterexample',
+      replay_incomplete: 'Replay evidence is incomplete', legacy_v1: 'Legacy evidence is historical only',
+      awaiting_independent_gains: 'Independent hits still needed',
+      awaiting_independent_controls: 'Unrelated controls still needed',
+    } : {
+      target_missing: '目标记录已删除', target_retired: '目标已停用',
+      target_version_stale: '目标版本已变化', needs_revision: '目标经验待修订',
+      source_unadmitted: '来源未获许可', replay_counterexample: '回放发现反例',
+      replay_incomplete: '回放证据不完整', legacy_v1: '旧版证据仅供历史查看',
+      awaiting_independent_gains: '仍需独立命中',
+      awaiting_independent_controls: '仍需无关对照',
+    }
+    const blockerLabel = code => blockerLabels[code] ?? (locale === 'en' ? 'Needs review' : '状态待核对')
+    const adaptiveCandidateRow = policy => {
+      const ready = policy.readiness ?? {}
+      const legacy = ready.schema === 'v1'
+      const modeText = policy.mode === 'approved' ? dict.adaptiveApproved
+        : policy.mode === 'isolated' ? dict.adaptiveIsolated : dict.adaptiveObserving
+      const remainingGain = legacy ? null : Math.max(0,
+        (ready.requiredIndependentGains ?? 2) - (ready.independentGains ?? 0))
+      const remainingControl = legacy ? null : Math.max(0,
+        (ready.requiredIndependentControls ?? 2) - (ready.independentControls ?? 0))
+      const blockers = Array.isArray(ready.blockers) ? ready.blockers : []
+      const progress = legacy ? dict.adaptiveLegacy : [
+        remainingGain > 0 ? (locale === 'en' ? `${remainingGain} more ${dict.adaptiveGain}`
+          : `还差 ${remainingGain} 次${dict.adaptiveGain}`) : `${dict.adaptiveGain} ${ready.independentGains ?? 0}/2`,
+        remainingControl > 0 ? (locale === 'en' ? `${remainingControl} more ${dict.adaptiveControl}`
+          : `还差 ${remainingControl} 次${dict.adaptiveControl}`) : `${dict.adaptiveControl} ${ready.independentControls ?? 0}/2`,
+      ].join(' · ')
+      const primaryBlocker = blockers.find(code => !['awaiting_independent_gains',
+        'awaiting_independent_controls', 'legacy_v1'].includes(code))
+      const targetStatus = ready.targetStatus === 'needs_revision' ? dict.adaptiveTargetRevision
+        : ready.targetStatus === 'retired' ? dict.adaptiveTargetRetired
+          : ready.targetCurrent ? dict.adaptiveTargetCurrent : dict.adaptiveTargetChanged
+      const replay = policy.replay ?? {}
+      const source = ready.sourceAdmitted === true ? dict.adaptiveSourceYes
+        : ready.sourceAdmitted === false ? dict.adaptiveSourceNo : dict.adaptiveSourceUnknown
+      return disclosure(`adaptive-${policy.id}`, `${policy.entryId?.slice(4, 12) ?? '—'} · v${policy.version}`,
+        definition('readiness', [
+          [dict.adaptiveGain, legacy ? '—' : `${ready.independentGains ?? 0}/2`],
+          [dict.adaptiveControl, legacy ? '—' : `${ready.independentControls ?? 0}/2`],
+          [dict.adaptiveTarget, `${targetStatus} · v${ready.targetVersion ?? policy.version}`],
+          [dict.adaptiveSource, source],
+          [dict.adaptiveReplay, `${rsiReasonLabels[replay.reason] ?? replay.reason ?? '—'} · ${dict.rsiResultApproved}: `
+            + `${replay.approved === true ? (locale === 'en' ? 'Yes' : '是') : (locale === 'en' ? 'No' : '否')} · `
+            + `${locale === 'en' ? 'Hits' : '命中'} ${replay.candidate?.hits ?? 0} · `
+            + `${locale === 'en' ? 'Misses' : '漏配'} ${replay.candidate?.misses ?? 0} · `
+            + `${locale === 'en' ? 'Counterexamples' : '反例'} ${replay.regressions ?? 0} · `
+            + `${locale === 'en' ? 'Incomplete' : '不完整'} ${replay.incomplete ?? 0}`],
+          [dict.adaptiveBlockers, blockers.length === 0 ? '—' : blockers.map(blockerLabel).join('；')],
+        ], { left: true }), { id: `adaptive-${policy.id}`, meta: [modeText, progress,
+          primaryBlocker ? blockerLabel(primaryBlocker)
+            : ready.legacySuccessor ? dict.adaptiveSuccessor : null] })
+    }
     const recallPanel = h(React.Fragment, { key: 'recall' }, [
-      h('h2', { key: 'sec', className: 'mse-section-title' }, dict.recallSection),
-      h('p', { key: 'rh', className: 'mse-hint' }, dict.recallHint),
-      view === null ? null : recall.length === 0 ? h('p', { key: 'nr', className: 'mse-hint' }, dict.noRecall)
-        : recall.map(item => disclosure(`r-${item.at}`,
-          `${atText(item.at)} · ${dict.offeredVersions} ${item.offered.length}`,
+      h('h2', { key: 'rsi-sec', className: 'mse-section-title' }, dict.rsiSection),
+      h('p', { key: 'rsi-hint', className: 'mse-hint' }, dict.rsiHint),
+      h('div', { key: 'adaptive-label', className: 'mse-statline' }, `${dict.adaptiveCandidates} · ${adaptivePolicies.length}`),
+      adaptivePolicies.length === 0 ? h('p', { key: 'adaptive-empty', className: 'mse-hint' }, dict.adaptiveNoCandidates)
+        : adaptivePolicies.slice(0, 8).map(adaptiveCandidateRow),
+      view === null || recall.length === 0 ? null : disclosure('recall-history',
+        `${dict.recallSection} · ${recall.length}`,
+        recall.map(item => disclosure(`r-${item.at}`,
+          `${dateText(item.at)} · ${dict.offeredVersions} ${item.offered.length}`,
           definition('d', item.offered.map(o => {
             const known = entries.find(entry => entry.id === o.id)
             return [known ? `${dict.summaryLabel} v${o.version}` : `${dict.historicalEntry} v${o.version}`,
@@ -694,31 +1014,29 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           }), { left: true }),
           { id: `r-${item.at}`,
             meta: [item.settled ? dict.settledYes : dict.settledNo,
-              item.outcome === null ? dict.outcomeUnknown : (OUTCOME_ZH[item.outcome] ?? item.outcome),
-              `${item.bytes} B`] })),
-      h('h2', { key: 'rsi-sec', className: 'mse-section-title' }, dict.rsiSection),
-      h('p', { key: 'rsi-hint', className: 'mse-hint' }, dict.rsiHint),
-      h('div', { key: 'rsi-persisted-label', className: 'mse-statline' }, dict.rsiPersisted),
-      view === null || (view.recallStrategy?.adaptive?.decisions ?? []).length === 0
-        ? h('p', { key: 'rsi-no-persisted', className: 'mse-hint' }, dict.rsiNone)
-        : view.recallStrategy.adaptive.decisions.slice(0, 8).map((item, index) => row(
-          `rsi-decision-${index}`, RSI_RESULT_ZH[item.result] ?? dict.rsiResultUnknown,
-          `${RSI_REASON_ZH[item.reason] ?? '其他决定'} · ${item.policyId ? `策略 ${item.policyId}` : '无策略标识'} · `
-            + `${item.entryId ? `目标 ${item.entryId}` : '无目标标识'}${Number.isSafeInteger(item.version) ? ` · v${item.version}` : ''}`,
-          atText(item.at), { top: true })),
-      h('div', { key: 'rsi-runtime-label', className: 'mse-statline' }, dict.rsiRuntime),
-      view === null || (view.rsiDiagnostics?.recent ?? []).length === 0
-        ? h('p', { key: 'rsi-no-runtime', className: 'mse-hint' }, dict.rsiNone)
-        : view.rsiDiagnostics.recent.slice(0, 8).map((item, index) => row(
-          `rsi-runtime-${index}`,
-          `${RSI_STAGE_ZH[item.stage] ?? dict.rsiStageSettled} · ${RSI_REASON_ZH[item.reason] ?? '其他记录'}`,
-          `回合 ${item.turnHash}`
-            + `${item.result ? ` · ${RSI_RESULT_ZH[item.result] ?? dict.rsiResultUnknown}` : ''}`
-            + `${item.outcome ? ` · ${OUTCOME_ZH[item.outcome] ?? dict.outcomeUnknown}` : ''}`
-            + `${item.policyId ? ` · 策略 ${item.policyId}` : ''}`
-            + `${item.entryId ? ` · 目标 ${item.entryId}` : ''}`
-            + `${Number.isSafeInteger(item.version) ? ` · v${item.version}` : ''}`,
-          atText(item.at), { top: true })),
+              item.outcome === null ? dict.outcomeUnknown : (outcomeLabels[item.outcome] ?? item.outcome),
+              `${item.bytes} B`] })), { id: 'recall-history' }),
+      view === null || (view.recallStrategy?.adaptive?.decisions ?? []).length === 0 ? null
+        : disclosure('rsi-decisions', `${dict.rsiPersisted} · ${view.recallStrategy.adaptive.decisions.length}`,
+          view.recallStrategy.adaptive.decisions.slice(0, 8).map((item, index) => row(
+            `rsi-decision-${index}`, resultLabels[item.result] ?? dict.rsiResultUnknown,
+            `${rsiReasonLabels[item.reason] ?? (locale === 'en' ? 'Other decision' : '其他决定')} · `
+              + `${item.policyId ? `${locale === 'en' ? 'Policy' : '策略'} ${item.policyId}` : (locale === 'en' ? 'No policy ID' : '无策略标识')} · `
+              + `${item.entryId ? `${locale === 'en' ? 'Target' : '目标'} ${item.entryId}` : (locale === 'en' ? 'No target ID' : '无目标标识')}${Number.isSafeInteger(item.version) ? ` · v${item.version}` : ''}`,
+            dateText(item.at), { top: true })), { id: 'rsi-decisions' }),
+      view === null || (view.rsiDiagnostics?.recent ?? []).length === 0 ? null
+        : disclosure('rsi-runtime', `${dict.rsiRuntime} · ${view.rsiDiagnostics.recent.length}`,
+          view.rsiDiagnostics.recent.slice(0, 8).map((item, index) => row(
+            `rsi-runtime-${index}`,
+            `${stageLabels[item.stage] ?? dict.rsiStageSettled} · ${rsiReasonLabels[item.reason] ?? (locale === 'en' ? 'Other event' : '其他记录')}`,
+            `${locale === 'en' ? 'Turn' : '回合'} ${item.turnHash}`
+              + `${item.result ? ` · ${resultLabels[item.result] ?? dict.rsiResultUnknown}` : ''}`
+              + `${item.outcome ? ` · ${outcomeLabels[item.outcome] ?? dict.outcomeUnknown}` : ''}`
+              + `${item.policyId ? ` · ${locale === 'en' ? 'Policy' : '策略'} ${item.policyId}` : ''}`
+              + `${item.entryId ? ` · ${locale === 'en' ? 'Target' : '目标'} ${item.entryId}` : ''}`
+              + `${Number.isSafeInteger(item.version) ? ` · v${item.version}` : ''}`,
+            dateText(item.at), { top: true })), { id: 'rsi-runtime' }),
+      view === null ? h('p', { key: 'loading', className: 'mse-hint' }, dict.loading) : null,
     ])
 
     // ── 任务 ──────────────────────────────────────────────────────────────────────────────
@@ -732,21 +1050,21 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       ]),
       view === null ? null : h('div', { key: 'wait', className: 'mse-statline' }, [
         h('span', { key: 'l' }, dict.waitReasonLine),
-        h('b', { key: 'v' }, WAIT_ZH[view.daily?.waitReason ?? null] ?? view.daily?.waitReason ?? '—')]),
+        h('b', { key: 'v' }, waitLabels[view.daily?.waitReason ?? null] ?? view.daily?.waitReason ?? '—')]),
       view === null ? null : tasks.length === 0 ? h('p', { key: 'nt', className: 'mse-hint' }, dict.noTasks)
         : tasks.map(item => disclosure(`t-${item.ticket}`,
-          `${KIND_ZH[item.kind] ?? item.kind} · ${atText(item.at)}`,
+          `${kindLabels[item.kind] ?? item.kind} · ${dateText(item.at)}`,
           h(React.Fragment, null, [
             definition('d', [
               [dict.requestLabel, String(item.ticket)],
-              [dict.rawCode, terminalZh(item.terminal) ?? dict.taskStatusRunning],
-              item.nextStep ? [dict.nextStepLabel, NEXT_ZH[item.nextStep] ?? item.nextStep] : null,
+              [dict.rawCode, terminalLabel(item.terminal) ?? dict.taskStatusRunning],
+              item.nextStep ? [dict.nextStepLabel, nextLabels[item.nextStep] ?? item.nextStep] : null,
               Number.isSafeInteger(item.outputBytes) ? [dict.outputBytesLabel, `${item.outputBytes} B`] : null,
               item.finishKind ? [dict.finishKindLabel, String(item.finishKind)] : null,
               item.verdictCode ? [dict.verdictLabel, (item.verdictCode === 'generation_limit_no_text'
                 || item.verdictCode === 'reasoning_space_exhausted')
                 ? dict.reasoningSpace : String(item.verdictCode)] : null,
-              item.sourceSessionId ? ['来源会话', String(item.sourceSessionId)] : null,
+              item.sourceSessionId ? [locale === 'en' ? 'Source session' : '来源会话', String(item.sourceSessionId)] : null,
             ], { left: true }),
             // Retry stays exactly on the original audited interface, and only where it MEANS
             // something: never after a committed/saved success, never on an unknown cost.
@@ -759,14 +1077,110 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
               item.usageUnknown ? dict.unknownCostHeld
                 : item.usageTotal !== null ? `${item.usageTotal} tok` : null,
               item.settled && item.terminal !== null
-                ? (REASON_ZH[item.terminal] ?? terminalZh(item.terminal) ?? '') : null]
+                ? (reasonLabels[item.terminal] ?? terminalLabel(item.terminal) ?? '') : null]
               .filter(label => label !== null && label !== '') })),
       h('p', { key: 'rh', className: 'mse-hint' }, dict.auditedRetryHint),
+    ])
+
+    // ── 活动 ─────────────────────────────────────────────────────────────────────────
+    const activity = view?.activity ?? null
+    const selectedActivityDate = activity?.days.some(day => day.date === activityDate)
+      ? activityDate : activity?.todayDate ?? null
+    const selectedActivityDay = activity?.days.find(day => day.date === selectedActivityDate) ?? null
+    const selectedActivityWeekStart = selectedActivityDate === null ? null : (() => {
+      const day = new Date(`${selectedActivityDate}T00:00:00.000Z`)
+      day.setUTCDate(day.getUTCDate() - ((day.getUTCDay() + 6) % 7))
+      return day.toISOString().slice(0, 10)
+    })()
+    const selectedActivityWeek = activity?.weekSummaries?.find(row => row.start === selectedActivityWeekStart)
+      ?? (selectedActivityWeekStart === null ? null : selectedActivityWeekStart === activity?.week?.start
+        ? activity?.week : { start: selectedActivityWeekStart,
+          end: selectedActivityWeekStart === activity?.week?.start ? activity.todayDate : (() => {
+            const day = new Date(`${selectedActivityWeekStart}T00:00:00.000Z`)
+            day.setUTCDate(day.getUTCDate() + 6)
+            return day.toISOString().slice(0, 10)
+          })(), total: 0, rule: 0, lesson: 0, digest: 0 })
+    const selectedActivityCounts = activityMode === 'day' ? selectedActivityDay
+      : activityMode === 'week' ? selectedActivityWeek
+        : activity === null ? null : { ...activity.knownTypes, total: activity.knownNew }
+    const selectedActivityRange = activityMode === 'day' ? selectedActivityDate
+      : activityMode === 'week' && selectedActivityWeek !== null && selectedActivityWeek !== undefined
+        ? `${selectedActivityWeek.start} — ${selectedActivityWeek.end}` : dict.activityTotal
+    const activityBlock = activity === null ? null : (() => {
+      const visibleDate = week => week.days.find(day => day !== null)
+      const months = activity.weeks.map((week, index) => {
+        const first = visibleDate(week)
+        const prior = index === 0 ? null : visibleDate(activity.weeks[index - 1])
+        const month = first?.date.slice(0, 7)
+        const priorMonth = prior?.date.slice(0, 7)
+        if (first === undefined || month === priorMonth) return null
+        const label = new Date(`${first.date}T00:00:00.000Z`).toLocaleDateString(
+          locale === 'en' ? 'en-US' : 'zh-CN', { timeZone: 'UTC', month: 'short' })
+        return h('span', { key: week.start, style: { gridColumn: `${index + 1} / span 4` } }, label)
+      })
+      const cells = activity.weeks.map(week => h('div', { key: week.start, className: 'mse-activity-week',
+        role: 'group', 'aria-label': week.start }, week.days.map((day, index) => {
+        if (day === null) return h('span', { key: `${week.start}-${index}`,
+          className: 'mse-activity-empty', 'aria-hidden': true })
+        const level = day.total === 0 ? 0 : day.total === 1 ? 1 : day.total <= 3 ? 2 : day.total <= 7 ? 3 : 4
+        return h('button', { key: day.date, type: 'button', className: 'mse-activity-cell',
+          'data-level': level, 'aria-label': `${day.date}: ${day.total} ${dict.activityEntries}`,
+          'aria-pressed': day.date === selectedActivityDate,
+          title: `${day.date} · ${day.total} ${dict.activityEntries}`,
+          onClick: () => setActivityDate(day.date) }, String(day.total))
+      })))
+      const detail = selectedActivityCounts === null ? null : definition('activity-counts', [
+        [dict.activitySelected, selectedActivityRange ?? '—'],
+        [dict.activityEntries, String(selectedActivityCounts.total ?? 0)],
+        [dict.activityRule, String(selectedActivityCounts.rule ?? 0)],
+        [dict.activityLesson, String(selectedActivityCounts.lesson ?? 0)],
+        [dict.activityDigest, String(selectedActivityCounts.digest ?? 0)],
+      ], { left: true })
+      return h(React.Fragment, null, [
+        h('div', { key: 'metrics', className: 'mse-metrics' }, [
+          metric(dict.activityToday, String(activity.today.total), dict.activityEntries),
+          metric(dict.activityWeek, String(activity.week.total), dict.activityEntries),
+          metric(dict.activityRetained, String(activity.retained), dict.activityEntries),
+        ]),
+        h('div', { key: 'toolbar', className: 'mse-inline', style: { justifyContent: 'space-between' } }, [
+          h(Picker, { key: 'mode', label: dict.activityTitle, prefix: dict.activityTitle,
+            value: activityMode, testId: 'activity-mode',
+            options: [{ id: 'day', label: dict.activityDay }, { id: 'week', label: dict.activityWeekMode },
+              { id: 'total', label: dict.activityTotal }], onChange: setActivityMode }),
+          h('span', { key: 'window', className: 'mse-unit' }, `${activity.windowStart} — ${activity.todayDate}`),
+        ]),
+        h('div', { key: 'scroll', className: 'mse-activity-scroll' },
+          h('div', { className: 'mse-activity-layout', role: 'group', 'aria-label': dict.activityChart }, [
+            h('div', { key: 'weekdays', className: 'mse-activity-weekdays', 'aria-hidden': true },
+              (locale === 'en' ? ['M', '', 'W', '', 'F', '', 'S'] : ['一', '', '三', '', '五', '', '日'])
+                .map((label, index) => h('span', { key: index }, label))),
+            h('div', { key: 'chart', className: 'mse-activity-chart',
+              style: { '--mse-activity-weeks': activity.weeks.length } }, [
+              h('div', { key: 'months', className: 'mse-activity-months' }, months),
+              h('div', { key: 'grid', className: 'mse-activity-grid' }, cells),
+            ]),
+          ])),
+        detail,
+        h('p', { key: 'note', className: 'mse-hint' }, dict.activityHistoryNote),
+        disclosure('activity-details', dict.activityDetails, definition('activity-meta', [
+          [dict.activityImported, String(activity.imported)],
+          [dict.activityUnknown, String(activity.unknownCreatedAt)],
+          [dict.activityFuture, String(activity.futureExcluded)],
+          [dict.activityBeforeWindow, `${activity.beforeWindow.total} · ${dict.activityEntries}`],
+        ], { left: true }), { id: 'activity-details' }),
+      ])
+    })()
+    const activityPanel = h(React.Fragment, { key: 'activity' }, [
+      h('h2', { key: 'title', className: 'mse-section-title' }, dict.activityTitle),
+      activityBlock ?? h('p', { key: 'loading', className: 'mse-hint' }, dict.loading),
     ])
 
     // ── 学习状态 ────────────────────────────────────────────────────────────────────
     const usage = view?.usageAudit ?? null
     const corrections = view?.corrections ?? null
+    const ignoredRecent = corrections?.ignoredRecent ?? []
+    const recentDecisions = corrections?.recentDecisions ?? []
+    const processedDays = view?.daily?.daysProcessed ?? []
     const sum = pick => usage?.byKind === undefined ? 0
       : Object.values(usage.byKind).reduce((total, bucket) => total + bucket[pick], 0)
     const injectedTotal = entries.reduce((total, entry) => total + (entry.injected ?? 0), 0)
@@ -782,17 +1196,19 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       h('p', { key: 'ch', className: 'mse-hint' }, dict.correctionsShort),
       disclosure('corr-full', dict.correctionsFullTitle, h('p', { className: 'mse-detail-text' },
         dict.correctionsFull), { id: 'corr-full' }),
-      (corrections?.ignoredRecent ?? []).length === 0 ? null
-        : h('p', { key: 'ig', className: 'mse-hint' },
-          `${dict.ignoredReasons}：${(corrections.ignoredRecent ?? [])
-            .map(r => `${REASON_ZH[r.reason] ?? r.reason}（${atText(r.at)}）`).join('、')}`),
-      (corrections?.recentDecisions ?? []).length === 0 ? null
+      ignoredRecent.length === 0 ? null
+        : disclosure('corr-ignored', `${dict.ignoredReasons} · ${ignoredRecent.length}`,
+          definition('ignored', ignoredRecent.map(item => [
+            reasonLabels[item.reason] ?? item.reason, dateText(item.at),
+          ]), { left: true }), { id: 'corr-ignored' }),
+      recentDecisions.length === 0 ? null
         // Real React children: the decision <span>s must NEVER be interpolated into a
         // template string (that is the rc.3 [object Object] defect). The text prefix and the
         // separators are strings; every decision is an element child.
-        : h('p', { key: 'cd', className: 'mse-hint' }, [
-          `${dict.correctionsDecision}：`,
-          ...(corrections.recentDecisions ?? []).flatMap((row, rowIndex) => [
+        : disclosure('corr-decisions', `${dict.correctionsDecision} · ${recentDecisions.length}`,
+          h('p', { className: 'mse-hint' }, [
+          `${dict.correctionsDecision}${colon}`,
+          ...recentDecisions.flatMap((row, rowIndex) => [
             ...(rowIndex === 0 ? [] : [' ｜ ']),
             ...row.decisions.flatMap((decision, decisionIndex) => [
               ...(decisionIndex === 0 ? [] : ['；']),
@@ -804,39 +1220,38 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
                 decision.scope === 'global' ? dict.corrGlobal
                   : decision.scope === 'project' ? dict.corrProject : dict.corrScopeUnknown,
                 decision.result === 'saved' ? dict.corrSaved : dict.corrIgnored,
-                decision.basis === null ? '' : basisTextOf(decision.basis),
-                decision.reason === null ? '' : (REASON_ZH[decision.reason] ?? decision.reason),
+                decision.basis === null ? '' : basisText(decision.basis),
+                decision.reason === null ? '' : (reasonLabels[decision.reason] ?? decision.reason),
                 row.contextOmitted === null ? ''
-                  : `${dict.corrContextOmitted}:${contextOmittedTextOf(row.contextOmitted)}`,
-              ].filter(Boolean).join('/')),
+                  : `${dict.corrContextOmitted}: ${contextOmittedText(row.contextOmitted)}`,
+              ].filter(Boolean).join(locale === 'en' ? ' / ' : '/')),
             ]),
           ]),
-        ]),
+        ]), { id: 'corr-decisions' }),
       h('h2', { key: 'secCol', className: 'mse-section-title' }, dict.collectionSection),
       disclosure('coll-scope', dict.collectionScopeTitle,
         view?.collection === undefined ? dict.loading
-          : `${dict.collectionWorkspaces}：${view.collection.workspaces ?? dict.collectionUnknown}`
-            + (view.collection.skipped.length === 0 ? `；${dict.collectionNone}`
-              : `；${dict.collectionSkipped}：${view.collection.skipped
-                .map(r => `${REASON_ZH[r.reason] ?? r.reason}×${r.count}`).join('、')}`),
+          : `${dict.collectionWorkspaces}${colon}${view.collection.workspaces ?? dict.collectionUnknown}`
+            + (view.collection.skipped.length === 0 ? `${locale === 'en' ? '; ' : '；'}${dict.collectionNone}`
+              : `${locale === 'en' ? '; ' : '；'}${dict.collectionSkipped}${colon}${view.collection.skipped
+                .map(r => `${reasonLabels[r.reason] ?? r.reason} × ${r.count}`).join(listSeparator)}`),
         { id: 'coll-scope' }),
-      h('h2', { key: 'secRev', className: 'mse-section-title' }, dict.revisionsSection),
       view?.revisions === undefined ? h('p', { key: 'rvl', className: 'mse-hint' }, dict.loading)
-        : view.revisions.length === 0
-          ? h('p', { key: 'rvn', className: 'mse-hint' }, dict.revisionNone)
+        : view.revisions.length === 0 ? null
           // MSE18: the revision audit is LONG TEXT, not a numeric stat — it must not be shoved
           // into a 1/3-width metric card (the whole v1→停用·原因·日期 string became a giant wrapped
           // headline). Full-width ordinary information rows on the page's EXISTING styles: the
           // #short-id and v1→停用 at normal body size (mse-row-title), reason and time on the
-          // second line in muted small text (mse-hint). Nothing hidden, nothing truncated.
-          : view.revisions.map(row => h('div', { key: `rv-${row.id}`, className: 'mse-row mse-row-stacked' },
-            h('div', { key: 'm', className: 'mse-row-main' }, [
-              h('div', { key: 't', className: 'mse-row-title' },
-                `#${row.id.slice(4, 12)} · v${row.version} → `
-                + `${row.status === 'retired' ? dict.revisionRetired : `v${row.currentVersion}`}`),
-              h('p', { key: 'h', className: 'mse-hint' },
-                `${REASON_ZH[row.reason] ?? row.reason ?? ''} · ${atText(row.at)}`),
-            ]))),
+          // second line in muted small text (mse-hint), kept in the existing disclosure.
+          : disclosure('recent-revisions', `${dict.revisionsSection} · ${view.revisions.length}`,
+            view.revisions.map(item => h('div', { key: `rv-${item.id}`, className: 'mse-row mse-row-stacked' },
+              h('div', { key: 'm', className: 'mse-row-main' }, [
+                h('div', { key: 't', className: 'mse-row-title' },
+                  `#${item.id.slice(4, 12)} · v${item.version} → `
+                  + `${item.status === 'retired' ? dict.revisionRetired : `v${item.currentVersion}`}`),
+                h('p', { key: 'h', className: 'mse-hint' },
+                  `${reasonLabels[item.reason] ?? item.reason ?? ''} · ${dateText(item.at)}`),
+              ]))), { id: 'recent-revisions' }),
       row('go-lessons', dict.goLessons, null,
         h(Button, { key: 'b', variant: 'outline', size: 'sm', onClick: () => setTab('lessons') },
           dict.tabLessons)),
@@ -847,16 +1262,22 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       ]),
       h('p', { key: 'exn', className: 'mse-hint' }, dict.existingScopeNote),
       h('h2', { key: 'sec2', className: 'mse-section-title' }, dict.dailyState),
-      view === null ? null : h('div', { key: 'daily', className: 'mse-row mse-row-stacked' }, [
-        h('div', { key: 't', className: 'mse-row-main' }, [
-          definition('d', [
-            [dict.lastDoneDay, view.daily?.lastDoneDay ?? '—'],
-            [dict.backlogDays, (view.daily?.backlog ?? []).length === 0 ? dict.none
-              : (view.daily.backlog ?? []).join('、')],
-            [dict.daysProcessed, (view.daily?.daysProcessed ?? []).map(d => `${d.day}·${d.status}`).join('、')
-              || dict.none],
-          ], { left: true })]),
+      view === null ? null : h('div', { key: 'daily', className: 'mse-metrics mse-metrics-2' }, [
+        metric(dict.lastDoneDay, view.daily?.lastDoneDay ?? '—'),
+        metric(dict.backlogDays, String((view.daily?.backlog ?? []).length)),
       ]),
+      dailyPartial.length === 0 ? null : row('daily-partial', dict.dailyPartialLine,
+        `${dailyPartial.length}${locale === 'en' ? ' days' : ' 日'}`, null),
+      view === null || ((view.daily?.backlog ?? []).length === 0 && processedDays.length === 0) ? null
+        : disclosure('daily-history', `${dict.daysProcessed} · ${processedDays.length}`,
+          definition('daily-history-data', [
+            [dict.backlogDays, (view.daily?.backlog ?? []).length === 0 ? dict.none
+              : view.daily.backlog.join(listSeparator)],
+            [dict.daysProcessed, processedDays.map(item => `${item.day} · ${item.status}`)
+              .join(listSeparator) || dict.none],
+            dailyPartial.length === 0 ? null : [dict.dailyPartialLine,
+              dailyPartial.map(item => `${item.day} (${dict.dailyExcludedLine} ${item.excluded})`).join(listSeparator)],
+          ], { left: true }), { id: 'daily-history' }),
       h('h2', { key: 'sec3', className: 'mse-section-title' }, dict.usageAuditSection),
       h('p', { key: 'un', className: 'mse-hint' }, dict.usageAuditNote),
       usage === null ? null : h('div', { key: 'm2', className: 'mse-metrics' }, [
@@ -865,10 +1286,10 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         metric(dict.usageUnknownCost, String(sum('unknownCost'))),
       ]),
       usage === null ? null : disclosure('usage-kinds',
-        `${dict.usageTotalRequests}／${dict.usageSettled}：${usage?.total ?? 0}／${usage?.settled ?? 0}`,
+        `${dict.usageTotalRequests}: ${usage?.total ?? 0} / ${usage?.settled ?? 0}`,
         h('div', { className: 'mse-row-main' }, [
           definition('d', Object.entries(usage.byKind).map(([kind, bucket]) => [
-            KIND_ZH[kind] ?? kind,
+            kindLabels[kind] ?? kind,
             `${dict.usageCalls} ${bucket.calls}｜${dict.usageTokens} ${bucket.knownTokens}`
             + `${bucket.unknownCost > 0 ? `｜${dict.usageUnknownCost} ${bucket.unknownCost}` : ''}`,
           ]), { left: true })]), { id: 'usage-kinds' }),
@@ -879,7 +1300,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const unavailablePanel = tab === 'overview'
       ? h(React.Fragment, { key: 'storage-unavailable' }, runtimeSettings) : null
     const normalBody = tab === 'overview' ? overviewPanel : tab === 'lessons' ? lessonsPanel
-      : tab === 'recall' ? recallPanel : tab === 'tasks' ? tasksPanel : usagePanel
+      : tab === 'recall' ? recallPanel : tab === 'tasks' ? tasksPanel
+        : tab === 'activity' ? activityPanel : usagePanel
     const body = state === 'error' ? unavailablePanel : normalBody
     return h('section', { className: 'mse-details', 'data-mse-details': 'page' }, [
       h('div', { key: 'heading', className: 'mse-heading' }, [
@@ -890,7 +1312,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
             h(StateDot, { key: 'd', state: view === null ? 'idle' : view.paused === true ? 'idle' : 'done' }),
             h('span', { key: 't' }, view === null ? dict.loading
               : `${view.paused === true ? dict.effectivePaused : dict.effectiveRunning}`
-                + (view.storage?.reason ? ` · ${STORAGE_REASON_ZH[view.storage.reason] ?? dict.storageWarning}` : '')),
+                + (view.storage?.reason ? ` · ${storageReasonLabels[view.storage.reason] ?? dict.storageWarning}` : '')),
           ]),
         h(Button, { key: 'r', variant: 'ghost', size: 'sm', className: 'mse-heading-action',
           disabled: shell.status === 'loading', onClick: () => setReloadToken(current => current + 1) },
@@ -952,7 +1374,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     inject: ['slots', 'locale', 'remote', 'configForms'],
     apply,
     __test: { NS, SETTINGS_ID, BUNDLE, TABS, STYLE, STATUS_CONTRIB, CONTROL_CONTRIB, zh,
-      STATUS_ZH, TYPE_ZH, REASON_ZH, WAIT_ZH,
+      STATUS_ZH, TYPE_ZH, REASON_ZH, WAIT_ZH, en,
       row, disclosure, definition, metric, Picker, settingsTabNavigation, callRemote,
       useFormSnapshot, MsePanel, BundlePage },
   }

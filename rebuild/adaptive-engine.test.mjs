@@ -54,6 +54,12 @@ test('adaptive discovery needs two independent gains and two feasible full-offer
     settle('discovery-session', 'd2')
     adaptive = engine.store.read().recallStrategy.adaptive
     assert.equal(adaptive.policies[0].positives, 1, 'same session and same substantive query are not independent')
+    const earlyReadiness = engine.statusView().recallStrategy.adaptive.recent
+      .find(row => row.id === policyId).readiness
+    assert.equal(earlyReadiness.schema, 'v2')
+    assert.equal(earlyReadiness.independentGains, 0,
+      'the discovery seed and same-session repeat are not presented as independent gains')
+    assert.equal(earlyReadiness.independentControls, 0)
 
     const holdout = prepare('holdout-session-1', 'h1', 'API 请求仍然阻塞，麻烦定位原因')
     assert.ok(!holdout.offered.some(row => row.id === targetX.id), 'holdout remains shadow only')
@@ -94,6 +100,14 @@ test('adaptive discovery needs two independent gains and two feasible full-offer
     assert.equal(policy.samples[3].replay.observedEntry.id, targetZ.id,
       'the control records the exact lesson matched by its real failure')
     assert.equal(policy.samples[4].replay.observedEntry.id, targetY.id)
+    const approvedReadiness = engine.statusView().recallStrategy.adaptive.recent
+      .find(row => row.id === policyId).readiness
+    assert.equal(approvedReadiness.independentGains, 2)
+    assert.equal(approvedReadiness.requiredIndependentGains, 2)
+    assert.equal(approvedReadiness.independentControls, 2)
+    assert.equal(approvedReadiness.requiredIndependentControls, 2)
+    assert.equal(approvedReadiness.sourceAdmitted, true)
+    assert.deepEqual(approvedReadiness.blockers, [])
     assert.deepEqual(engine.statusView().recallStrategy.adaptive.recent
       .find(row => row.id === policyId).replay.candidate, { hits: 2, misses: 0, falseOffers: 0 })
 
@@ -205,6 +219,10 @@ test('a retired offered method cannot use recurrence receipt proof at settlement
     assert.equal(state.policies.find(row => row.id === policy.id).mode, 'approved')
     assert.ok(state.decisions.some(row => row.policyId === policy.id
       && row.result === 'unknown' && row.reason === 'policy_stale'))
+    const readiness = engine.statusView().recallStrategy.adaptive.recent
+      .find(row => row.id === policy.id).readiness
+    assert.equal(readiness.sourceAdmitted, null, 'a stale target does not claim its source was revoked')
+    assert.ok(readiness.blockers.includes('target_retired'))
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -222,6 +240,10 @@ test('revoking an admitted source before settlement cannot promote the policy', 
       .find(row => row.entryId === targetX.id)
     assert.equal(policy.positives, 1)
     assert.equal(policy.mode, 'observing')
+    const readiness = engine.statusView().recallStrategy.adaptive.recent
+      .find(row => row.id === policy.id).readiness
+    assert.equal(readiness.sourceAdmitted, false)
+    assert.ok(readiness.blockers.includes('source_unadmitted'))
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -266,6 +288,13 @@ test('legacy v1 history permits a distinct task-aware v2 successor without inher
     'the same observing v2 mechanism is not duplicated')
 
     const blocked = legacyPolicy(targetY, 'legacy-observing-session', 'legacy-observing-turn', 'observing')
+    const legacyReadiness = engine.statusView().recallStrategy.adaptive.recent
+      .find(row => row.id === blocked.legacy.id).readiness
+    assert.equal(legacyReadiness.schema, 'v1')
+    assert.equal(legacyReadiness.independentGains, null,
+      'legacy replay scores do not become v2 candidate gains')
+    assert.equal(legacyReadiness.requiredIndependentGains, null)
+    assert.equal(legacyReadiness.legacySuccessor, false)
     fail('legacy-observing-session', 'legacy-observing-turn', 'legacy-observing-failure', failureY)
     settle('legacy-observing-session', 'legacy-observing-turn')
     policies = engine.store.read().recallStrategy.adaptive.policies
@@ -276,6 +305,9 @@ test('legacy v1 history permits a distinct task-aware v2 successor without inher
     assert.equal(successor.positives, 1)
     assert.equal(successor.negativeControls, 0)
     assert.deepEqual(successor.samples.map(row => row.turnKey), [blocked.prepared.turnKey])
+    const successorReadiness = engine.statusView().recallStrategy.adaptive.recent
+      .find(row => row.id === blocked.legacy.id).readiness
+    assert.equal(successorReadiness.legacySuccessor, true)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -487,6 +519,9 @@ test('legacy evidence survives a normal revision and cannot discover against nee
     fail('revision-session', 'recurrence', 'revision-recurrence', failureX)
     settle('revision-session', 'recurrence')
     assert.equal(engine.store.read().entries.find(row => row.id === targetX.id).status, 'needs_revision')
+    const readiness = engine.statusView().recallStrategy.adaptive.recent
+      .find(row => row.id === legacy.id).readiness
+    assert.ok(readiness.blockers.includes('needs_revision'))
 
     const guarded = prepare('guarded-legacy-session', 'guarded', '测试 JSON 输出。')
     assert.ok(!guarded.offered.some(row => row.id === targetX.id && row.mode === 'method'))

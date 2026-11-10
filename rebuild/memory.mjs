@@ -440,7 +440,7 @@ const materialValid = row => isPlainObject(row)
   && Number.isSafeInteger(row.autoRetriesUsed) && row.autoRetriesUsed >= 0 && row.autoRetriesUsed <= 1
   && typeof row.unknownCost === 'boolean' && Number.isFinite(row.updatedAt)
 
-const checkSummaryValid = (checkId, summary) => {
+const checkSummaryValid = (checkId, summary, passed) => {
   if (!isPlainObject(summary)) return false
   if (checkId === 'node-test-runner-spec-v1') return Object.keys(summary).every(key =>
     ['kind', 'tests', 'passed', 'failed', 'skipped', 'cancelled', 'todo'].includes(key))
@@ -453,6 +453,17 @@ const checkSummaryValid = (checkId, summary) => {
     ['kind', 'diagnostics'].includes(key))
     && summary.kind === 'typescript_noemit' && Number.isSafeInteger(summary.diagnostics)
     && summary.diagnostics >= 0 && summary.diagnostics <= 256
+  if (checkId === 'pytest-summary-v1') return Object.keys(summary).every(key =>
+    ['kind', 'tests', 'passed', 'failed', 'errors', 'skipped', 'xfailed', 'xpassed', 'deselected'].includes(key))
+    && summary.kind === 'pytest'
+    && ['tests', 'passed', 'failed', 'errors', 'skipped', 'xfailed', 'xpassed', 'deselected'].every(key =>
+      Number.isSafeInteger(summary[key]) && summary[key] >= 0 && summary[key] <= 1_000_000)
+    && summary.tests > 0 && summary.errors === 0
+    && summary.tests === summary.passed + summary.failed + summary.skipped
+      + summary.xfailed + summary.xpassed
+    && (passed ? summary.passed === summary.tests && summary.failed === 0 && summary.skipped === 0
+      && summary.xfailed === 0 && summary.xpassed === 0 && summary.deselected === 0
+      : summary.failed > 0)
   return false
 }
 const checkEventValid = row => isPlainObject(row)
@@ -460,7 +471,7 @@ const checkEventValid = row => isPlainObject(row)
     'passed', 'summary'].includes(key))
   && hex64(row.id) && Number.isFinite(row.at) && boundedLabel(row.checkId, 128) && hex64(row.turnKey)
   && entryHex(row.entryId) && Number.isSafeInteger(row.entryVersion) && typeof row.passed === 'boolean'
-  && (row.summary === undefined || checkSummaryValid(row.checkId, row.summary))
+  && (row.summary === undefined || checkSummaryValid(row.checkId, row.summary, row.passed))
 
 const recallStrategyRowValid = row => isPlainObject(row)
   && Object.keys(row).every(key => ['turnKey', 'scope', 'session', 'qualification', 'id', 'version',

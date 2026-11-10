@@ -42,6 +42,7 @@ export const CHECKERS = Object.freeze({ 'json-file-parses-v1': jsonFileParses })
 const DEVELOPMENT_CHECK_IDS = Object.freeze({
   nodeTest: 'node-test-runner-spec-v1',
   typeScript: 'typescript-noemit-v1',
+  pytest: 'pytest-summary-v1',
 })
 const SAFE_LOCAL_PATH = /^(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9_./*-]+$/u
 
@@ -61,6 +62,8 @@ function developmentCommandSpec(command) {
       && (!arg.includes('*') || /(?:^|\/)[*][A-Za-z0-9_.-]*\.(?:test|spec)\.(?:mjs|cjs|js|ts)$/u.test(arg)))) {
     return { checkId: DEVELOPMENT_CHECK_IDS.nodeTest, arguments: args.slice(1) }
   }
+  const pytest = pytestCommandSpec(args)
+  if (pytest !== null) return pytest
   if (!executable(args[0], 'tsc') || args[1] !== '--noEmit' || args.length < 3) return null
   const inputs = args.slice(2)
   if (inputs[0] === '-p' || inputs[0] === '--project') {
@@ -72,6 +75,35 @@ function developmentCommandSpec(command) {
     ? { checkId: DEVELOPMENT_CHECK_IDS.typeScript, arguments: args.slice(1) } : null
 }
 
+function pytestPath(path) {
+  if (typeof path !== 'string' || !SAFE_LOCAL_PATH.test(path) || path.startsWith('/')
+    || path.includes('*') || path.includes('\\')) return false
+  const normalized = path.startsWith('./') ? path.slice(2) : path
+  if (normalized === '' || normalized.split('/').some(part => part === '' || part === '.' || part === '..')) return false
+  return normalized.endsWith('.py') || !/\.[A-Za-z0-9]+$/u.test(normalized)
+}
+
+function pytestCommandSpec(args) {
+  const executable = (path, name) => SAFE_LOCAL_PATH.test(path)
+    && (path === name || path.endsWith(`/${name}`))
+  let start
+  if (executable(args[0], 'pytest')) start = 1
+  else if ((executable(args[0], 'python') || executable(args[0], 'python3'))
+    && args[1] === '-m' && args[2] === 'pytest') start = 3
+  else return null
+  const options = new Set()
+  const paths = []
+  for (const arg of args.slice(start)) {
+    if (['-q', '--quiet', '--color=no'].includes(arg)) {
+      if (options.has(arg)) return null
+      options.add(arg)
+    } else if (arg.startsWith('-') || !pytestPath(arg)) return null
+    else paths.push(arg)
+  }
+  if (paths.length === 0 || paths.length > 32) return null
+  return { checkId: DEVELOPMENT_CHECK_IDS.pytest, arguments: args.slice(1) }
+}
+
 /** Exact normalized verification matcher shared by stored lessons and observed foreground calls. */
 export function developmentCheckIdForCommand(command) {
   return developmentCommandSpec(command)?.checkId ?? null
@@ -80,7 +112,8 @@ export function developmentCheckIdForCommand(command) {
 export function developmentCheckMatchesVerification(verificationCheck, command) {
   const actual = developmentCommandSpec(command)
   if (actual === null || typeof verificationCheck !== 'string') return false
-  if (verificationCheck === actual.checkId) return true // existing internal IDs stay compatible
+  if (verificationCheck === actual.checkId) return actual.checkId !== DEVELOPMENT_CHECK_IDS.pytest
+    // Existing internal IDs stay compatible; pytest requires its exact command and target path.
   const declared = developmentCommandSpec(verificationCheck)
   return declared !== null && declared.checkId === actual.checkId
     && declared.arguments.length === actual.arguments.length
@@ -141,6 +174,84 @@ function typeScriptResult(output) {
     ? { status: 'fail', evidence: { kind: 'typescript_noemit', diagnostics: Math.min(diagnostics.length, 256) } } : null
 }
 
+const PYTEST_TERMS = new Set(['passed', 'failed', 'error', 'errors', 'skipped', 'xfailed',
+  'xpassed', 'deselected', 'warning', 'warnings'])
+function pytestSummary(line) {
+  const match = /^\s*(?:=+\s*)?(.+?)\s+in\s+([0-9]+(?:\.[0-9]+)?s)(?:\s*=+)?\s*$/u.exec(line)
+  if (match === null) return null
+  const counts = Object.create(null)
+  for (const part of match[1].split(/,\s*/u)) {
+    const row = /^([0-9]+) (passed|failed|errors?|skipped|xfailed|xpassed|deselected|warnings?)$/u.exec(part)
+    if (row === null || !PYTEST_TERMS.has(row[2]) || Object.hasOwn(counts, row[2])) return null
+    const count = Number(row[1])
+    if (!Number.isSafeInteger(count) || count > 1_000_000) return null
+    counts[row[2]] = count
+  }
+  const singularError = counts.error ?? 0
+  if (Object.hasOwn(counts, 'error') && Object.hasOwn(counts, 'errors')) return null
+  const errors = singularError + (counts.errors ?? 0)
+  const tests = ['passed', 'failed', 'skipped', 'xfailed', 'xpassed'].reduce((sum, key) =>
+    sum + (counts[key] ?? 0), errors)
+  return { tests, passed: counts.passed ?? 0, failed: counts.failed ?? 0, errors,
+    skipped: counts.skipped ?? 0, xfailed: counts.xfailed ?? 0, xpassed: counts.xpassed ?? 0,
+    deselected: counts.deselected ?? 0 }
+}
+
+function pytestMarkers(output, quiet, summaryIndex) {
+  const clean = output.stdout.replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '')
+  const lines = clean.split(/\r?\n/u).slice(0, summaryIndex)
+  const counts = { passed: 0, failed: 0, errors: 0, skipped: 0, xfailed: 0, xpassed: 0 }
+  const addMarker = marker => {
+    const key = ({ '.': 'passed', F: 'failed', E: 'errors', s: 'skipped',
+      x: 'xfailed', X: 'xpassed' })[marker]
+    if (key === undefined) return false
+    counts[key] += 1
+    return true
+  }
+  const addStatus = status => {
+    const key = ({ PASSED: 'passed', FAILED: 'failed', ERROR: 'errors', SKIPPED: 'skipped',
+      XFAIL: 'xfailed', XPASS: 'xpassed' })[status]
+    if (key === undefined) return false
+    counts[key] += 1
+    return true
+  }
+  if (!quiet) {
+    const itemRows = lines.map(line => /^\s*.+::.+\s+(PASSED|FAILED|SKIPPED|XFAIL|XPASS|ERROR)(?:\s+\[\s*[0-9]{1,3}%\])?\s*$/u.exec(line))
+      .filter(Boolean)
+    if (itemRows.length > 0) {
+      if (!itemRows.every(row => addStatus(row[1]))) return null
+      return counts
+    }
+  }
+  const progress = lines.map(line => (quiet
+    ? /^\s*([.FEsxX]+)\s*(?:\[\s*[0-9]{1,3}%\])?\s*$/u.exec(line)
+    : /^\s*[^:]+\.py\s+([.FEsxX]+)\s*(?:\[\s*[0-9]{1,3}%\])?\s*$/u.exec(line)))
+    .filter(Boolean)
+  if (progress.length === 0) return null
+  for (const row of progress) for (const marker of row[1]) if (!addMarker(marker)) return null
+  return counts
+}
+
+function pytestResult(output, spec) {
+  if (output.stderr !== '') return null
+  const lines = output.stdout.split(/\r?\n/u)
+  const summaries = lines.map((line, index) => ({ index, counts: pytestSummary(line) }))
+    .filter(row => row.counts !== null)
+  if (summaries.length !== 1) return null
+  const summary = summaries[0]
+  const markers = pytestMarkers(output, spec.arguments.includes('-q') || spec.arguments.includes('--quiet'),
+    summary.index)
+  if (markers === null || ['passed', 'failed', 'errors', 'skipped', 'xfailed', 'xpassed']
+    .some(key => markers[key] !== (summary.counts[key] ?? 0))) return null
+  const { tests, passed, failed, errors, skipped, xfailed, xpassed, deselected } = summary.counts
+  const evidence = { kind: 'pytest', tests, passed, failed, errors, skipped, xfailed, xpassed, deselected }
+  if (errors > 0 || tests < 1) return null
+  if (output.exitCode === 0 && passed === tests && failed === 0 && skipped === 0
+    && xfailed === 0 && xpassed === 0 && deselected === 0) return { status: 'pass', evidence }
+  if (output.exitCode === 1 && failed > 0) return { status: 'fail', evidence }
+  return null
+}
+
 /**
  * Recognize only direct foreground Node spec-runner and TypeScript noEmit invocations.
  * Evidence contains counts only; command text, source paths, and compiler diagnostics are never
@@ -151,7 +262,8 @@ export function runDevelopmentChecker({ command, result } = {}) {
   const output = spec === null ? null : foregroundOutput(result)
   if (output === null) return { status: 'unknown', checkId: spec?.checkId ?? null, reason: 'unrecognized_execution' }
   const parsed = spec.checkId === DEVELOPMENT_CHECK_IDS.nodeTest ? nodeTestResult(output)
-    : typeScriptResult(output)
+    : spec.checkId === DEVELOPMENT_CHECK_IDS.typeScript ? typeScriptResult(output)
+      : pytestResult(output, spec)
   return parsed === null
     ? { status: 'unknown', checkId: spec.checkId, reason: 'incomplete_or_ambiguous_result' }
     : { ...parsed, checkId: spec.checkId }

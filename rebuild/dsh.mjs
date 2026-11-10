@@ -720,11 +720,8 @@ export function apply(ctx, config = {}) {
     const prepared = engine.prepare({ sessionId, turnId: String(turn),
       projectKey: cwdOf(session), prompt: userText, taskContext,
       strategyEligible: userText !== '' && inWorkspace })
-    if (inWorkspace && userText !== '') {
-      const turnKey = typeof prepared.turnKey === 'string' ? prepared.turnKey : traceTurnKey(sessionId, turn)
-      const doc = readRsiStore()
-      const probe = doc?.recallStrategy.adaptive.probes.find(row => row.turnKey === turnKey)
-      if (probe !== undefined) rememberRsiProbe(probe)
+    if (inWorkspace && userText !== '' && prepared.rsiProbe !== undefined) {
+      rememberRsiProbe(prepared.rsiProbe)
     }
     if (prepared.context !== '') {
       decision.messages = [...decision.messages, createUserMessage({

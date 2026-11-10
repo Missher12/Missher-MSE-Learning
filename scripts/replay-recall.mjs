@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url'
 import { recallSelection, packRecall, replayRecall } from '../rebuild/recall.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
+const packageVersion = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8')).version
 const parseArgs = argv => {
   const args = {}
   for (const raw of argv) {
@@ -51,6 +52,6 @@ if (ranker === null) {
   process.exit(2)
 }
 const report = replayRecall(cases, ranker)
-console.log(JSON.stringify({ ranker: rankerName, fixture: fixturePath, modelCalls: 0,
+console.log(JSON.stringify({ packageVersion, ranker: rankerName, fixture: fixturePath, modelCalls: 0,
   liveStoreReads: 0, liveStoreWrites: 0, ...report }, null, 2))
 if (report.criticalRegressions > 0) process.exitCode = 1

@@ -222,7 +222,7 @@ test('real step1 uses the batched facts-route write and step2 exits before store
 
   assert.equal(firstCounts.transactions, 2)
   assert.equal(firstCounts.commits, 2)
-  assert.equal(firstCounts.reads, 3)
+  assert.equal(firstCounts.reads, 2)
   assert.equal(doc.turnFacts.length, 1)
   assert.equal(doc.routes.length, 1)
   assert.ok(doc.receipts.length > 0)
