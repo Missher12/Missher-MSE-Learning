@@ -1,11 +1,12 @@
 # 验证记录
 
-## 1.3.4 瘦身与跨平台核心验证
+## 1.3.5 瘦身与跨平台核心验证
 
 - 封面 2172×724、RGB 解码像素逐字节一致，转为无损 WebP；编码工具仅用于构建，安装包不增加运行依赖。移除的旧写入器和演示试验函数在当前运行/开发闭包中无调用；保留实际 getMethod 及 LearningError/check/MAX_STORE_BYTES 契约。
 - 原生平台用例不覆盖 process.platform，也不替换原生文件系统：检查旧库兼容、实际写入/重开/快照、同目录替换失败、符号链接/目录联接拒收、JSON 检查、跨进程锁和跨项目召回。Windows 路径语义另有定向检查。测试只使用临时目录，不接触 live 库或真实 provider。
 - [Core portability 工作流](https://github.com/Missher12/Missher-MSE-Learning/actions/workflows/portability.yml) 覆盖 Windows、macOS、Linux 的 x64/ARM64，在最低 Node 22.19 与 Node 24 下运行。具体通过结果以对应提交的真实运行记录为准。
 - 上述为核心 OS/文件系统与路径验证；不等于每种 DSH 宿主版本或桌面界面的端到端验收。日常 macOS DSH 的安装、UI 和数据保留按本版交付回执核对。未验证组合（包括移动端独立宿主、特定网络盘/ACL、其他架构）不宣称可用。
+- 宿主通道检查另覆盖原生 `bash` 与 `pwsh`：同样的 Cordis source-mode 配对案例分别运行，通过结果、失败结果、外部材料、取消、晚到、回合/步骤/调用错配，以及入队后工具名被替换均有断言。Windows PowerShell 的结构化前台结果与本机 SDK `@deepseek-ai/dsh-tool-pwsh` 契约对照；这不冒充 Windows DSH 桌面端到端运行。
 
 ## 1.3.3 Windows 存储与路径兼容
 

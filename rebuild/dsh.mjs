@@ -86,6 +86,7 @@ function correctionMaterial(text) {
 const SCOPED_PATTERN = /(?:仅|只)(?:在)?(?:本|这个|该)(?:项目|仓库|库)|(?:在本|这个)(?:项目|仓库)(?:里|中|内)/u
 const textsOf = message => (message?.content ?? [])
   .filter(part => part?.type === 'text').map(part => part.text ?? '')
+const DEVELOPMENT_SHELL_TOOLS = new Set(['bash', 'pwsh'])
 
 export function apply(ctx, config = {}) {
   const stateRoot = typeof ctx.dshHomePath === 'function'
@@ -830,7 +831,7 @@ export function apply(ctx, config = {}) {
     exec.rootCallId ?? exec.callId, session)?.event ?? null
   const developmentCallOf = (exec, session, sessionId) => {
     const callId = exec?.rootCallId ?? exec?.callId
-    if (exec?.name !== 'bash' || typeof callId !== 'string' || callId.length === 0
+    if (!DEVELOPMENT_SHELL_TOOLS.has(exec?.name) || typeof callId !== 'string' || callId.length === 0
       || callId.length > 512) return null
     const located = callEventLocationOf(callId, session)
     const callEvent = located?.event
@@ -846,7 +847,7 @@ export function apply(ctx, config = {}) {
     }
     if (args === null || typeof args !== 'object' || Array.isArray(args)
       || Object.getPrototypeOf(args) !== Object.prototype || typeof args.command !== 'string') return null
-    return { callId, turnId: String(turn), step, callSeq: located.seq, command: args.command }
+    return { callId, toolName: exec.name, turnId: String(turn), step, callSeq: located.seq, command: args.command }
   }
   disposers.push(ctx.on('tools/result', (exec, result) => {
     const earlySession = exec?.agent?.session
@@ -891,7 +892,7 @@ export function apply(ctx, config = {}) {
             if (offers.length === 1 && pairedDevelopmentCapacity(pendingDevelopmentChecks, key,
               call.callId)) {
               if (!pendingDevelopmentChecks.has(key)) pendingDevelopmentChecks.set(key, [])
-              pendingDevelopmentChecks.get(key).push({ callId: call.callId, callSeq: call.callSeq,
+              pendingDevelopmentChecks.get(key).push({ callId: call.callId, toolName: call.toolName, callSeq: call.callSeq,
                 step: call.step, persisted: false, isError: result?.isError === true,
                 checkId: checked.checkId,
                 passed: checked.status === 'pass', summary: checked.evidence,
@@ -1069,7 +1070,7 @@ export function apply(ctx, config = {}) {
     if (row === undefined) return
     const message = event.data.message
     const call = session?.eventAt?.(row.callSeq)
-    if (call?.type !== 'tool/call' || call.data?.callId !== callId || call.data?.name !== 'bash'
+    if (call?.type !== 'tool/call' || call.data?.callId !== callId || call.data?.name !== row.toolName
       || call.data?.turn !== turn || call.data?.step !== step
       || message?.role !== 'tool' || message?.source?.kind !== 'tool'
       || message.source.callId !== callId

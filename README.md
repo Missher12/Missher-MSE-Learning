@@ -2,7 +2,7 @@
 
 ![MSE Learning · 持久学习（品牌插画）](docs/images/cover-v2.webp)
 
-MSE 为 DSH 学习可复用纠正与失败经验。**1.3.4** 无损精简资源、移除未使用的旧实现，并增加 Windows、macOS、Linux 双架构核心验证；保留现有界面、学习数据和策略。
+MSE 为 DSH 学习可复用纠正与失败经验。**1.3.5** 无损精简资源、移除未使用的旧实现，并增加 Windows、macOS、Linux 双架构核心验证；保留现有界面、学习数据和策略。
 
 目标范围：Windows、macOS、Linux 的 x64/ARM64，Node ≥22.19。核心系统检查与 DSH 宿主验收范围见 [平台验证](https://github.com/Missher12/Missher-MSE-Learning/blob/main/VALIDATION.md)。
 

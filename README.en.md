@@ -2,7 +2,7 @@
 
 ![MSE Learning · 持久学习（品牌插画）](docs/images/cover-v2.webp)
 
-MSE learns reusable corrections and failure lessons for DSH. **1.3.4** reduces resources losslessly, removes unused legacy code, and adds Windows, macOS, and Linux core checks on x64/ARM64 while preserving the current UI, data, and learning policies.
+MSE learns reusable corrections and failure lessons for DSH. **1.3.5** reduces resources losslessly, removes unused legacy code, and adds Windows, macOS, and Linux core checks on x64/ARM64 while preserving the current UI, data, and learning policies.
 
 Targets: Windows, macOS, and Linux on x64/ARM64, Node ≥22.19. Core OS checks and DSH host acceptance are documented separately in [platform validation](https://github.com/Missher12/Missher-MSE-Learning/blob/main/VALIDATION.md).
 

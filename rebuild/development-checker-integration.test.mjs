@@ -9,7 +9,8 @@ import { evidenceTokenHashes, validateFailureLessonOutput } from '../src/failure
 
 const hash = value => createHash('sha256').update(value).digest('hex')
 
-test('Cordis checker accepts only paired in-workspace calls and records stdout-only evidence at turn end', async () => {
+for (const shellName of ['bash', 'pwsh']) {
+test(`${shellName}: Cordis checker accepts only paired in-workspace calls and records stdout-only evidence at turn end`, async () => {
   const { Context, Service } = await import('@deepseek-ai/cordis')
   const dir = mkdtempSync(join(homedir(), '.mse-development-check-'))
   const sessionId = 'development-check-session'
@@ -70,14 +71,18 @@ test('Cordis checker accepts only paired in-workspace calls and records stdout-o
         command: 'node --test another.test.mjs' }), [], 'an unrelated test command does not match the reflected method')
     }
     const tool = async ({ turn, command, stdout, exitCode = 0, callId, resultCallId = callId,
-      resultStep = 1, persist = true }) => {
+      resultStep = 1, persist = true, changedToolName = null }) => {
       const step = 1
-      await emitEvent({ type: 'tool/call', name: 'bash', data: { turn, step, callId, name: 'bash',
+      await emitEvent({ type: 'tool/call', name: shellName, data: { turn, step, callId, name: shellName,
         arguments: JSON.stringify({ description: 'Run the tests', command }) } })
-      await ctx.emit('tools/result', { name: 'bash', callId, rootCallId: callId,
+      await ctx.emit('tools/result', { name: shellName, callId, rootCallId: callId,
         agent: { session } }, { isError: false, value: { kind: 'foreground', cwd: dir,
-        exitCode, signal: null, timedOut: false, aborted: false,
+        exitCode, signal: null, timedOut: false, aborted: false, timeoutMs: 60000,
         stdout: { text: stdout, truncated: false }, stderr: { text: '', truncated: false } } })
+      if (changedToolName !== null) {
+        session.events.findLast(event => event.type === 'tool/call' && event.data.callId === callId)
+          .data.name = changedToolName
+      }
       if (persist) await emitEvent({ type: 'tool/result', data: { turn,
         step: resultStep, message: { role: 'tool', source: { kind: 'tool', callId: resultCallId },
           toolCallId: resultCallId, isError: false,
@@ -116,8 +121,15 @@ test('Cordis checker accepts only paired in-workspace calls and records stdout-o
     assert.equal(api.engine.store.read().checkEvents.length, 0, 'a cancelled turn drops pending check credit')
 
     await start(6, '请修复测试失败并运行测试')
-    await tool({ turn: 6, command, stdout: pass, callId: 'call-pass' })
+    await tool({ turn: 6, command, stdout: pass, callId: 'call-tool-swapped',
+      changedToolName: shellName === 'bash' ? 'pwsh' : 'bash' })
     await end(6)
+    assert.equal(api.engine.store.read().checkEvents.length, 0,
+      'the persisted call must still be the exact original tool, not another allowed shell')
+
+    await start(7, '请修复测试失败并运行测试')
+    await tool({ turn: 7, command, stdout: pass, callId: 'call-pass' })
+    await end(7)
     let events = api.engine.store.read().checkEvents
     assert.equal(events.length, 1)
     assert.equal(events[0].checkId, 'node-test-runner-spec-v1')
@@ -127,21 +139,21 @@ test('Cordis checker accepts only paired in-workspace calls and records stdout-o
     assert.deepEqual(events[0].summary, { kind: 'node_test_runner', tests: 1, passed: 1,
       failed: 0, skipped: 0, cancelled: 0, todo: 0 })
     assert.equal(api.engine.store.read().turnFacts.find(row =>
-      row.turnKey === hash(JSON.stringify([sessionId, '6'])))?.outcome, 'unknown',
+      row.turnKey === hash(JSON.stringify([sessionId, '7'])))?.outcome, 'unknown',
     'a passing test is evidence for that check only, not proof that the user task is complete')
 
-    await start(7, '请修复测试失败并运行测试')
-    await tool({ turn: 7, command, stdout: pass, callId: 'call-late', persist: false })
-    await end(7)
-    await emitEvent({ type: 'tool/result', data: { turn: 7, step: 1, message: { role: 'tool',
+    await start(8, '请修复测试失败并运行测试')
+    await tool({ turn: 8, command, stdout: pass, callId: 'call-late', persist: false })
+    await end(8)
+    await emitEvent({ type: 'tool/result', data: { turn: 8, step: 1, message: { role: 'tool',
       source: { kind: 'tool', callId: 'call-late' }, toolCallId: 'call-late', isError: false,
       content: [{ type: 'text', text: pass }], id: 'result-call-late' }, meta: {} } })
     assert.equal(api.engine.store.read().checkEvents.length, 1,
       'a result event persisted after turn/end is never credited')
 
-    await start(8, '请修复测试失败并运行测试')
-    await tool({ turn: 8, command, stdout: fail, exitCode: 1, callId: 'call-stdout-fail' })
-    await end(8)
+    await start(9, '请修复测试失败并运行测试')
+    await tool({ turn: 9, command, stdout: fail, exitCode: 1, callId: 'call-stdout-fail' })
+    await end(9)
     events = api.engine.store.read().checkEvents
     assert.equal(events.length, 2, 'stdout-only diagnostics still yield an attributable objective summary')
     assert.equal(events[1].passed, false)
@@ -154,9 +166,9 @@ test('Cordis checker accepts only paired in-workspace calls and records stdout-o
     assert.ok(!JSON.stringify(events).includes('AssertionError'))
     assert.ok(!JSON.stringify(events).includes('checks.test.mjs'))
 
-    await start(9, '请修复测试失败并运行测试', [])
-    await tool({ turn: 9, command, stdout: pass, callId: 'call-warning-only' })
-    await end(9)
+    await start(10, '请修复测试失败并运行测试', [])
+    await tool({ turn: 10, command, stdout: pass, callId: 'call-warning-only' })
+    await end(10)
     assert.equal(api.engine.store.read().checkEvents.length, 2,
       'a warning-mode offer is never credited as a development method')
   } finally {
@@ -164,3 +176,4 @@ test('Cordis checker accepts only paired in-workspace calls and records stdout-o
     rmSync(dir, { recursive: true, force: true })
   }
 })
+}
