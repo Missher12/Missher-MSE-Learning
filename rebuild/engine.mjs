@@ -31,6 +31,7 @@ import { MemoryStore, importOldLessons, entryIdFor, digestOf, memoryOf, ROLLBACK
   boundedUnits, upgradeDocFormat, noCommit, RECALL_STRATEGY_LIMIT, ADAPTIVE_RECALL_POLICY_LIMIT,
   ADAPTIVE_RECALL_PROBE_LIMIT, ADAPTIVE_RECALL_DECISION_LIMIT } from './memory.mjs'
 import { isMemoryStorageError } from './storage.mjs'
+export { pathInside } from './paths.mjs'
 import { mechanismKey, resolveMethodVersion, versionWindow, ensureMethodStats, archiveVersion,
   selectHistory, renderHistoryPrompt, historyCapacity, methodNeedsGuard, guardSummary,
   historyAdmission, historyRowPreview, methodAttribution, creditWindow, editionSources,
@@ -1065,18 +1066,6 @@ const hasIndependentSentence = text => {
     // correction; it needs a user-correction signal of its own.
     return trusted.length >= 8
       && /(你|不对|又|每次|总是|老是|不是让|不是叫|要的是|应该|必须|不要|别再|以后|记住|长期|所有)/u.test(trusted)
-  })
-}
-
-/** Segment-safe containment over canonical paths (no sibling-prefix bleed). Both sides are
- *  normalized for the darwin /tmp ↔ /private/tmp identity; callers resolve symlinks FIRST. */
-export function pathInside(realPath, roots) {
-  if (typeof realPath !== 'string' || !realPath.startsWith('/')) return false
-  const axis = p => (p === '/private/tmp' ? '/tmp' : p.startsWith('/private/tmp/') ? `/tmp${p.slice(12)}` : p)
-  const candidate = axis(realPath)
-  return roots.some(root => {
-    const base = axis(String(root))
-    return candidate === base || (base !== '/' && candidate.startsWith(`${base}/`))
   })
 }
 

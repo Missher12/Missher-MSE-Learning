@@ -36,6 +36,7 @@ import { runChecker, runDevelopmentChecker } from './checker.mjs'
 import { apply as applyRemotes } from './remote.mjs'
 import { localDayKey } from './time.mjs'
 import { isMemoryStorageError } from './storage.mjs'
+import { isAbsolutePath, relativeInside } from './paths.mjs'
 
 export const name = 'mse-learning'
 export const inject = ['agents', 'tools', 'llm', 'dshHomePath', 'workspaceRegistry']
@@ -325,12 +326,13 @@ export function apply(ctx, config = {}) {
   // segment-safe; project-internal tmp FILES stay untouched.
   const TEMP_ROOTS = (() => {
     const seen = new Set()
-    for (const candidate of ['/tmp', '/var/tmp', tmpdir()]) {
+    const candidates = process.platform === 'win32' ? [tmpdir()] : ['/tmp', '/var/tmp', tmpdir()]
+    for (const candidate of candidates) {
       try { seen.add(realpathSync(candidate)) } catch { /* platform without this root */ }
     }
     return [...seen]
   })()
-  const tempRootReal = real => TEMP_ROOTS.some(temp => real === temp || real.startsWith(`${temp}/`))
+  const tempRootReal = real => pathInside(real, TEMP_ROOTS)
 
   function workspaceRoots() {
     // The service is DECLARED in `inject` (the real wiring). A host that nonetheless has the
@@ -345,7 +347,7 @@ export function apply(ctx, config = {}) {
       const out = rows.map(row => ({
         path: typeof row?.path === 'string' ? row.path : '',
         sessionIds: new Set(Array.isArray(row?.sessionIds) ? row.sessionIds : []),
-      })).filter(row => row.path.startsWith('/'))
+      })).filter(row => isAbsolutePath(row.path))
       // Valid permission = host-registered MINUS OS-temp roots (realpath identity, segment
       // safe). Dropped roots are counted, never their paths; old queued material from them
       // also loses source permission (this same list feeds the source guard).
@@ -370,7 +372,7 @@ export function apply(ctx, config = {}) {
   // Nearest EXISTING ancestor's realpath decides containment — symlinks inside a workspace that
   // point outside resolve out; paths that cannot be resolved at all are NOT inside (conservative).
   const realInside = (candidate, roots) => {
-    if (typeof candidate !== 'string' || !candidate.startsWith('/')) return false
+    if (!isAbsolutePath(candidate)) return false
     let probe = candidate
     for (let i = 0; i < 8; i += 1) {
       let real = null
@@ -382,8 +384,9 @@ export function apply(ctx, config = {}) {
   const attribution = (sessionId, roots) => roots !== null
     && roots.some(root => root.sessionIds.has(sessionId))
   // Explicit outside-file references inside collected TEXT never ride in as learning material.
-  const OUTSIDE_TOKEN = /(?:^|[\s"'=,([])(\/[^\s"'`;|&<>(){}]+)/gu
-  const REL_TOKEN = /(?:^|[\s"'=,([])(\.\.[^\s"'`;|&<>(){}]*|\.\/[^\s"'`;|&<>(){}]+)/gu
+  const OUTSIDE_TOKEN = /(?:^|[\s"'`=,([])((?:[A-Za-z]:|\\\\|\/)[^\s"'`;|&<>(){}]+)/gu
+  const REL_TOKEN = /(?:^|[\s"'`=,([])(\.\.[^\s"'`;|&<>(){}]*|\.[\\/][^\s"'`;|&<>(){}]+)/gu
+  const QUOTED_PATH = /(["'`])((?:[A-Za-z]:[\\/]|\\\\|\/)[^\r\n]*?)\1/gu
   /** MSE22: bounded TAIL of the native final assistant text — ≤512 UTF-16 units AND ≤1024 UTF-8
    *  bytes, sliced on code points so a non-BMP character is never split. */
   const boundedDiagnosticTail = text => {
@@ -411,18 +414,24 @@ export function apply(ctx, config = {}) {
     .replace(/^[ \t]*`{3,}[A-Za-z0-9_+.-]*[ \t]*$/gmu, '')
 
   const textMentionsOutside = (text, roots, cwd) => {
-    const at = String(text ?? '')
+    let outside = false
+    // Preserve complete quoted paths with spaces when checking, instead of testing a prefix.
+    const at = String(text ?? '').replace(QUOTED_PATH, (_whole, _quote, path) => {
+      if (!realInside(path, roots)) outside = true
+      return ' '
+    })
+    if (outside) return true
     if (at === '') return false
-    for (const token of at.match(OUTSIDE_TOKEN) ?? []) {
-      if (!realInside(token.replace(/^[\s"'=,([]/u, ''), roots)) return true
+    for (const token of at.matchAll(OUTSIDE_TOKEN)) {
+      if (!realInside(token[1], roots)) return true
     }
-    const rel = at.match(REL_TOKEN) ?? []
+    const rel = [...at.matchAll(REL_TOKEN)].map(token => token[1])
     if (rel.length > 0) {
       // A relative file reference is only provable against a known, absolute cwd; with an
       // unverifiable origin, explicit ../ or ./ references are refused (no path guessing).
-      if (typeof cwd !== 'string' || !cwd.startsWith('/')) return true
+      if (!isAbsolutePath(cwd)) return true
       for (const token of rel) {
-        if (!realInside(join(cwd, token.replace(/^[\s"'=,([]/u, '')), roots)) return true
+        if (!realInside(join(cwd, token), roots)) return true
       }
     }
     return false
@@ -775,7 +784,7 @@ export function apply(ctx, config = {}) {
   engine.setMaterialGuard((text, rowCwd) => {
     const roots = workspaceRoots()
     if (roots === null) return false // same closed posture as the source guard
-    const cwd = typeof rowCwd === 'string' && rowCwd.startsWith('/') ? rowCwd : null
+    const cwd = isAbsolutePath(rowCwd) ? rowCwd : null
     return !textMentionsOutside(text, roots, cwd)
   })
 
@@ -796,14 +805,11 @@ export function apply(ctx, config = {}) {
     // Real write/edit calls commonly carry ABSOLUTE paths: normalize absolute/relative under the
     // session's trusted cwd into one controlled relative target; outside cwd stays refused.
     let relTarget = rel
-    if (typeof rel === 'string' && rel.startsWith('/')) {
-      const prefix = cwd.endsWith('/') ? cwd : `${cwd}/`
-      relTarget = rel.startsWith(prefix) ? rel.slice(prefix.length) : null
-    }
-    if (sessionId === undefined || typeof cwd !== 'string' || !cwd.startsWith('/') || relTarget === null
+    if (isAbsolutePath(rel)) relTarget = relativeInside(rel, cwd)
+    if (sessionId === undefined || !isAbsolutePath(cwd) || typeof relTarget !== 'string'
       || observation?.kind !== 'present' || !relTarget.toLowerCase().endsWith('.json')
       || relTarget.includes('..') || jsonWrites.size >= 32) return
-    relTarget = relTarget.replace(/^[.][/]/, '')
+    relTarget = relTarget.replace(/^[.][\\/]/, '')
     const turn = turnOfCall(session, exec.rootCallId ?? exec.callId)
     if (turn === null) return
     jsonWrites.set(exec.token, { sessionId, turnId: String(turn), file: relTarget, cwd,

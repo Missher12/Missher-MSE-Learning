@@ -2,7 +2,7 @@
 
 ![MSE Learning · 持久学习（品牌插画）](docs/images/cover-v2.png)
 
-MSE learns reusable corrections and failure lessons for DSH. **1.3.2** adapts the Activity page to Usage statistics, with daily, weekly, and cumulative views; MSE's existing counts and other features remain unchanged.
+MSE learns reusable corrections and failure lessons for DSH. **1.3.3** fixes Windows memory access, workspace paths, and checker path compatibility while preserving the Activity page and existing learning data.
 
 Open Settings → Self-evolution to review six pages. Read-only views make no model calls. Background work may incur charges; unknown-cost calls are never replayed automatically.
 

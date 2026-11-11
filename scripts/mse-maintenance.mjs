@@ -126,7 +126,7 @@ function preflightRecoveryTarget(stateRoot) {
     progress.phase = 'rejected'
     fail('invalid_store')
   }
-  if (typeof uid !== 'number' || target.uid !== uid) {
+  if (process.platform !== 'win32' && (typeof uid !== 'number' || target.uid !== uid)) {
     progress.phase = 'rejected'
     fail('state_unavailable')
   }

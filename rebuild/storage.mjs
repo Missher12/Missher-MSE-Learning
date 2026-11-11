@@ -11,6 +11,7 @@ const LOCK_MAX_AGE_MS = 5 * 60_000
 const LOCK_MAX_BYTES = 512
 const MEMORY_LOCK_NAME = '.memory-v1.lock'
 const MEMORY_REAPER_NAME = `${MEMORY_LOCK_NAME}.reap`
+const WINDOWS = process.platform === 'win32'
 const knownStorageCodes = new Set(['state_unavailable', 'invalid_store', 'invalid_memory', 'capacity',
   'invalid_state_root', 'lock_busy', 'transaction_async', 'transaction_reentry',
   'durability_unconfirmed', 'ENOSPC', 'EIO', 'EACCES', 'EROFS'])
@@ -31,11 +32,17 @@ function directoryFd(path) {
 }
 
 function syncDirectory(path) {
+  // Windows Node cannot open/fsync a POSIX directory descriptor. File writes are flushed
+  // separately; never suppress a real directory-sync failure on macOS/Linux.
+  if (WINDOWS) return
   const fd = directoryFd(path)
   try { fsyncSync(fd) } finally { closeSync(fd) }
 }
 
 function tightenOwnedDirectory(path, expected, uid) {
+  // Windows uses the DSH profile's inherited ACL, not POSIX UID/mode bits. The caller still
+  // rejects links and verifies canonical directory identity; actual file I/O enforces the ACL.
+  if (WINDOWS) return
   if (typeof uid !== 'number' || expected.uid !== uid) throw learningError('state_unavailable')
   let fd
   try {
@@ -112,7 +119,9 @@ export function resolveMemoryDirectory(path) {
     throw presentError(learningError('invalid_store'))
   }
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
-  if (typeof uid !== 'number' || entry.uid !== uid) throw presentError(learningError('state_unavailable'))
+  if (!WINDOWS && (typeof uid !== 'number' || entry.uid !== uid)) {
+    throw presentError(learningError('state_unavailable'))
+  }
   let canonical
   let current
   let resolved
@@ -123,7 +132,7 @@ export function resolveMemoryDirectory(path) {
   } catch (error) { throw presentError(learningError(ioCode(error))) }
   if (current.isSymbolicLink() || !current.isDirectory() || !sameIdentity(entry, current)
     || !sameIdentity(current, resolved)) throw presentError(learningError('invalid_store'))
-  if ((current.mode & 0o777) !== 0o700) throw presentError(learningError('state_unavailable'))
+  if (!WINDOWS && (current.mode & 0o777) !== 0o700) throw presentError(learningError('state_unavailable'))
   return canonical
 }
 
@@ -192,8 +201,8 @@ export function writeExclusiveMemorySnapshot(path, body, overrides = {}) {
   try {
     const before = io.lstatSync(directory)
     if (before.isSymbolicLink() || !before.isDirectory()) throw learningError('invalid_store')
-    directoryHandle = directoryFd(directory)
-    const openedDirectory = io.fstatSync(directoryHandle)
+    if (!WINDOWS) directoryHandle = directoryFd(directory)
+    const openedDirectory = WINDOWS ? io.lstatSync(directory) : io.fstatSync(directoryHandle)
     if (!openedDirectory.isDirectory() || !sameIdentity(before, openedDirectory)) {
       throw learningError('invalid_store')
     }
@@ -203,13 +212,16 @@ export function writeExclusiveMemorySnapshot(path, body, overrides = {}) {
     outputOpened = true
     identity = io.fstatSync(fd)
     if (!identity.isFile()) throw learningError('invalid_store')
-    io.fchmodSync(fd, 0o600)
+    if (!WINDOWS) io.fchmodSync(fd, 0o600)
+    const currentDirectory = io.lstatSync(directory)
+    if (currentDirectory.isSymbolicLink() || !currentDirectory.isDirectory()
+      || !sameIdentity(before, currentDirectory)) throw learningError('invalid_store')
     io.writeFileSync(fd, body)
     io.fsyncSync(fd)
     committed = true
     io.closeSync(fd)
     fd = undefined
-    io.fsyncSync(directoryHandle)
+    if (!WINDOWS) io.fsyncSync(directoryHandle)
     return { committed: true, durable: true }
   } catch (error) {
     if (committed) {
@@ -242,10 +254,11 @@ export function writeExclusiveMemorySnapshot(path, body, overrides = {}) {
   }
 }
 
-/** Unique 0600 temp + file sync + same-directory rename + directory sync.
+/** Exclusive temp + file sync + same-directory rename + platform-native metadata sync.
+ *  POSIX syncs the directory; Windows reopens and flushes the replaced file (no directory fd).
  *  After rename, failures are reported as committed-but-durability-unconfirmed, never rollback. */
 export function commitMemoryFile(path, body, overrides = {}) {
-  const io = { openSync, writeFileSync, fsyncSync, closeSync, renameSync, unlinkSync, ...overrides }
+  const io = { openSync, writeFileSync, fsyncSync, fstatSync, closeSync, renameSync, unlinkSync, ...overrides }
   const directory = dirname(path)
   const temporary = join(directory, `.memory-v1-${randomUUID()}.tmp`)
   let fd
@@ -253,15 +266,25 @@ export function commitMemoryFile(path, body, overrides = {}) {
   try {
     const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0)
     fd = io.openSync(temporary, flags, 0o600)
+    const identity = WINDOWS ? io.fstatSync(fd) : null
     io.writeFileSync(fd, body)
     io.fsyncSync(fd)
     io.closeSync(fd)
     fd = undefined
     io.renameSync(temporary, path)
     committed = true
-    const directoryHandle = io.openSync(directory,
-      constants.O_RDONLY | (constants.O_DIRECTORY ?? 0) | (constants.O_NOFOLLOW ?? 0))
-    try { io.fsyncSync(directoryHandle) } finally { io.closeSync(directoryHandle) }
+    if (WINDOWS) {
+      const replaced = io.openSync(path, constants.O_RDWR | (constants.O_NOFOLLOW ?? 0))
+      try {
+        const opened = io.fstatSync(replaced)
+        if (!opened.isFile() || !sameIdentity(identity, opened)) throw learningError('invalid_store')
+        io.fsyncSync(replaced)
+      } finally { io.closeSync(replaced) }
+    } else {
+      const directoryHandle = io.openSync(directory,
+        constants.O_RDONLY | (constants.O_DIRECTORY ?? 0) | (constants.O_NOFOLLOW ?? 0))
+      try { io.fsyncSync(directoryHandle) } finally { io.closeSync(directoryHandle) }
+    }
     return { committed: true, durable: true }
   } catch (error) {
     if (committed) {

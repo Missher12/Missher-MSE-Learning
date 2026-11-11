@@ -5,18 +5,20 @@
  * Exit code 0 of an arbitrary command and model prose never reach this path; only the checker's
  * own evaluation does. Results carry counts and reason codes only — never file contents.
  */
-import { readFileSync, statSync } from 'node:fs'
+import { readFileSync, realpathSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { isAbsolutePath, relativeInside } from './paths.mjs'
 
 const MAX_FILE_BYTES = 256 * 1024
 
 function safeFile(root, rel) {
   if (typeof root !== 'string' || root === '' || typeof rel !== 'string' || rel === '' || rel.length > 512
-    || rel.includes('\u0000') || rel.startsWith('/')) return null
+    || rel.includes('\u0000') || isAbsolutePath(rel)) return null
   const target = resolve(join(root, rel))
   const base = resolve(root)
-  if (!target.startsWith(`${base}/`)) return null
+  if (relativeInside(target, base) === null || target === base) return null
   try {
+    if (relativeInside(realpathSync(target), realpathSync(base)) === null) return null
     const stat = statSync(target)
     if (!stat.isFile() || stat.size > MAX_FILE_BYTES) return null
     return readFileSync(target, 'utf8')
@@ -123,7 +125,7 @@ export function developmentCheckMatchesVerification(verificationCheck, command) 
 function foregroundOutput(result) {
   const value = result?.value
   if (result?.isError !== false || value?.kind !== 'foreground'
-    || typeof value.cwd !== 'string' || !value.cwd.startsWith('/')
+    || !isAbsolutePath(value.cwd)
     || value.timedOut !== false || value.aborted !== false
     || (value.signal !== null && value.signal !== 0)
     || !Number.isSafeInteger(value.exitCode)
