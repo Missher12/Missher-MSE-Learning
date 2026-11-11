@@ -1,6 +1,6 @@
 {
   "name": "@missher/dsh-mse-learning",
-  "version": "1.3.3",
+  "version": "1.3.4",
   "description": "Native DSH learning from corrections and concrete failures, with adaptive recall evidence and activity history.",
   "type": "module",
   "private": true,
@@ -17,7 +17,7 @@
     "adapters/dsh/usage.mjs",
     "cordis.patch.yml",
     "docs/AUTONOMY_0.15.0.md",
-    "docs/images/cover-v2.png",
+    "docs/images/cover-v2.webp",
     "rebuild/adaptive-operations.mjs",
     "rebuild/adaptive-recall.mjs",
     "rebuild/adaptive-replay.mjs",

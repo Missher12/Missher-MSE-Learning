@@ -2,12 +2,12 @@
 
 <h1>MSE Learning · 自我进化</h1>
 
-<p><img src="../docs/images/cover-v2.png" alt="MSE Learning · 持久学习（品牌插画）" width="100%"></p>
+<p><img src="../docs/images/cover-v2.webp" alt="MSE Learning · 持久学习（品牌插画）" width="100%"></p>
 
 <p>让长期纠正和失败经验，在后续相关任务中派上用场。</p>
 
 <p>
-  <a href="https://github.com/Missher12/Missher-MSE-Learning/releases/tag/v1.3.2"><img src="https://img.shields.io/badge/%E7%89%88%E6%9C%AC-1.3.2-4D6BFE?style=flat-square" alt="版本: 1.3.2"></a>
+  <a href="https://github.com/Missher12/Missher-MSE-Learning/releases/tag/v1.3.4"><img src="https://img.shields.io/badge/%E7%89%88%E6%9C%AC-1.3.4-4D6BFE?style=flat-square" alt="版本: 1.3.4"></a>
   <a href="https://github.com/Missher12/Missher-MSE-Learning"><img src="https://img.shields.io/badge/%E6%96%87%E6%A1%A3-%E4%B8%AD%E6%96%87-4D6BFE?style=flat-square" alt="文档: 中文"></a>
   <a href="https://github.com/Missher12/Missher-MSE-Learning/blob/main/LICENSE"><img src="https://img.shields.io/badge/%E8%AE%B8%E5%8F%AF-MIT-6B7280?style=flat-square" alt="许可: MIT"></a>
 </p>
@@ -19,7 +19,7 @@
 ---
 
 <!-- current-source -->
-当前源码：**1.3.2** · [分支 `main`](https://github.com/Missher12/Missher-MSE-Learning/tree/main) · [安装包与验收](https://github.com/Missher12/Missher-MSE-Learning/releases/tag/v1.3.2)。
+当前源码：**1.3.4** · [分支 `main`](https://github.com/Missher12/Missher-MSE-Learning/tree/main) · [安装包与验收](https://github.com/Missher12/Missher-MSE-Learning/releases/tag/v1.3.4)。
 <!-- /current-source -->
 
 ## 功能一览

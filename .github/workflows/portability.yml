@@ -1,0 +1,51 @@
+name: Core portability
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/portability.yml'
+      - 'rebuild/**'
+      - 'src/**'
+      - 'package.json'
+  pull_request:
+    paths:
+      - '.github/workflows/portability.yml'
+      - 'rebuild/**'
+      - 'src/**'
+      - 'package.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: ${{ matrix.os }} / Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - windows-11-arm
+          - macos-15-intel
+          - macos-latest
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+        node: ['22.19.0', '24']
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - name: Report native runtime
+        run: node -p "JSON.stringify({platform:process.platform,arch:process.arch,node:process.versions.node})"
+      - name: Native filesystem and learning core
+        run: node --test rebuild/portability.test.mjs
+      - name: Windows path semantics on every OS
+        run: node --test --test-name-pattern="workspace containment|real foreground checker" rebuild/windows-compat.test.mjs
