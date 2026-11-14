@@ -9,7 +9,8 @@ import { createHash } from 'node:crypto'
 import { readFileSync, realpathSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { isAbsolutePath, relativeInside } from './paths.mjs'
-import { pythonCheckFailureProofValid } from '../src/failure-evidence.mjs'
+import { buildPythonReceiptBirthProof, capsuleValid, pythonCheckFailureProofValid,
+  pythonReceiptBirthProofValid, pythonReceiptCheckFailureProofValid } from '../src/failure-evidence.mjs'
 
 const MAX_FILE_BYTES = 256 * 1024
 
@@ -48,6 +49,7 @@ const DEVELOPMENT_CHECK_IDS = Object.freeze({
   typeScript: 'typescript-noemit-v1',
   pytest: 'pytest-summary-v1',
   pythonJson: 'python-json-loader-v1',
+  pythonReceipt: 'python-receipt-contract-v1',
 })
 const SAFE_LOCAL_PATH = /^(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9_./*-]+$/u
 const SAFE_PYTHON_PATH = /^(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9_./-]+$/u
@@ -137,6 +139,166 @@ export function developmentCheckMatchesVerification(verificationCheck, command) 
 export function pythonCommandSpec(command) {
   const spec = developmentCommandSpec(command)
   return spec?.checkId === DEVELOPMENT_CHECK_IDS.pythonJson ? spec : null
+}
+
+/** Parse the one supported receipt entry command; paired coverage is derived from its directory. */
+export function pythonReceiptCommandSpec(command) {
+  const args = simpleCommandWords(command)
+  if (args === null || args.length !== 2
+    || !/^(?:python|python3|python\.exe|python3\.exe)$/u.test(args[0].split('/').at(-1))
+    || !SAFE_PYTHON_PATH.test(args[0]) || args[0].includes('*')
+    || !SAFE_PYTHON_PATH.test(args[1]) || args[1].startsWith('/') || !args[1].endsWith('/intake.py')) {
+    return null
+  }
+  const scriptPath = args[1].replace(/^\.\//u, '')
+  if (scriptPath.split('/').some(part => part === '' || part === '.' || part === '..')) return null
+  return { executable: args[0], scriptPath }
+}
+
+function pythonReceiptLessonShapeSupported(lesson, problem) {
+  if (lesson === null || typeof lesson !== 'object' || Array.isArray(lesson)
+    || problem === null || typeof problem !== 'object' || Array.isArray(problem)
+    || lesson.problemId !== problem.id || pythonReceiptCommandSpec(lesson.verification?.check) === null
+    || !Array.isArray(lesson.evidenceIds) || lesson.evidenceIds.length === 0
+    || lesson.evidenceIds.length > 3 || new Set(lesson.evidenceIds).size !== lesson.evidenceIds.length
+    || !Array.isArray(lesson.rootCause?.evidenceIds)
+    || lesson.rootCause.evidenceIds.length !== lesson.evidenceIds.length
+    || !lesson.evidenceIds.every((id, index) => lesson.rootCause.evidenceIds[index] === id)
+    || !Array.isArray(lesson.repairSteps)
+    || !Array.isArray(problem.capsules)) return false
+  const methodText = lesson.repairSteps.filter(step => typeof step === 'string').join('\n')
+  return /intake\.py/iu.test(methodText) && /counter\.py/iu.test(methodText)
+}
+
+function capsuleCommand(capsule) {
+  if (typeof capsule?.command !== 'string') return null
+  try {
+    const value = JSON.parse(capsule.command)
+    if (typeof value === 'string') return value
+    return isPlainRecord(value) && typeof value.command === 'string' ? value.command : null
+  } catch {
+    return pythonReceiptCommandSpec(capsule.command) === null ? null : capsule.command
+  }
+}
+
+function sourceStillAdmitted(sourceAdmitted, sessionId) {
+  try { return typeof sourceAdmitted === 'function' && sourceAdmitted(sessionId) === true } catch { return false }
+}
+
+function receiptGuardFailureMessage(message) {
+  return typeof message === 'string'
+    && /\bMSE_RECEIPT_GUARD\b/iu.test(message)
+    && /\bloadedVersion\b/iu.test(message)
+    && /(?:缺少|缺失|未(?:设置|提供|填写)|没有|missing|absent|unset|not\s+(?:set|provided|present|found))/iu
+      .test(message)
+}
+
+function pythonReceiptGuardCapsuleSupported(capsule, command, sourceAdmitted) {
+  return capsuleValid(capsule) && capsule.toolName === 'bash' && capsule.failureClass === 'tool_nonzero_exit'
+    && Number.isSafeInteger(capsule.exitCode) && capsule.exitCode !== 0 && capsule.checkId === null
+    && typeof capsule.originSessionId === 'string' && capsule.originSessionId !== ''
+    && typeof capsule.turnKey === 'string' && /^[a-f0-9]{64}$/u.test(capsule.turnKey)
+    && receiptGuardFailureMessage(capsule.message)
+    && capsuleCommand(capsule) === command
+    && (typeof sourceAdmitted !== 'function' || sourceStillAdmitted(sourceAdmitted, capsule.originSessionId))
+}
+
+function committedReceiptBirthRequests(doc, { entryId, version, problemId }) {
+  if (!Array.isArray(doc?.requests)) return null
+  return doc.requests.filter(row => row?.kind === 'revise' && row.settled === true
+    && row.terminal === 'committed' && row.entryId === entryId && row.problemId === problemId
+    && row.parentVersion === version - 1)
+}
+
+function sameEvidenceIds(left, right) {
+  return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+    && left.every((id, index) => id === right[index])
+}
+
+function requestMatchesBirthProof(request, proof) {
+  return request.ticket === proof.requestTicket && request.requestHash === proof.requestHash
+    && request.sourceSessionId === proof.sourceSessionId && request.problemId === proof.problemId
+    && request.entryId === proof.entryId && request.parentVersion === proof.parentVersion
+    && sameEvidenceIds(request.evidenceIds, proof.evidenceIds)
+}
+
+/** Return a current birth binding, creating it only from one retained committed request and a live native guard capsule. */
+export function pythonReceiptLessonBirthProofFor(lesson, problem, context = {}) {
+  if (!pythonReceiptLessonShapeSupported(lesson, problem) || typeof context.entryId !== 'string'
+    || !Number.isSafeInteger(context.version) || context.version < 2
+    || context.entry?.id !== context.entryId || context.entry.version !== context.version
+    || context.entry.parentVersion !== context.version - 1
+    || typeof context.sourceAdmitted !== 'function') return null
+  const expected = { entryId: context.entryId, version: context.version, problemId: problem.id,
+    parentVersion: context.version - 1, evidenceIds: lesson.evidenceIds, command: lesson.verification.check }
+  const doc = context.doc
+  const existing = context.entry?.pythonReceiptBirthProof
+  if (existing !== undefined) {
+    if (!pythonReceiptBirthProofValid(existing, expected)
+      || !sourceStillAdmitted(context.sourceAdmitted, existing.sourceSessionId)
+      || !sourceStillAdmitted(context.sourceAdmitted, existing.guardSessionId)) return null
+    const rows = committedReceiptBirthRequests(doc, expected)
+    if (rows === null || (rows.length > 0 && (rows.length !== 1 || !requestMatchesBirthProof(rows[0], existing)))) {
+      return null
+    }
+    return existing
+  }
+
+  const rows = committedReceiptBirthRequests(doc, expected)
+  if (rows === null || rows.length !== 1) return null
+  const request = rows[0]
+  if (!sameEvidenceIds(request.evidenceIds, lesson.evidenceIds)
+    || typeof request.sourceSessionId !== 'string' || request.sourceSessionId === ''
+    || !sourceStillAdmitted(context.sourceAdmitted, request.sourceSessionId)) return null
+  const guard = problem.capsules.filter(capsule =>
+    pythonReceiptGuardCapsuleSupported(capsule, lesson.verification.check, context.sourceAdmitted))
+    .sort((left, right) => left.id.localeCompare(right.id))[0]
+  if (guard === undefined) return null
+  return buildPythonReceiptBirthProof({ entryId: context.entryId, version: context.version,
+    problemId: problem.id, parentVersion: context.version - 1, evidenceIds: lesson.evidenceIds,
+    requestTicket: request.ticket, requestHash: request.requestHash, sourceSessionId: request.sourceSessionId,
+    guardCapsuleId: guard.id, guardTurnKey: guard.turnKey, guardSessionId: guard.originSessionId,
+    command: lesson.verification.check })
+}
+
+function receiptHistoricalCapsuleSupported(capsule, problem, lesson, context) {
+  if (!capsuleValid(capsule)) return false
+  if (capsule.checkId === DEVELOPMENT_CHECK_IDS.pythonReceipt && capsule.toolName === 'mse_verify_python_receipt'
+    && capsule.failureClass === 'checker_contract_failure' && typeof capsule.checkEventId === 'string'
+    && capsule.checkProof !== null && typeof capsule.checkProof === 'object' && capsule.message ===
+      `Python receipt objective check failed: ${capsule.checkProof.reason}`
+    && pythonReceiptCheckFailureProofValid(capsule.checkProof, { problemId: problem.id,
+      entryId: context.entryId, checkEventId: capsule.checkEventId, command: lesson.verification.check,
+      reason: capsule.checkProof.reason })) {
+    const proof = capsule.checkProof
+    if (Number.isSafeInteger(context.version) && proof.entryVersion >= context.version) return false
+    const event = context.doc?.checkEvents?.find(row => row.id === proof.checkEventId)
+    if (event !== undefined && (event.checkId !== DEVELOPMENT_CHECK_IDS.pythonReceipt || event.passed !== false
+      || event.entryId !== proof.entryId || event.entryVersion !== proof.entryVersion
+      || event.summary?.kind !== 'python_receipt_contract' || event.summary?.reason !== proof.reason
+      || proof.summaryHash !== digestJson(event.summary))) return false
+    const receipt = context.doc?.receipts?.find(row => row.turnKey === proof.turnKey)
+    if (receipt !== undefined && (receipt.settled !== true || receipt.outcome !== 'failed'
+      || !receipt.offered?.some(row => row.id === proof.entryId && row.version === proof.entryVersion
+        && row.mode !== 'guard')
+      || !receipt.methodFeedback?.some(row => row.entryId === proof.entryId
+        && row.version === proof.entryVersion && row.kind === 'check_fail'
+        && row.checkId === DEVELOPMENT_CHECK_IDS.pythonReceipt))) return false
+    const fact = context.doc?.turnFacts?.find(row => row.turnKey === proof.turnKey)
+    return fact === undefined || (fact.sessionId === proof.originSessionId && fact.outcome === 'failed')
+  }
+  return pythonReceiptGuardCapsuleSupported(capsule, lesson.verification.check, context.sourceAdmitted)
+}
+
+/** Whether source-backed paired-entry receipt evidence still supports the exact current method. */
+export function pythonReceiptLessonEvidenceSupported(lesson, problem, context = {}) {
+  if (!pythonReceiptLessonShapeSupported(lesson, problem)) return false
+
+  const cited = lesson.evidenceIds.map(id => problem.capsules.find(row => row?.id === id) ?? null)
+  const historicalEvidence = cited.every(capsule =>
+    capsule !== null && receiptHistoricalCapsuleSupported(capsule, problem, lesson, context))
+  if (historicalEvidence) return true
+  return pythonReceiptLessonBirthProofFor(lesson, problem, context) !== null
 }
 
 const pythonBOMLessonShape = (lesson, problemId) => {

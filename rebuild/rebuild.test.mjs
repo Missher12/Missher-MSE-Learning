@@ -29,6 +29,7 @@ const PROBES = fileURLToPath(new URL('.probes', import.meta.url))
 mkdirSync(PROBES, { recursive: true })
 const root = () => mkdtempSync(join(PROBES, 'mse-rebuild-'))
 const hashFile = path => createHash('sha256').update(readFileSync(path)).digest('hex')
+const freezeTestDate = t => t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 10, 14, 10, 0, 0) })
 
 // A REAL failing command: JSON with a trailing comma. stderr carries the diagnosable fact.
 function failingJsonRun(dir) {
@@ -561,7 +562,8 @@ test('facts arriving DURING a digest request are not marked processed; watermark
   assert.ok(!late.request.text.includes('健康检查端点'), 'still-processed facts stay processed')
 })
 
-test('default background route comes from the session the host reported; artifact checker settles real turns', async () => {
+test('default background route comes from the session the host reported; artifact checker settles real turns', async t => {
+  freezeTestDate(t)
   const handlers = new Map()
   const llmCalls = []
   const services = new Map()
@@ -819,7 +821,8 @@ test('stream-level truncation: a real rc.4 finish kind=length closes known-cost,
   assert.equal(w3.plugin.status().daily.waitReason, 'unknown_cost_never_auto_replayed')
 })
 
-test('background work is bound to the problem-source session — a newer unrelated session route is never borrowed', async () => {
+test('background work is bound to the problem-source session — a newer unrelated session route is never borrowed', async t => {
+  freezeTestDate(t)
   const handlers = new Map()
   const llmCalls = []
   const dir = root()
@@ -883,7 +886,8 @@ test('background work is bound to the problem-source session — a newer unrelat
   plugin.dispose()
 })
 
-test('a problem whose source session has NO recorded route waits readably instead of borrowing one', async () => {
+test('a problem whose source session has NO recorded route waits readably instead of borrowing one', async t => {
+  freezeTestDate(t)
   const handlers = new Map()
   const llmCalls = []
   const dir = root()
@@ -1275,7 +1279,8 @@ test('N3 questions, complaints, quotes, code and logs are not corrections — a 
   assert.ok(ruleInstruction(w.plugin, '源码里改完打包再安装'))
 })
 
-test('N4 repeat events, wake spam, restart: one task, one call; B-route never replaces A; pause/reflection-off never call; unknown cost never replays', async () => {
+test('N4 repeat events, wake spam, restart: one task, one call; B-route never replaces A; pause/reflection-off never call; unknown cost never replays', async t => {
+  freezeTestDate(t)
   const dir = root()
   const script = [{ answer: { schema: 'mse-correction-extract-v1', corrections: [{
     evidence: '插件应该在源码里改完打包',
@@ -3610,7 +3615,8 @@ test('D21e outside-material facts are excluded readably; unknown/cancelled stay 
   assert.ok(!plan.text.includes('OUTSIDE'), 'the excluded body never reaches the provider input')
 })
 
-test('D21f real restricted Cordis + fake registry + fake provider: one digest lands; restart dedupes', async () => {
+test('D21f real restricted Cordis + fake registry + fake provider: one digest lands; restart dedupes', async t => {
+  freezeTestDate(t)
   const { Context } = await import('@deepseek-ai/cordis')
   const { join } = await import('node:path')
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -3641,7 +3647,7 @@ test('D21f real restricted Cordis + fake registry + fake provider: one digest la
     return { ctx, fiber, api: ctx.get('mseRebuild'), calls, kick }
   }
   const dir = root()
-  const yesterday = Date.now() - 86_400_000
+  const yesterday = new Date(2026, 10, 13, 10, 0, 0).getTime()
   const yDay = localDayKey(yesterday)
   const w = await mount(dir, [{ result: { schema: 'mse-daily-digest-v1', summary: '昨日整理仓库变更清单',
     actions: [] }, usage: { input: 100, output: 20, total: 120 } }])
@@ -4188,7 +4194,8 @@ test('R21h digest admission: an inverting echo, and a failure lesson keeps scope
 })
 
 // ── MSE21-PROVIDER-CONTRACT: the model sees the evidence IDs it must cite ─────────────────
-test('R21j real restricted Cordis + fake provider: the lesson is built ONLY from the actual request text', async () => {
+test('R21j real restricted Cordis + fake provider: the lesson is built ONLY from the actual request text', async t => {
+  freezeTestDate(t)
   const { Context } = await import('@deepseek-ai/cordis')
   const { join } = await import('node:path')
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -4232,7 +4239,7 @@ test('R21j real restricted Cordis + fake provider: the lesson is built ONLY from
     const runDir = root()
     const first = failingJsonRun(runDir)
     const realNow = engine.now
-    const yesterday = Date.now() - 86_400_000
+    const yesterday = new Date(2026, 10, 13, 10, 0, 0).getTime()
     engine.now = () => yesterday
     engine.observeToolFailure({ sessionId: 'sP', turnId: 't1', projectKey: 'pP',
       callId: 'pc-0', toolName: 'bash', failureCode: 'tool_nonzero_exit',

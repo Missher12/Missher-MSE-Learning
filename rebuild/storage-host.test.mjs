@@ -13,6 +13,7 @@ const temporaryRoot = () => mkdtempSync(join(tmpdir(), 'mse-storage-host-test-')
 const ruleText = index => `规则容量测试 ${String(index).padStart(3, '0')} 保持原样`
 const hash = value => createHash('sha256').update(value).digest('hex')
 const scope = hash(JSON.stringify(['instance']))
+const freezeTestDate = t => t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 10, 14, 10, 0, 0) })
 
 function seededRule(index, existing = false) {
   const instruction = ruleText(index)
@@ -216,7 +217,8 @@ test('status reports an invalid library without writing or presenting a fake emp
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('a source-mode host continues a normal pre-step while storage is corrupt, then recovers the same library', async () => {
+test('a source-mode host continues a normal pre-step while storage is corrupt, then recovers the same library', async t => {
+  freezeTestDate(t)
   const root = temporaryRoot()
   const stateRoot = join(root, 'mse-learning')
   const durable = new RebuildEngine({ stateRoot })

@@ -56,6 +56,14 @@ const bounded = (value, max) => typeof value === 'string' && value.length > 0 &&
 const PYTHON_CHECK_FAILURE_REASONS = Object.freeze([
   'output_mismatch', 'bom_not_stripped', 'parse_error', 'source_write_attempted',
 ])
+const PYTHON_RECEIPT_FAILURE_REASONS = Object.freeze([
+  'wrong_loaded_version', 'missing_loaded_version', 'candidate_file_missing', 'probe_exit_nonzero',
+])
+const PYTHON_RECEIPT_BIRTH_KEYS = Object.freeze([
+  'schema', 'entryId', 'version', 'problemId', 'parentVersion', 'evidenceIds', 'requestTicket',
+  'requestHash', 'sourceSessionId', 'guardCapsuleId', 'guardTurnKey', 'guardSessionId', 'commandHash', 'seal',
+])
+export const PYTHON_RECEIPT_BIRTH_PROOF_MAX_BYTES = 2048
 
 const pythonCheckProofSeal = proof => hash(JSON.stringify([
   'mse-python-check-failure-v1', proof.problemId, proof.entryId, proof.entryVersion,
@@ -98,6 +106,97 @@ export function pythonCheckFailureProofValid(proof, expected = {}) {
     && (expected.command === undefined || proof.commandHash
       === hash(JSON.stringify(['python-command', expected.command])))
     && (expected.summary === undefined || proof.summaryHash === hash(JSON.stringify(expected.summary)))
+}
+
+const pythonReceiptCheckProofSeal = proof => hash(JSON.stringify([
+  'mse-python-receipt-check-failure-v1', proof.problemId, proof.entryId, proof.entryVersion,
+  proof.checkEventId, proof.turnKey, proof.originSessionId, proof.commandHash,
+  proof.summaryHash, proof.reason,
+]))
+
+/** Create bounded provenance for a real paired-entry receipt verification failure. */
+export function buildPythonReceiptCheckFailureProof({ problemId, entryId, entryVersion, checkEventId,
+  turnKey, originSessionId, command, summary } = {}) {
+  if (!hex64(problemId) || typeof entryId !== 'string' || !/^mem_[a-f0-9]{24}$/u.test(entryId)
+    || !Number.isSafeInteger(entryVersion) || entryVersion < 1 || !hex64(checkEventId)
+    || !hex64(turnKey) || !bounded(originSessionId, 512)
+    || typeof command !== 'string' || command.length === 0 || command.length > 4096
+    || !isPlainObject(summary) || summary.kind !== 'python_receipt_contract'
+    || !PYTHON_RECEIPT_FAILURE_REASONS.includes(summary.reason)) return null
+  const proof = { schema: 'mse-python-receipt-check-failure-v1', problemId, entryId, entryVersion,
+    checkEventId, turnKey, originSessionId,
+    commandHash: hash(JSON.stringify(['python-command', command])),
+    summaryHash: hash(JSON.stringify(summary)), reason: summary.reason }
+  proof.seal = pythonReceiptCheckProofSeal(proof)
+  return proof
+}
+
+/** Validate the closed, self-contained receipt failure proof shape. */
+export function pythonReceiptCheckFailureProofValid(proof, expected = {}) {
+  if (!isPlainObject(proof) || !Object.keys(proof).every(key => [
+    'schema', 'problemId', 'entryId', 'entryVersion', 'checkEventId', 'turnKey',
+    'originSessionId', 'commandHash', 'summaryHash', 'reason', 'seal',
+  ].includes(key)) || Object.keys(proof).length !== 11
+    || proof.schema !== 'mse-python-receipt-check-failure-v1' || !hex64(proof.problemId)
+    || typeof proof.entryId !== 'string' || !/^mem_[a-f0-9]{24}$/u.test(proof.entryId)
+    || !Number.isSafeInteger(proof.entryVersion) || proof.entryVersion < 1
+    || !hex64(proof.checkEventId) || !hex64(proof.turnKey)
+    || !bounded(proof.originSessionId, 512) || !hex64(proof.commandHash)
+    || !hex64(proof.summaryHash) || !PYTHON_RECEIPT_FAILURE_REASONS.includes(proof.reason)
+    || !hex64(proof.seal) || proof.seal !== pythonReceiptCheckProofSeal(proof)) return false
+  return ['problemId', 'entryId', 'entryVersion', 'checkEventId', 'turnKey', 'originSessionId', 'reason']
+    .every(key => expected[key] === undefined || expected[key] === proof[key])
+    && (expected.command === undefined || proof.commandHash
+      === hash(JSON.stringify(['python-command', expected.command])))
+    && (expected.summary === undefined || proof.summaryHash === hash(JSON.stringify(expected.summary)))
+}
+
+const pythonReceiptBirthProofSeal = proof => hash(JSON.stringify([
+  'mse-python-receipt-birth-v1', proof.entryId, proof.version, proof.problemId, proof.parentVersion,
+  proof.evidenceIds, proof.requestTicket, proof.requestHash, proof.sourceSessionId, proof.guardCapsuleId,
+  proof.guardTurnKey, proof.guardSessionId, proof.commandHash,
+]))
+
+/** Minimal durable binding for a current receipt lesson after its bounded request/capsule rings rotate. */
+export function buildPythonReceiptBirthProof({ entryId, version, problemId, parentVersion, evidenceIds,
+  requestTicket, requestHash, sourceSessionId, guardCapsuleId, guardTurnKey, guardSessionId, command } = {}) {
+  if (typeof entryId !== 'string' || !/^mem_[a-f0-9]{24}$/u.test(entryId)
+    || !Number.isSafeInteger(version) || version < 2 || parentVersion !== version - 1 || !hex64(problemId)
+    || !Array.isArray(evidenceIds) || evidenceIds.length < 1 || evidenceIds.length > 3
+    || !evidenceIds.every(hex64) || new Set(evidenceIds).size !== evidenceIds.length
+    || !bounded(requestTicket, 64) || !hex64(requestHash) || !bounded(sourceSessionId, 512)
+    || !hex64(guardCapsuleId) || !hex64(guardTurnKey) || !bounded(guardSessionId, 512)
+    || typeof command !== 'string' || command.length === 0 || command.length > 4096) return null
+  const proof = { schema: 'mse-python-receipt-birth-v1', entryId, version, problemId, parentVersion,
+    evidenceIds: [...evidenceIds], requestTicket, requestHash, sourceSessionId, guardCapsuleId, guardTurnKey,
+    guardSessionId, commandHash: hash(JSON.stringify(['python-command', command])) }
+  proof.seal = pythonReceiptBirthProofSeal(proof)
+  return pythonReceiptBirthProofValid(proof) ? proof : null
+}
+
+/** Validate the closed, bounded birth binding and optionally tie it to its current method edition. */
+export function pythonReceiptBirthProofValid(proof, expected = {}) {
+  if (!isPlainObject(proof) || Object.keys(proof).length !== PYTHON_RECEIPT_BIRTH_KEYS.length
+    || !Object.keys(proof).every(key => PYTHON_RECEIPT_BIRTH_KEYS.includes(key))
+    || proof.schema !== 'mse-python-receipt-birth-v1'
+    || typeof proof.entryId !== 'string' || !/^mem_[a-f0-9]{24}$/u.test(proof.entryId)
+    || !Number.isSafeInteger(proof.version) || proof.version < 2
+    || !hex64(proof.problemId) || proof.parentVersion !== proof.version - 1
+    || !Array.isArray(proof.evidenceIds) || proof.evidenceIds.length < 1 || proof.evidenceIds.length > 3
+    || !proof.evidenceIds.every(hex64) || new Set(proof.evidenceIds).size !== proof.evidenceIds.length
+    || !bounded(proof.requestTicket, 64) || !hex64(proof.requestHash)
+    || !bounded(proof.sourceSessionId, 512) || !hex64(proof.guardCapsuleId) || !hex64(proof.guardTurnKey)
+    || !bounded(proof.guardSessionId, 512) || !hex64(proof.commandHash)
+    || !hex64(proof.seal) || proof.seal !== pythonReceiptBirthProofSeal(proof)) return false
+  try {
+    if (Buffer.byteLength(JSON.stringify(proof), 'utf8') > PYTHON_RECEIPT_BIRTH_PROOF_MAX_BYTES) return false
+  } catch { return false }
+  return ['entryId', 'version', 'problemId', 'parentVersion', 'requestTicket', 'requestHash',
+    'sourceSessionId', 'guardCapsuleId', 'guardTurnKey', 'guardSessionId']
+    .every(key => expected[key] === undefined || expected[key] === proof[key])
+    && (expected.evidenceIds === undefined || JSON.stringify(expected.evidenceIds) === JSON.stringify(proof.evidenceIds))
+    && (expected.command === undefined || proof.commandHash
+      === hash(JSON.stringify(['python-command', expected.command])))
 }
 
 const SCRUB_AUTHORITY_GLOBAL = new RegExp(AUTHORITY_PATTERN.source, 'giu')
@@ -193,7 +292,8 @@ export function buildFailureCapsule(input = {}) {
   const checkId = input.checkId === null || input.checkId === undefined ? null
     : (bounded(input.checkId, 128) ? input.checkId : null)
   const checkEventId = hex64(input.checkEventId) ? input.checkEventId : null
-  const checkProof = pythonCheckFailureProofValid(input.checkProof) ? input.checkProof : null
+  const checkProof = pythonCheckFailureProofValid(input.checkProof)
+    || pythonReceiptCheckFailureProofValid(input.checkProof) ? input.checkProof : null
   const message = sanitizeDiagnosticText(input.message)
   const command = sanitizeDiagnosticText(input.command, { maxChars: CAPSULE_COMMAND_CHARS })
   const signature = diagnosticSignature({ failureClass: input.failureClass, exitCode, message })
@@ -284,7 +384,8 @@ export function capsuleValid(capsule) {
     && (capsule.turnKey === undefined || (typeof capsule.turnKey === 'string'
       && /^[a-f0-9]{64}$/u.test(capsule.turnKey)))
     && (capsule.checkEventId === undefined || hex64(capsule.checkEventId))
-    && (capsule.checkProof === undefined || pythonCheckFailureProofValid(capsule.checkProof))
+    && (capsule.checkProof === undefined || pythonCheckFailureProofValid(capsule.checkProof)
+      || pythonReceiptCheckFailureProofValid(capsule.checkProof))
     && capsule.format === FAILURE_EVIDENCE_FORMAT && hex64(capsule.id) && hex64(capsule.eventIdHash)
     && Number.isFinite(capsule.at)
     && (capsule.toolName === null || bounded(capsule.toolName, 64))

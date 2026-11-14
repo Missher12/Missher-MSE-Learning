@@ -35,6 +35,7 @@ import { commitMemoryFile, prepareMemoryDirectory, readBoundedMemoryFileBytes, r
   withMemoryStoreLock, encodeMemoryDocument, decodeMemoryDocument, REQUEST_AUDIT_LIMIT }
   from './storage.mjs'
 import { problemLoopValid, ensureProblemLoop } from '../src/problems.mjs'
+import { PYTHON_RECEIPT_BIRTH_PROOF_MAX_BYTES, pythonReceiptBirthProofValid } from '../src/failure-evidence.mjs'
 import { ADAPTIVE_TASK_OPERATION_IDS } from './adaptive-operations.mjs'
 
 // EVOLUTION016: format 4 adds the version evidence ledger (methodStats / methodHistory /
@@ -196,7 +197,7 @@ const entryValid = entry => isPlainObject(entry)
   && Object.keys(entry).every(key => ['id', 'type', 'status', 'instruction', 'applicability', 'exclusions',
     'visibility', 'originScope', 'originEnvironment', 'originSession', 'originSessions', 'lesson', 'problemSignature',
     'version', 'parentVersion', 'superseded', 'injected', 'recurrences', 'createdAt', 'updatedAt',
-    'lastInjectedAt', 'evidenceHash', 'methodStats', 'factDigest', 'digestDay', 'importedFrom',
+    'lastInjectedAt', 'evidenceHash', 'methodStats', 'pythonReceiptBirthProof', 'factDigest', 'digestDay', 'importedFrom',
     'sourceDigest'].includes(key))
   && entryHex(entry.id)
   && ['rule', 'lesson', 'digest'].includes(entry.type)
@@ -237,6 +238,11 @@ const entryValid = entry => isPlainObject(entry)
   // EVOLUTION016: the CURRENT version's own window. Optional — a format3 entry keeps loading.
   && (entry.methodStats === undefined || entry.methodStats === null
     || methodStatsValid(entry.methodStats))
+  && (entry.pythonReceiptBirthProof === undefined || (entry.type === 'lesson' && entry.lesson !== null
+    && pythonReceiptBirthProofValid(entry.pythonReceiptBirthProof, { entryId: entry.id,
+      version: entry.version, problemId: entry.lesson?.problemId, parentVersion: entry.parentVersion,
+      evidenceIds: entry.lesson?.evidenceIds, command: entry.lesson?.verification?.check })
+    && Buffer.byteLength(JSON.stringify(entry.pythonReceiptBirthProof), 'utf8') <= PYTHON_RECEIPT_BIRTH_PROOF_MAX_BYTES))
   && (entry.factDigest === undefined || entry.factDigest === null || hex64(entry.factDigest))
   && (entry.digestDay === undefined || entry.digestDay === null || dayText(entry.digestDay))
   && (entry.importedFrom === null || (isPlainObject(entry.importedFrom) && hex64(entry.importedFrom.sourceDigest)
@@ -473,6 +479,13 @@ const checkSummaryValid = (checkId, summary, passed) => {
     && summary.reads === 1 && summary.parses === 1
     && (passed ? summary.reason === 'matched'
       : ['output_mismatch', 'bom_not_stripped', 'parse_error', 'source_write_attempted'].includes(summary.reason))
+  if (checkId === 'python-receipt-contract-v1') return Object.keys(summary).every(key =>
+    ['kind', 'entries', 'receiptReads', 'versionHash', 'bindingHash', 'sourceHash', 'reason'].includes(key))
+    && summary.kind === 'python_receipt_contract' && summary.entries === 2 && summary.receiptReads === 2
+    && ['versionHash', 'bindingHash', 'sourceHash'].every(key => hex64(summary[key]))
+    && (passed ? summary.reason === 'matched'
+      : ['wrong_loaded_version', 'missing_loaded_version', 'candidate_file_missing',
+        'probe_exit_nonzero'].includes(summary.reason))
   return false
 }
 const checkEventValid = row => isPlainObject(row)
@@ -480,7 +493,7 @@ const checkEventValid = row => isPlainObject(row)
     'passed', 'summary'].includes(key))
   && hex64(row.id) && Number.isFinite(row.at) && boundedLabel(row.checkId, 128) && hex64(row.turnKey)
   && entryHex(row.entryId) && Number.isSafeInteger(row.entryVersion) && typeof row.passed === 'boolean'
-  && (row.summary === undefined ? row.checkId !== 'python-json-loader-v1'
+  && (row.summary === undefined ? !['python-json-loader-v1', 'python-receipt-contract-v1'].includes(row.checkId)
     : checkSummaryValid(row.checkId, row.summary, row.passed))
 
 const recallStrategyRowValid = row => isPlainObject(row)

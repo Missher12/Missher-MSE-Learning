@@ -34,6 +34,7 @@ import { readModel, mseMessageSource, isMseSource } from './llm.mjs'
 import { SENSITIVE_PATTERN, AUTHORITY_PATTERN } from '../src/failure-evidence.mjs'
 import { runChecker, runDevelopmentChecker } from './checker.mjs'
 import { verifyPythonJsonLoader } from './python-verifier.mjs'
+import { verifyPythonReceiptContract } from './python-receipt-verifier.mjs'
 import { apply as applyRemotes } from './remote.mjs'
 import { localDayKey } from './time.mjs'
 import { isMemoryStorageError } from './storage.mjs'
@@ -86,13 +87,16 @@ function correctionMaterial(text) {
 
 const PYTHON_GUIDANCE_EXPLICIT_OPT_OUT = /(?:\b(?:do not|don't|never|skip)\s+(?:run|execute|test|verify|validate|check)\b|(?:不(?:要|用|必|需|需要)?|无需)(?:执行|运行|验收|验证|测试|检查|调用|跑)|(?<!不要)(?<!别)(?:只|仅)(?:解释|说明)(?:原因|背景)?(?:即可|就好)?)/iu
 const PYTHON_VERIFIER_RUNTIME_GUIDANCE = '仅在本次任务需要执行或验收这条当前 Python/BOM 方法时，才调用 `mse_verify_python` 一次。纯问答或仅解释时不要调用；用户明确要求不执行、不验收时也不要调用。可先只读定位脚本读取的 JSON `inputPath`，再用当前方法原样的 `verification.check` 和 workspace-relative 路径调用。不要用 bash 重跑原始命令，也不要用 bash 退出码或自行打印的内容代替工具结果。路径不确定或结果为 `unknown` 时按未验证报告，不得称为通过。'
+const PYTHON_RECEIPT_RUNTIME_GUIDANCE = '仅在本次任务需要执行或验收这条双入口 receipt 方法时，才调用 `mse_verify_python_receipt` 一次。传入当前方法原样的 `verification.check`，以及从本次明确关联的项目上下文只读定位到的 workspace-relative `projectManifest`；项目身份不清楚时按 unknown 处理。工具只读 manifest 与 receipts，并在宿主 active 插件和 bundle 声明唯一关联时采信实际版本，不猜 expectedVersion，也不把 manifest.version 当已加载版本。按当前方法获授权修复 receipt 时保留 candidateFile 与其它字段；工具只验证，不改脚本、结果或材料来凑通过。它会运行 intake.py 与同目录 counter.py 的原始入口并验证各自实际读取的 receipt。路径不确定或结果为 `unknown` 时按未验证报告。'
 
 const SCOPED_PATTERN = /(?:仅|只)(?:在)?(?:本|这个|该)(?:项目|仓库|库)|(?:在本|这个)(?:项目|仓库)(?:里|中|内)/u
 const textsOf = message => (message?.content ?? [])
   .filter(part => part?.type === 'text').map(part => part.text ?? '')
 const PYTHON_VERIFIER_TOOL = 'mse_verify_python'
 const PYTHON_VERIFIER_CHECK = 'python-json-loader-v1'
-const DEVELOPMENT_CHECK_TOOLS = new Set(['bash', 'pwsh', PYTHON_VERIFIER_TOOL])
+const PYTHON_RECEIPT_TOOL = 'mse_verify_python_receipt'
+const PYTHON_RECEIPT_CHECK = 'python-receipt-contract-v1'
+const DEVELOPMENT_CHECK_TOOLS = new Set(['bash', 'pwsh', PYTHON_VERIFIER_TOOL, PYTHON_RECEIPT_TOOL])
 
 export function apply(ctx, config = {}) {
   const stateRoot = typeof ctx.dshHomePath === 'function'
@@ -187,6 +191,10 @@ export function apply(ctx, config = {}) {
         text: ({ agent } = {}) => {
           const state = agent === null || typeof agent !== 'object' ? null : pythonGuidanceByAgent.get(agent)
           if (state?.allowed !== true) return ''
+          const receiptOffers = safeStoreAction('store_unavailable', () =>
+            engine.developmentRelevantOffers({ sessionId: state.sessionId, turnId: state.turnId,
+              checkId: PYTHON_RECEIPT_CHECK }), 'read') ?? []
+          if (receiptOffers.length === 1) return PYTHON_RECEIPT_RUNTIME_GUIDANCE
           const offers = safeStoreAction('store_unavailable', () =>
             engine.developmentRelevantOffers({ sessionId: state.sessionId, turnId: state.turnId,
               checkId: PYTHON_VERIFIER_CHECK }), 'read') ?? []
@@ -825,12 +833,15 @@ export function apply(ctx, config = {}) {
   const pendingChecks = new Map()   // `${sessionId}\u0000${turnId}` → [{file, cwd, callId}]
   const pendingDevelopmentChecks = new Map() // turn key → bounded checks; credit requires persisted tool/result
   const pythonVerifierProofs = new Map() // exec.token → private, current-turn objective result
+  const pythonReceiptVerifierProofs = new Map() // exec.token → private, current-turn paired-entry receipt result
   let pythonExecutionRuntime = null
+  let pluginManager = null
   // Optional host services: missing sandbox/subprocess support disables only this verifier.
   if (typeof ctx.inject === 'function') {
     ctx.inject(['sandbox', 'subprocess'], runtimeCtx => {
       pythonExecutionRuntime = { sandbox: runtimeCtx.sandbox, subprocess: runtimeCtx.subprocess }
     })
+    ctx.inject(['pluginManager'], runtimeCtx => { pluginManager = runtimeCtx?.pluginManager ?? null })
   }
   const pairedDevelopmentCapacity = (map, key, callId) => {
     const rows = map.get(key) ?? []
@@ -925,9 +936,13 @@ export function apply(ctx, config = {}) {
     }
     if (args === null || typeof args !== 'object' || Array.isArray(args)
       || Object.getPrototypeOf(args) !== Object.prototype || typeof args.command !== 'string'
-      || (exec.name === PYTHON_VERIFIER_TOOL && typeof args.inputPath !== 'string')) return null
+      || (exec.name === PYTHON_VERIFIER_TOOL && typeof args.inputPath !== 'string')
+      || (exec.name === PYTHON_RECEIPT_TOOL && (typeof args.projectManifest !== 'string'
+        || Object.keys(args).length !== 2 || !Object.hasOwn(args, 'command')
+        || !Object.hasOwn(args, 'projectManifest')))) return null
     return { callId, toolName: exec.name, turnId: String(turn), step, callSeq: located.seq,
-      command: args.command, ...(typeof args.inputPath === 'string' ? { inputPath: args.inputPath } : {}) }
+      command: args.command, ...(typeof args.inputPath === 'string' ? { inputPath: args.inputPath } : {}),
+      ...(typeof args.projectManifest === 'string' ? { projectManifest: args.projectManifest } : {}) }
   }
   const pythonUnknown = reason => ({ status: 'unknown', reason })
   if (typeof ctx.tools?.register === 'function') disposers.push(ctx.tools.register({
@@ -988,7 +1003,71 @@ export function apply(ctx, config = {}) {
       pythonVerifierProofs.set(exec.token, { sessionId, turnId: call.turnId, callId: call.callId,
         toolName: PYTHON_VERIFIER_TOOL, callSeq: call.callSeq, step: call.step,
         command: call.command, inputPath: call.inputPath,
-        entryId: offers[0].id, entryVersion: offers[0].version, status: checked.status,
+        checkId: PYTHON_VERIFIER_CHECK, entryId: offers[0].id, entryVersion: offers[0].version, status: checked.status,
+        reason: checked.reason, summary: checked.summary })
+      return { status: checked.status, reason: checked.reason }
+    },
+  }))
+
+  if (typeof ctx.tools?.register === 'function') disposers.push(ctx.tools.register({
+    name: PYTHON_RECEIPT_TOOL,
+    description: 'Use only for a currently recalled source-backed method that requires both Python receipt entrypoints. Pass its exact verification command and the workspace-relative project manifest identified from the task context. The tool reads only the manifest name, resolves the loaded version from the unique active-plugin/bundle-row binding, and runs both frozen entrypoints in the native read-only sandbox. It is not a general Python runner.',
+    parameters: {
+      command: { type: 'string', required: true,
+        description: 'The exact intake.py verification command stored in the current method.' },
+      projectManifest: { type: 'string', required: true,
+        description: 'The workspace-relative package.json path explicitly associated with the target project in the current task context.' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: false, required: ['status', 'reason'], properties: {
+        status: { type: 'string', enum: ['pass', 'fail', 'unknown'] },
+        reason: { type: 'string' },
+      } },
+      render: (_args, value) => [{ type: 'text', text: `Python receipt check: ${value.status} (${value.reason})` }],
+    },
+    async execute(args, exec) {
+      const session = exec?.agent?.session
+      const sessionId = sessionIdOf(session)
+      if (sessionId === undefined || typeof exec?.token !== 'symbol') return pythonUnknown('call_unbound')
+      const call = developmentCallOf(exec, session, sessionId)
+      if (call === null || call.toolName !== PYTHON_RECEIPT_TOOL || call.command !== args.command
+        || call.projectManifest !== args.projectManifest) return pythonUnknown('stale_call')
+      const roots = workspaceRoots()
+      const cwd = cwdOf(session)
+      if (roots === null || !attribution(sessionId, roots) || !isAbsolutePath(cwd)
+        || !pathInside(cwd, roots.map(root => root.path))) return pythonUnknown('workspace_unavailable')
+      const offers = safeStoreAction('checker_state_unavailable', () => engine.developmentRelevantOffers({
+        sessionId, turnId: call.turnId, checkId: PYTHON_RECEIPT_CHECK, command: call.command,
+      }), 'read') ?? []
+      if (offers.length !== 1) return pythonUnknown('no_unique_offer')
+      const key = `${sessionId}\u0000${call.turnId}`
+      if (!pairedDevelopmentCapacity(pendingDevelopmentChecks, key, call.callId)) {
+        return pythonUnknown('check_capacity')
+      }
+      const runtime = pythonExecutionRuntime
+      if (runtime === null || pluginManager === null) return pythonUnknown('execution_unavailable')
+      const checked = await verifyPythonReceiptContract({ command: call.command,
+        projectManifest: call.projectManifest, workspaceRoot: cwd, workspaceRoots: roots,
+        pluginManager, subprocess: runtime.subprocess, sandbox: runtime.sandbox,
+        session, signal: exec.signal,
+        sourceAdmit: () => {
+          const currentRoots = workspaceRoots()
+          return currentRoots !== null && attribution(sessionId, currentRoots) && realInside(cwd, currentRoots)
+        },
+        materialAdmit: material => {
+          const currentRoots = workspaceRoots()
+          return currentRoots !== null && !textMentionsOutside(material, currentRoots, cwd)
+        } })
+      if (!['pass', 'fail'].includes(checked.status) || checked.summary === undefined) {
+        return pythonUnknown(checked.reason ?? 'unknown')
+      }
+      while (pythonReceiptVerifierProofs.size >= 64) {
+        pythonReceiptVerifierProofs.delete(pythonReceiptVerifierProofs.keys().next().value)
+      }
+      pythonReceiptVerifierProofs.set(exec.token, { sessionId, turnId: call.turnId, callId: call.callId,
+        toolName: PYTHON_RECEIPT_TOOL, callSeq: call.callSeq, step: call.step,
+        command: call.command, projectManifest: call.projectManifest,
+        checkId: PYTHON_RECEIPT_CHECK, entryId: offers[0].id, entryVersion: offers[0].version, status: checked.status,
         reason: checked.reason, summary: checked.summary })
       return { status: checked.status, reason: checked.reason }
     },
@@ -1013,19 +1092,24 @@ export function apply(ctx, config = {}) {
       }
     }
     if (earlyId !== undefined) {
-      const proof = exec?.name === PYTHON_VERIFIER_TOOL ? pythonVerifierProofs.get(exec?.token) : undefined
-      if (proof !== undefined) pythonVerifierProofs.delete(exec.token)
+      const proof = exec?.name === PYTHON_VERIFIER_TOOL ? pythonVerifierProofs.get(exec?.token)
+        : exec?.name === PYTHON_RECEIPT_TOOL ? pythonReceiptVerifierProofs.get(exec?.token) : undefined
+      if (proof !== undefined) {
+        if (proof.toolName === PYTHON_VERIFIER_TOOL) pythonVerifierProofs.delete(exec.token)
+        if (proof.toolName === PYTHON_RECEIPT_TOOL) pythonReceiptVerifierProofs.delete(exec.token)
+      }
       const call = developmentCallOf(exec, earlySession, earlyId)
       if (proof !== undefined && call !== null && call.callId === proof.callId
-        && call.toolName === PYTHON_VERIFIER_TOOL && call.turnId === proof.turnId
+        && call.toolName === proof.toolName && call.turnId === proof.turnId
         && call.callSeq === proof.callSeq && call.step === proof.step
         && call.command === proof.command && call.inputPath === proof.inputPath
+        && call.projectManifest === proof.projectManifest
         && proof.sessionId === earlyId && result?.isError === false
         && result?.value?.status === proof.status && result?.value?.reason === proof.reason) {
         const roots = workspaceRoots()
         const offers = roots === null ? [] : safeStoreAction('checker_state_unavailable', () =>
           engine.developmentRelevantOffers({ sessionId: earlyId, turnId: proof.turnId,
-            command: proof.command }), 'read') ?? []
+            checkId: proof.checkId, command: proof.command }), 'read') ?? []
         if (roots !== null && attribution(earlyId, roots) && offers.length === 1
           && offers[0].id === proof.entryId && offers[0].version === proof.entryVersion
           && pairedDevelopmentCapacity(pendingDevelopmentChecks, `${earlyId}\u0000${proof.turnId}`,
@@ -1034,12 +1118,13 @@ export function apply(ctx, config = {}) {
           if (!pendingDevelopmentChecks.has(key)) pendingDevelopmentChecks.set(key, [])
           pendingDevelopmentChecks.get(key).push({ callId: proof.callId, toolName: proof.toolName ?? PYTHON_VERIFIER_TOOL,
             callSeq: proof.callSeq, step: proof.step, persisted: false, isError: false,
-            command: proof.command, inputPath: proof.inputPath,
-            checkId: PYTHON_VERIFIER_CHECK, passed: proof.status === 'pass', summary: proof.summary,
+            command: proof.command, ...(proof.inputPath === undefined ? {} : { inputPath: proof.inputPath }),
+            ...(proof.projectManifest === undefined ? {} : { projectManifest: proof.projectManifest }),
+            checkId: proof.checkId, passed: proof.status === 'pass', summary: proof.summary,
             entryId: proof.entryId, entryVersion: proof.entryVersion })
         }
       }
-      if (call !== null && call.toolName !== PYTHON_VERIFIER_TOOL) {
+      if (call !== null && call.toolName !== PYTHON_VERIFIER_TOOL && call.toolName !== PYTHON_RECEIPT_TOOL) {
         const roots = workspaceRoots()
         const value = result?.value
         const stdout = value?.stdout?.text
@@ -1271,12 +1356,14 @@ export function apply(ctx, config = {}) {
     if (call?.type !== 'tool/call' || call.data?.callId !== callId || call.data?.name !== row.toolName
       || call.data?.turn !== turn || call.data?.step !== step
       || !persistedToolResult(message, callId, row.isError)) return
-    if (row.checkId === PYTHON_VERIFIER_CHECK) {
+    if (row.checkId === PYTHON_VERIFIER_CHECK || row.checkId === PYTHON_RECEIPT_CHECK) {
       let args = call.data?.arguments
       if (typeof args === 'string') {
         try { args = JSON.parse(args) } catch { return }
       }
-      if (args?.command !== row.command || args?.inputPath !== row.inputPath) return
+      if (args?.command !== row.command) return
+      if (row.checkId === PYTHON_VERIFIER_CHECK && args?.inputPath !== row.inputPath) return
+      if (row.checkId === PYTHON_RECEIPT_CHECK && args?.projectManifest !== row.projectManifest) return
     }
     if (typeof session?.eventAt !== 'function' || !Number.isSafeInteger(session?.seq)) return
     const exactLoggedResult = logged => logged?.type === 'tool/result'
@@ -1368,19 +1455,19 @@ export function apply(ctx, config = {}) {
     const developmentChecks = (pendingDevelopmentChecks.get(key) ?? [])
       .filter(check => check.persisted === true)
       .filter(check => {
-        if (check.checkId !== PYTHON_VERIFIER_CHECK) return true
+        if (![PYTHON_VERIFIER_CHECK, PYTHON_RECEIPT_CHECK].includes(check.checkId)) return true
         const offers = safeStoreAction('checker_state_unavailable', () =>
           engine.developmentRelevantOffers({ sessionId, turnId: String(turn),
-            command: check.command }), 'read') ?? []
+            checkId: check.checkId, command: check.command }), 'read') ?? []
         return offers.length === 1 && offers[0].id === check.entryId
           && offers[0].version === check.entryVersion
       })
     pendingDevelopmentChecks.delete(key)
     const cancelled = reason === 'aborted'
     const pythonFailure = cancelled ? null : developmentChecks.find(check =>
-      check.checkId === PYTHON_VERIFIER_CHECK && check.passed === false) ?? null
+      [PYTHON_VERIFIER_CHECK, PYTHON_RECEIPT_CHECK].includes(check.checkId) && check.passed === false) ?? null
     const pythonPass = cancelled ? null : developmentChecks.find(check =>
-      check.checkId === PYTHON_VERIFIER_CHECK && check.passed === true) ?? null
+      [PYTHON_VERIFIER_CHECK, PYTHON_RECEIPT_CHECK].includes(check.checkId) && check.passed === true) ?? null
     let checkSeen = null // {file, status, reason} — failures dominate passes objectively
     // A CANCELLED turn settles as cancelled, full stop: an artifact that happened to land first
     // gets no success credit and no recurrence charge for anybody's lesson — the queue is dropped.
@@ -1413,11 +1500,11 @@ export function apply(ctx, config = {}) {
       : pythonPass !== null || checkSeen?.status === 'pass' ? 'verified' : 'unknown'
     const completed = safeStoreAction('turn_state_unavailable', () => engine.complete({ sessionId, turnId: String(turn), outcome,
       evidence: outcome === 'failed' ? (failed ? '本回合存在真实工具失败记录'
-        : pythonFailure !== null ? `Python JSON 客观检查未通过（${pythonFailure.summary.reason}）`
+        : pythonFailure !== null ? `${pythonFailure.checkId === PYTHON_RECEIPT_CHECK ? 'Python receipt' : 'Python JSON'} 客观检查未通过（${pythonFailure.summary.reason}）`
           : `产物检查未通过：${checkSeen.file}（${checkSeen.reason}）`)
         : outcome === 'cancelled' ? '回合被取消'
           : outcome === 'verified' ? pythonPass !== null
-            ? `Python JSON/BOM 客观检查通过（${pythonPass.summary.reason}）`
+            ? `${pythonPass.checkId === PYTHON_RECEIPT_CHECK ? 'Python receipt 双入口' : 'Python JSON/BOM'} 客观检查通过（${pythonPass.summary.reason}）`
             : `产物检查通过：${checkSeen.file}（${checkSeen.reason}）`
             : '回合完成，无客观检查记录' }))
     safeStoreAction('turn_digest_sync_unavailable', () => engine.syncDigest())

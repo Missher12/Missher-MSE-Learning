@@ -24,6 +24,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { check, LearningError } from '../src/store.mjs'
 import { analyze } from '../src/recall.mjs'
 import { sanitizeDiagnosticText, buildFailureCapsule, buildPythonCheckFailureProof,
+  buildPythonReceiptCheckFailureProof,
   appendCapsuleToRow, enforceCapsuleBudget,
   SENSITIVE_PATTERN, AUTHORITY_PATTERN } from '../src/failure-evidence.mjs'
 import { validateFailureLessonOutput, evidenceTokenHashes } from '../src/failure-lessons.mjs'
@@ -47,7 +48,8 @@ import { addAdaptiveCandidate, competeAdaptiveCandidate, adaptivePolicyMatches, 
   adaptiveQueryKey, adaptiveTaskFeatures, narrowAdaptivePolicy,
   synthesizeAdaptiveTaskPolicy } from './adaptive-recall.mjs'
 import { developmentCheckMatchesVerification, developmentCheckIdForCommand, pythonCommandSpec,
-  pythonBOMLessonEvidenceSupported }
+  pythonReceiptCommandSpec, pythonBOMLessonEvidenceSupported, pythonReceiptLessonBirthProofFor,
+  pythonReceiptLessonEvidenceSupported }
   from './checker.mjs'
 import { replayAdaptivePolicy } from './adaptive-replay.mjs'
 import { localDayKey } from './time.mjs'
@@ -2275,8 +2277,19 @@ export class RebuildEngine {
       && summary.reads === 1 && summary.parses === 1
       && (passed ? summary.reason === 'matched'
         : ['output_mismatch', 'bom_not_stripped', 'parse_error', 'source_write_attempted'].includes(summary.reason))
-    check((summary === null && !['pytest-summary-v1', 'python-json-loader-v1'].includes(checkId)) || nodeSummary || typeSummary
-      || pytestSummary || pythonSummary, 'invalid_check_summary')
+    const pythonReceiptSummary = checkId === 'python-receipt-contract-v1'
+      && summary?.kind === 'python_receipt_contract'
+      && Object.keys(summary).every(key => ['kind', 'entries', 'receiptReads', 'versionHash',
+        'bindingHash', 'sourceHash', 'reason'].includes(key))
+      && summary.entries === 2 && summary.receiptReads === 2
+      && ['versionHash', 'bindingHash', 'sourceHash'].every(key =>
+        typeof summary[key] === 'string' && /^[a-f0-9]{64}$/u.test(summary[key]))
+      && (passed ? summary.reason === 'matched'
+        : ['wrong_loaded_version', 'missing_loaded_version', 'candidate_file_missing',
+          'probe_exit_nonzero'].includes(summary.reason))
+    check((summary === null && !['pytest-summary-v1', 'python-json-loader-v1',
+      'python-receipt-contract-v1'].includes(checkId)) || nodeSummary || typeSummary
+      || pytestSummary || pythonSummary || pythonReceiptSummary, 'invalid_check_summary')
     const turnKey = turnKeyOf(sessionId, turnId)
     const eventIdHash = digestOf(['check-event', eventId])
     return this.store.transaction(doc => {
@@ -2321,11 +2334,22 @@ export class RebuildEngine {
       }
       const offered = attribution.offered
       const target = attribution.target
+      let receiptBirthProof = null
       if (checkId === 'python-json-loader-v1') {
         const problem = doc.problemLoop?.problems.find(row => row.id === target.record.lesson?.problemId)
         if (target.kind !== 'current'
           || !pythonBOMLessonEvidenceSupported(target.record.lesson, problem,
             { doc, entryId, version: target.record.version })) {
+          return { ok: true, settled: false, reason: 'objective_contract_mismatch' }
+        }
+      }
+      if (checkId === 'python-receipt-contract-v1') {
+        const problem = doc.problemLoop?.problems.find(row => row.id === target.record.lesson?.problemId)
+        const context = { doc, entry: target.record, entryId, version: target.record.version,
+          sourceAdmitted: source => this.#sourceOk(source) === true }
+        receiptBirthProof = pythonReceiptLessonBirthProofFor(target.record.lesson, problem, context)
+        if (target.kind !== 'current'
+          || !pythonReceiptLessonEvidenceSupported(target.record.lesson, problem, context)) {
           return { ok: true, settled: false, reason: 'objective_contract_mismatch' }
         }
       }
@@ -2343,6 +2367,7 @@ export class RebuildEngine {
       if (entry === undefined || entry.status === 'retired' || entry.type !== 'lesson') {
         return { ok: true, settled: false, reason: 'entry_not_creditable' }
       }
+      if (receiptBirthProof !== null) entry.pythonReceiptBirthProof = receiptBirthProof
       let pythonFailureCapsule = null
       let pythonFailureProblem = null
       if (checkId === 'python-json-loader-v1' && passed === false) {
@@ -2359,6 +2384,25 @@ export class RebuildEngine {
         pythonFailureCapsule = buildFailureCapsule({ eventId, at: this.now(),
           toolName: 'mse_verify_python', failureClass: 'checker_contract_failure',
           message: `Python JSON/BOM objective check failed: ${summary.reason}`,
+          checkId, checkEventId: eventIdHash, checkProof, originSessionId: sessionId, turnKey })
+        if (pythonFailureCapsule === null) {
+          return { ok: true, settled: false, reason: 'objective_evidence_unavailable' }
+        }
+      }
+      if (checkId === 'python-receipt-contract-v1' && passed === false) {
+        pythonFailureProblem = doc.problemLoop?.problems.find(row => row.id === target.record.lesson?.problemId)
+        if (pythonFailureProblem === undefined) {
+          return { ok: true, settled: false, reason: 'objective_evidence_missing' }
+        }
+        const checkProof = buildPythonReceiptCheckFailureProof({ problemId: pythonFailureProblem.id,
+          entryId, entryVersion: offered.version, checkEventId: eventIdHash, turnKey, originSessionId: sessionId,
+          command: target.record.lesson.verification.check, summary })
+        if (checkProof === null) {
+          return { ok: true, settled: false, reason: 'objective_evidence_unavailable' }
+        }
+        pythonFailureCapsule = buildFailureCapsule({ eventId, at: this.now(),
+          toolName: 'mse_verify_python_receipt', failureClass: 'checker_contract_failure',
+          message: `Python receipt objective check failed: ${summary.reason}`,
           checkId, checkEventId: eventIdHash, checkProof, originSessionId: sessionId, turnKey })
         if (pythonFailureCapsule === null) {
           return { ok: true, settled: false, reason: 'objective_evidence_unavailable' }
@@ -2402,8 +2446,11 @@ export class RebuildEngine {
           pythonFailureProblem.evidence = [...pythonFailureProblem.evidence, evidence].slice(-EVIDENCE_LIMIT)
           pythonFailureProblem.evidenceRevision += 1
           pythonFailureProblem.count = Math.min(PROBLEM_COUNT_CAP, pythonFailureProblem.count + 1)
-          pythonFailureProblem.summary = `Python JSON/BOM objective check failed: ${summary.reason}`
-          pythonFailureProblem.reason = 'python_check_failed'
+          pythonFailureProblem.summary = checkId === 'python-receipt-contract-v1'
+            ? `Python receipt objective check failed: ${summary.reason}`
+            : `Python JSON/BOM objective check failed: ${summary.reason}`
+          pythonFailureProblem.reason = checkId === 'python-receipt-contract-v1'
+            ? 'python_receipt_check_failed' : 'python_check_failed'
           pythonFailureProblem.nextAttemptAt = 0
           pythonFailureProblem.lastAt = evidence.at
           pythonFailureProblem.updatedAt = evidence.at
@@ -2460,10 +2507,11 @@ export class RebuildEngine {
 
   /** Offers for one supported check and exact lesson version, never guards/rules. */
   developmentRelevantOffers({ sessionId, turnId, checkId, command }) {
-    const observedCheck = typeof command === 'string'
-      ? developmentCheckIdForCommand(command) : checkId
+    const observedCheck = typeof checkId === 'string' ? checkId
+      : typeof command === 'string' ? developmentCheckIdForCommand(command) : undefined
     if (typeof observedCheck !== 'string'
-      || !['node-test-runner-spec-v1', 'typescript-noemit-v1', 'pytest-summary-v1', 'python-json-loader-v1'].includes(observedCheck)) return []
+      || !['node-test-runner-spec-v1', 'typescript-noemit-v1', 'pytest-summary-v1',
+        'python-json-loader-v1', 'python-receipt-contract-v1'].includes(observedCheck)) return []
     const turnKey = turnKeyOf(sessionId, turnId)
     const doc = this.store.read()
     const receipt = doc.receipts.find(row => row.turnKey === turnKey)
@@ -2479,6 +2527,16 @@ export class RebuildEngine {
             { doc, entryId: attribution.target.record.id, version: attribution.target.record.version }))) {
         return false
       }
+      if (observedCheck === 'python-receipt-contract-v1'
+        && (attribution.target.kind !== 'current'
+          || pythonReceiptCommandSpec(attribution.target.record.lesson?.verification?.check) === null
+          || !pythonReceiptLessonEvidenceSupported(attribution.target.record.lesson,
+            doc.problemLoop?.problems.find(problem => problem.id === attribution.target.record.lesson?.problemId),
+            { doc, entry: attribution.target.record, entryId: attribution.target.record.id,
+              version: attribution.target.record.version,
+              sourceAdmitted: source => this.#sourceOk(source) === true }))) {
+        return false
+      }
       const sources = editionSources(attribution.target.record)
       if (this.sourceGuard === null || this.#sourceOk(sessionId) !== true
         || sources.length === 0 || !sources.every(source => this.#sourceOk(source) === true)
@@ -2487,7 +2545,8 @@ export class RebuildEngine {
       return typeof command === 'string'
         ? developmentCheckMatchesVerification(declared, command)
         : observedCheck === 'python-json-loader-v1'
-          ? pythonCommandSpec(declared) !== null : declared === observedCheck
+          ? pythonCommandSpec(declared) !== null : observedCheck === 'python-receipt-contract-v1'
+            ? pythonReceiptCommandSpec(declared) !== null : declared === observedCheck
     }).map(({ id, version }) => ({ id, version }))
     return matches.length === 1 ? matches : []
   }
@@ -3695,6 +3754,7 @@ export class RebuildEngine {
         rootCause: lesson.rootCause, repairSteps: lesson.repairSteps, verification: lesson.verification }
       entry.parentVersion = entry.version
       entry.version += 1
+      delete entry.pythonReceiptBirthProof
       entry.status = 'pending'
       // The new edition starts with EMPTY evidence and its OWN window — never inherited results.
       entry.methodStats = { version: entry.version, since: this.now(), coverage: 'complete',
