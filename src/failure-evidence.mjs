@@ -53,6 +53,52 @@ const isPlainObject = value => value !== null && typeof value === 'object'
   && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
 const bounded = (value, max) => typeof value === 'string' && value.length > 0 && value.length <= max
   && /[\u0000-\u001f\u007f]/u.test(value) === false
+const PYTHON_CHECK_FAILURE_REASONS = Object.freeze([
+  'output_mismatch', 'bom_not_stripped', 'parse_error', 'source_write_attempted',
+])
+
+const pythonCheckProofSeal = proof => hash(JSON.stringify([
+  'mse-python-check-failure-v1', proof.problemId, proof.entryId, proof.entryVersion,
+  proof.checkEventId, proof.turnKey, proof.originSessionId, proof.commandHash,
+  proof.summaryHash, proof.reason,
+]))
+
+/** Create bounded engine-side provenance for a real, paired Python objective failure. */
+export function buildPythonCheckFailureProof({ problemId, entryId, entryVersion, checkEventId,
+  turnKey, originSessionId, command, summary } = {}) {
+  if (!hex64(problemId) || typeof entryId !== 'string' || !/^mem_[a-f0-9]{24}$/u.test(entryId)
+    || !Number.isSafeInteger(entryVersion) || entryVersion < 1 || !hex64(checkEventId)
+    || !hex64(turnKey) || !bounded(originSessionId, 512)
+    || typeof command !== 'string' || command.length === 0 || command.length > 4096
+    || !isPlainObject(summary) || summary.kind !== 'python_json_loader'
+    || !PYTHON_CHECK_FAILURE_REASONS.includes(summary.reason)) return null
+  const proof = { schema: 'mse-python-check-failure-v1', problemId, entryId, entryVersion,
+    checkEventId, turnKey, originSessionId,
+    commandHash: hash(JSON.stringify(['python-command', command])),
+    summaryHash: hash(JSON.stringify(summary)), reason: summary.reason }
+  proof.seal = pythonCheckProofSeal(proof)
+  return proof
+}
+
+/** Validate the closed, self-contained proof shape; optional expected fields bind it to a caller. */
+export function pythonCheckFailureProofValid(proof, expected = {}) {
+  if (!isPlainObject(proof) || !Object.keys(proof).every(key => [
+    'schema', 'problemId', 'entryId', 'entryVersion', 'checkEventId', 'turnKey',
+    'originSessionId', 'commandHash', 'summaryHash', 'reason', 'seal',
+  ].includes(key)) || Object.keys(proof).length !== 11
+    || proof.schema !== 'mse-python-check-failure-v1' || !hex64(proof.problemId)
+    || typeof proof.entryId !== 'string' || !/^mem_[a-f0-9]{24}$/u.test(proof.entryId)
+    || !Number.isSafeInteger(proof.entryVersion) || proof.entryVersion < 1
+    || !hex64(proof.checkEventId) || !hex64(proof.turnKey)
+    || !bounded(proof.originSessionId, 512) || !hex64(proof.commandHash)
+    || !hex64(proof.summaryHash) || !PYTHON_CHECK_FAILURE_REASONS.includes(proof.reason)
+    || !hex64(proof.seal) || proof.seal !== pythonCheckProofSeal(proof)) return false
+  return ['problemId', 'entryId', 'entryVersion', 'checkEventId', 'turnKey', 'originSessionId', 'reason']
+    .every(key => expected[key] === undefined || expected[key] === proof[key])
+    && (expected.command === undefined || proof.commandHash
+      === hash(JSON.stringify(['python-command', expected.command])))
+    && (expected.summary === undefined || proof.summaryHash === hash(JSON.stringify(expected.summary)))
+}
 
 const SCRUB_AUTHORITY_GLOBAL = new RegExp(AUTHORITY_PATTERN.source, 'giu')
 
@@ -146,6 +192,8 @@ export function buildFailureCapsule(input = {}) {
   const exitCode = Number.isSafeInteger(input.exitCode) ? input.exitCode : null
   const checkId = input.checkId === null || input.checkId === undefined ? null
     : (bounded(input.checkId, 128) ? input.checkId : null)
+  const checkEventId = hex64(input.checkEventId) ? input.checkEventId : null
+  const checkProof = pythonCheckFailureProofValid(input.checkProof) ? input.checkProof : null
   const message = sanitizeDiagnosticText(input.message)
   const command = sanitizeDiagnosticText(input.command, { maxChars: CAPSULE_COMMAND_CHARS })
   const signature = diagnosticSignature({ failureClass: input.failureClass, exitCode, message })
@@ -162,7 +210,9 @@ export function buildFailureCapsule(input = {}) {
       toolName ?? '', input.failureClass, signature ?? ''])),
     eventIdHash: hash(eventId), at, toolName, failureClass: input.failureClass, exitCode, signature,
     command, message, checkId, ...(originSessionId === null ? {} : { originSessionId }),
-    ...(turnKey === null ? {} : { turnKey }) }
+    ...(turnKey === null ? {} : { turnKey }),
+    ...(checkEventId === null ? {} : { checkEventId }),
+    ...(checkProof === null ? {} : { checkProof }) }
   // Shrink the free-text halves until the WHOLE serialized capsule fits the 2048 B contract. The
   // structured facts (id, class, exit code, signature) are never sacrificed for text.
   const fits = () => Buffer.byteLength(JSON.stringify(capsule), 'utf8') <= CAPSULE_MAX_BYTES
@@ -226,13 +276,15 @@ export function capsuleValid(capsule) {
   return isPlainObject(capsule)
     && Object.keys(capsule).every(key => ['format', 'id', 'eventIdHash', 'at', 'toolName', 'failureClass',
       'exitCode', 'signature', 'command', 'message', 'checkId', 'followUp', 'originSessionId',
-      'turnKey'].includes(key))
+      'turnKey', 'checkEventId', 'checkProof'].includes(key))
     // MSE21-FIX1: optional immutable capsule provenance; absent in old capsules.
     && (capsule.originSessionId === undefined || (typeof capsule.originSessionId === 'string'
       && capsule.originSessionId.length > 0 && capsule.originSessionId.length <= 512
       && !/[\u0000-\u001f\u007f]/u.test(capsule.originSessionId)))
     && (capsule.turnKey === undefined || (typeof capsule.turnKey === 'string'
       && /^[a-f0-9]{64}$/u.test(capsule.turnKey)))
+    && (capsule.checkEventId === undefined || hex64(capsule.checkEventId))
+    && (capsule.checkProof === undefined || pythonCheckFailureProofValid(capsule.checkProof))
     && capsule.format === FAILURE_EVIDENCE_FORMAT && hex64(capsule.id) && hex64(capsule.eventIdHash)
     && Number.isFinite(capsule.at)
     && (capsule.toolName === null || bounded(capsule.toolName, 64))

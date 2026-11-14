@@ -33,6 +33,7 @@ import { RebuildEngine, pathInside, TEMPORARY_SCOPE, REVISION_INTENT } from './e
 import { readModel, mseMessageSource, isMseSource } from './llm.mjs'
 import { SENSITIVE_PATTERN, AUTHORITY_PATTERN } from '../src/failure-evidence.mjs'
 import { runChecker, runDevelopmentChecker } from './checker.mjs'
+import { verifyPythonJsonLoader } from './python-verifier.mjs'
 import { apply as applyRemotes } from './remote.mjs'
 import { localDayKey } from './time.mjs'
 import { isMemoryStorageError } from './storage.mjs'
@@ -86,7 +87,9 @@ function correctionMaterial(text) {
 const SCOPED_PATTERN = /(?:仅|只)(?:在)?(?:本|这个|该)(?:项目|仓库|库)|(?:在本|这个)(?:项目|仓库)(?:里|中|内)/u
 const textsOf = message => (message?.content ?? [])
   .filter(part => part?.type === 'text').map(part => part.text ?? '')
-const DEVELOPMENT_SHELL_TOOLS = new Set(['bash', 'pwsh'])
+const PYTHON_VERIFIER_TOOL = 'mse_verify_python'
+const PYTHON_VERIFIER_CHECK = 'python-json-loader-v1'
+const DEVELOPMENT_CHECK_TOOLS = new Set(['bash', 'pwsh', PYTHON_VERIFIER_TOOL])
 
 export function apply(ctx, config = {}) {
   const stateRoot = typeof ctx.dshHomePath === 'function'
@@ -754,6 +757,14 @@ export function apply(ctx, config = {}) {
   const jsonWrites = new Map()      // exec.token → {sessionId, turnId, file, cwd, callId}
   const pendingChecks = new Map()   // `${sessionId}\u0000${turnId}` → [{file, cwd, callId}]
   const pendingDevelopmentChecks = new Map() // turn key → bounded checks; credit requires persisted tool/result
+  const pythonVerifierProofs = new Map() // exec.token → private, current-turn objective result
+  let pythonExecutionRuntime = null
+  // Optional host services: missing sandbox/subprocess support disables only this verifier.
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['sandbox', 'subprocess'], runtimeCtx => {
+      pythonExecutionRuntime = { sandbox: runtimeCtx.sandbox, subprocess: runtimeCtx.subprocess }
+    })
+  }
   const pairedDevelopmentCapacity = (map, key, callId) => {
     const rows = map.get(key) ?? []
     return (map.has(key) || map.size < 64) && rows.length < 16
@@ -831,7 +842,7 @@ export function apply(ctx, config = {}) {
     exec.rootCallId ?? exec.callId, session)?.event ?? null
   const developmentCallOf = (exec, session, sessionId) => {
     const callId = exec?.rootCallId ?? exec?.callId
-    if (!DEVELOPMENT_SHELL_TOOLS.has(exec?.name) || typeof callId !== 'string' || callId.length === 0
+    if (!DEVELOPMENT_CHECK_TOOLS.has(exec?.name) || typeof callId !== 'string' || callId.length === 0
       || callId.length > 512) return null
     const located = callEventLocationOf(callId, session)
     const callEvent = located?.event
@@ -846,9 +857,76 @@ export function apply(ctx, config = {}) {
       try { args = JSON.parse(args) } catch { return null }
     }
     if (args === null || typeof args !== 'object' || Array.isArray(args)
-      || Object.getPrototypeOf(args) !== Object.prototype || typeof args.command !== 'string') return null
-    return { callId, toolName: exec.name, turnId: String(turn), step, callSeq: located.seq, command: args.command }
+      || Object.getPrototypeOf(args) !== Object.prototype || typeof args.command !== 'string'
+      || (exec.name === PYTHON_VERIFIER_TOOL && typeof args.inputPath !== 'string')) return null
+    return { callId, toolName: exec.name, turnId: String(turn), step, callSeq: located.seq,
+      command: args.command, ...(typeof args.inputPath === 'string' ? { inputPath: args.inputPath } : {}) }
   }
+  const pythonUnknown = reason => ({ status: 'unknown', reason })
+  if (typeof ctx.tools?.register === 'function') disposers.push(ctx.tools.register({
+    name: PYTHON_VERIFIER_TOOL,
+    description: 'Use only for a currently recalled MSE method whose exact verification check is a direct python/python3 JSON or UTF-8 BOM loader script. Pass the exact stored verification command and the workspace-relative JSON input path read by that script. This tool checks that exactly one current method version is offered, then runs one frozen copy under the host native read-only file sandbox and checks the parsed output against the original JSON. It is not a general Python runner.',
+    parameters: {
+      command: { type: 'string', required: true,
+        description: 'The exact direct Python command stored in the currently recalled method, unchanged.' },
+      inputPath: { type: 'string', required: true,
+        description: 'The workspace-relative .json input path that the script reads.' },
+    },
+    output: {
+      schema: { type: 'object', additionalProperties: false, required: ['status', 'reason'], properties: {
+        status: { type: 'string', enum: ['pass', 'fail', 'unknown'] },
+        reason: { type: 'string' },
+      } },
+      render: (_args, value) => [{ type: 'text', text: `Python JSON check: ${value.status} (${value.reason})` }],
+    },
+    async execute(args, exec) {
+      const session = exec?.agent?.session
+      const sessionId = sessionIdOf(session)
+      if (sessionId === undefined || typeof exec?.token !== 'symbol') {
+        return pythonUnknown('call_unbound')
+      }
+      const call = developmentCallOf(exec, session, sessionId)
+      if (call === null || call.toolName !== PYTHON_VERIFIER_TOOL || call.command !== args.command
+        || call.inputPath !== args.inputPath) return pythonUnknown('stale_call')
+      const roots = workspaceRoots()
+      const cwd = cwdOf(session)
+      if (roots === null || !attribution(sessionId, roots) || !isAbsolutePath(cwd)
+        || !pathInside(cwd, roots.map(root => root.path))) return pythonUnknown('workspace_unavailable')
+      const offers = safeStoreAction('checker_state_unavailable', () =>
+        engine.developmentRelevantOffers({ sessionId, turnId: call.turnId, command: call.command }), 'read') ?? []
+      if (offers.length !== 1) return pythonUnknown('no_unique_offer')
+      const key = `${sessionId}\u0000${call.turnId}`
+      if (!pairedDevelopmentCapacity(pendingDevelopmentChecks, key, call.callId)) {
+        return pythonUnknown('check_capacity')
+      }
+      const runtime = pythonExecutionRuntime
+      if (runtime === null) return pythonUnknown('execution_unavailable')
+
+      const checked = await verifyPythonJsonLoader({ command: call.command, inputPath: call.inputPath,
+        workspaceRoot: cwd, workspaceRoots: roots, subprocess: runtime.subprocess,
+        sandbox: runtime.sandbox, session, signal: exec.signal,
+        sourceAdmit: () => {
+          const currentRoots = workspaceRoots()
+          return currentRoots !== null && attribution(sessionId, currentRoots)
+            && realInside(cwd, currentRoots)
+        },
+        materialAdmit: material => {
+          const currentRoots = workspaceRoots()
+          return currentRoots !== null && !textMentionsOutside(material, currentRoots, cwd)
+        } })
+      if (!['pass', 'fail'].includes(checked.status) || checked.summary === undefined) {
+        return pythonUnknown(checked.reason ?? 'unknown')
+      }
+      while (pythonVerifierProofs.size >= 64) pythonVerifierProofs.delete(pythonVerifierProofs.keys().next().value)
+      pythonVerifierProofs.set(exec.token, { sessionId, turnId: call.turnId, callId: call.callId,
+        toolName: PYTHON_VERIFIER_TOOL, callSeq: call.callSeq, step: call.step,
+        command: call.command, inputPath: call.inputPath,
+        entryId: offers[0].id, entryVersion: offers[0].version, status: checked.status,
+        reason: checked.reason, summary: checked.summary })
+      return { status: checked.status, reason: checked.reason }
+    },
+  }))
+
   disposers.push(ctx.on('tools/result', (exec, result) => {
     const earlySession = exec?.agent?.session
     const earlyId = sessionIdOf(earlySession)
@@ -868,8 +946,33 @@ export function apply(ctx, config = {}) {
       }
     }
     if (earlyId !== undefined) {
+      const proof = exec?.name === PYTHON_VERIFIER_TOOL ? pythonVerifierProofs.get(exec?.token) : undefined
+      if (proof !== undefined) pythonVerifierProofs.delete(exec.token)
       const call = developmentCallOf(exec, earlySession, earlyId)
-      if (call !== null) {
+      if (proof !== undefined && call !== null && call.callId === proof.callId
+        && call.toolName === PYTHON_VERIFIER_TOOL && call.turnId === proof.turnId
+        && call.callSeq === proof.callSeq && call.step === proof.step
+        && call.command === proof.command && call.inputPath === proof.inputPath
+        && proof.sessionId === earlyId && result?.isError === false
+        && result?.value?.status === proof.status && result?.value?.reason === proof.reason) {
+        const roots = workspaceRoots()
+        const offers = roots === null ? [] : safeStoreAction('checker_state_unavailable', () =>
+          engine.developmentRelevantOffers({ sessionId: earlyId, turnId: proof.turnId,
+            command: proof.command }), 'read') ?? []
+        if (roots !== null && attribution(earlyId, roots) && offers.length === 1
+          && offers[0].id === proof.entryId && offers[0].version === proof.entryVersion
+          && pairedDevelopmentCapacity(pendingDevelopmentChecks, `${earlyId}\u0000${proof.turnId}`,
+            proof.callId)) {
+          const key = `${earlyId}\u0000${proof.turnId}`
+          if (!pendingDevelopmentChecks.has(key)) pendingDevelopmentChecks.set(key, [])
+          pendingDevelopmentChecks.get(key).push({ callId: proof.callId, toolName: proof.toolName ?? PYTHON_VERIFIER_TOOL,
+            callSeq: proof.callSeq, step: proof.step, persisted: false, isError: false,
+            command: proof.command, inputPath: proof.inputPath,
+            checkId: PYTHON_VERIFIER_CHECK, passed: proof.status === 'pass', summary: proof.summary,
+            entryId: proof.entryId, entryVersion: proof.entryVersion })
+        }
+      }
+      if (call !== null && call.toolName !== PYTHON_VERIFIER_TOOL) {
         const roots = workspaceRoots()
         const value = result?.value
         const stdout = value?.stdout?.text
@@ -1057,28 +1160,61 @@ export function apply(ctx, config = {}) {
 
   // The host calls tools/result before BatchSettlement.commit appends session tool/result.
   // Keep only the bounded count-only observation until that exact durable event appears.
+  const nativeToolResultParts = message => Array.isArray(message?.content)
+    ? message.content.filter(part => part?.type === 'tool-result') : []
+  const persistedToolResult = (message, callId, isError) => {
+    const parts = nativeToolResultParts(message)
+    if (parts.length === 1) {
+      const part = parts[0]
+      return message?.role === 'user' && message?.source?.kind === 'tool'
+        && message.source.callId === callId && part.toolCallId === callId
+        && typeof part.isError === 'boolean' && part.isError === isError
+    }
+    return message?.role === 'tool' && message?.source?.kind === 'tool'
+      && message.source.callId === callId && message?.toolCallId === callId
+      && typeof message?.isError === 'boolean' && message.isError === isError
+  }
+  const persistedToolCallId = message => {
+    const parts = nativeToolResultParts(message)
+    if (parts.length === 1) return message?.source?.kind === 'tool'
+      && message.source.callId === parts[0]?.toolCallId ? parts[0].toolCallId : null
+    return message?.role === 'tool' && message?.source?.kind === 'tool'
+      && message.source.callId === message?.toolCallId ? message.toolCallId : null
+  }
+  const persistedToolText = message => {
+    const parts = nativeToolResultParts(message)
+    const blocks = parts.length === 1 && Array.isArray(parts[0].content) ? parts[0].content
+      : Array.isArray(message?.content) ? message.content : []
+    return blocks.filter(part => part?.type === 'text' && typeof part.text === 'string')
+      .map(part => part.text).join('\n')
+  }
   const capturePersistedDevelopmentResult = (session, event, sessionId) => {
     if (event?.type !== 'tool/result' || sessionId === undefined) return
     const turn = event.data?.turn
     const step = event.data?.step
-    const callId = event.data?.message?.toolCallId
+    const message = event.data?.message
+    const callId = persistedToolCallId(message)
     if (!Number.isSafeInteger(turn) || !Number.isSafeInteger(step)
       || typeof callId !== 'string' || foregroundTurns.get(sessionId) !== String(turn)) return
     const key = `${sessionId}\u0000${String(turn)}`
     const rows = pendingDevelopmentChecks.get(key)
     const row = rows?.find(item => item.callId === callId && item.step === step && item.persisted !== true)
     if (row === undefined) return
-    const message = event.data.message
     const call = session?.eventAt?.(row.callSeq)
     if (call?.type !== 'tool/call' || call.data?.callId !== callId || call.data?.name !== row.toolName
       || call.data?.turn !== turn || call.data?.step !== step
-      || message?.role !== 'tool' || message?.source?.kind !== 'tool'
-      || message.source.callId !== callId
-      || typeof message?.isError !== 'boolean' || message.isError !== row.isError) return
+      || !persistedToolResult(message, callId, row.isError)) return
+    if (row.checkId === PYTHON_VERIFIER_CHECK) {
+      let args = call.data?.arguments
+      if (typeof args === 'string') {
+        try { args = JSON.parse(args) } catch { return }
+      }
+      if (args?.command !== row.command || args?.inputPath !== row.inputPath) return
+    }
     if (typeof session?.eventAt !== 'function' || !Number.isSafeInteger(session?.seq)) return
     const exactLoggedResult = logged => logged?.type === 'tool/result'
       && logged.data?.turn === turn && logged.data?.step === step
-      && logged.data?.message?.toolCallId === callId
+      && persistedToolResult(logged.data?.message, callId, row.isError)
     let resultSeq = Number.isSafeInteger(event.seq) && exactLoggedResult(session.eventAt(event.seq))
       ? event.seq : -1
     if (resultSeq < 0) {
@@ -1091,7 +1227,7 @@ export function apply(ctx, config = {}) {
     }
     if (resultSeq <= row.callSeq || !exactLoggedResult(session.eventAt(resultSeq))) return
     const roots = workspaceRoots()
-    const output = Array.isArray(message.content) ? textsOf(message).join('\n') : ''
+    const output = persistedToolText(message)
     const eventError = String(event.data?.error?.message ?? '')
     if (roots === null) {
       engine.noteCollectionSkip('registry_unavailable', 0)
@@ -1162,8 +1298,20 @@ export function apply(ctx, config = {}) {
     pendingChecks.delete(key)
     const developmentChecks = (pendingDevelopmentChecks.get(key) ?? [])
       .filter(check => check.persisted === true)
+      .filter(check => {
+        if (check.checkId !== PYTHON_VERIFIER_CHECK) return true
+        const offers = safeStoreAction('checker_state_unavailable', () =>
+          engine.developmentRelevantOffers({ sessionId, turnId: String(turn),
+            command: check.command }), 'read') ?? []
+        return offers.length === 1 && offers[0].id === check.entryId
+          && offers[0].version === check.entryVersion
+      })
     pendingDevelopmentChecks.delete(key)
     const cancelled = reason === 'aborted'
+    const pythonFailure = cancelled ? null : developmentChecks.find(check =>
+      check.checkId === PYTHON_VERIFIER_CHECK && check.passed === false) ?? null
+    const pythonPass = cancelled ? null : developmentChecks.find(check =>
+      check.checkId === PYTHON_VERIFIER_CHECK && check.passed === true) ?? null
     let checkSeen = null // {file, status, reason} — failures dominate passes objectively
     // A CANCELLED turn settles as cancelled, full stop: an artifact that happened to land first
     // gets no success credit and no recurrence charge for anybody's lesson — the queue is dropped.
@@ -1191,13 +1339,17 @@ export function apply(ctx, config = {}) {
         checkSeen = { file: check.file, status: report.status, reason: report.reason }
       }
     }
-    const outcome = cancelled ? 'cancelled' : failed ? 'failed'
-      : checkSeen !== null ? (checkSeen.status === 'pass' ? 'verified' : 'failed') : 'unknown'
+    const objectiveFailure = pythonFailure !== null || checkSeen?.status === 'fail'
+    const outcome = cancelled ? 'cancelled' : failed || objectiveFailure ? 'failed'
+      : pythonPass !== null || checkSeen?.status === 'pass' ? 'verified' : 'unknown'
     const completed = safeStoreAction('turn_state_unavailable', () => engine.complete({ sessionId, turnId: String(turn), outcome,
       evidence: outcome === 'failed' ? (failed ? '本回合存在真实工具失败记录'
-        : `产物检查未通过：${checkSeen.file}（${checkSeen.reason}）`)
+        : pythonFailure !== null ? `Python JSON 客观检查未通过（${pythonFailure.summary.reason}）`
+          : `产物检查未通过：${checkSeen.file}（${checkSeen.reason}）`)
         : outcome === 'cancelled' ? '回合被取消'
-          : outcome === 'verified' ? `产物检查通过：${checkSeen.file}（${checkSeen.reason}）`
+          : outcome === 'verified' ? pythonPass !== null
+            ? `Python JSON/BOM 客观检查通过（${pythonPass.summary.reason}）`
+            : `产物检查通过：${checkSeen.file}（${checkSeen.reason}）`
             : '回合完成，无客观检查记录' }))
     safeStoreAction('turn_digest_sync_unavailable', () => engine.syncDigest())
     if (rsiTurnKey !== null && rsiProbeTurns.has(rsiTurnKey)) {

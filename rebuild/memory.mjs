@@ -464,6 +464,15 @@ const checkSummaryValid = (checkId, summary, passed) => {
     && (passed ? summary.passed === summary.tests && summary.failed === 0 && summary.skipped === 0
       && summary.xfailed === 0 && summary.xpassed === 0 && summary.deselected === 0
       : summary.failed > 0)
+  if (checkId === 'python-json-loader-v1') return Object.keys(summary).every(key =>
+    ['kind', 'bytes', 'inputHash', 'bomCount', 'reads', 'parses', 'reason'].includes(key))
+    && summary.kind === 'python_json_loader'
+    && Number.isSafeInteger(summary.bytes) && summary.bytes >= 3 && summary.bytes <= 64 * 1024
+    && hex64(summary.inputHash)
+    && Number.isSafeInteger(summary.bomCount) && summary.bomCount >= 1 && summary.bomCount <= 8
+    && summary.reads === 1 && summary.parses === 1
+    && (passed ? summary.reason === 'matched'
+      : ['output_mismatch', 'bom_not_stripped', 'parse_error', 'source_write_attempted'].includes(summary.reason))
   return false
 }
 const checkEventValid = row => isPlainObject(row)
@@ -471,7 +480,8 @@ const checkEventValid = row => isPlainObject(row)
     'passed', 'summary'].includes(key))
   && hex64(row.id) && Number.isFinite(row.at) && boundedLabel(row.checkId, 128) && hex64(row.turnKey)
   && entryHex(row.entryId) && Number.isSafeInteger(row.entryVersion) && typeof row.passed === 'boolean'
-  && (row.summary === undefined || checkSummaryValid(row.checkId, row.summary, row.passed))
+  && (row.summary === undefined ? row.checkId !== 'python-json-loader-v1'
+    : checkSummaryValid(row.checkId, row.summary, row.passed))
 
 const recallStrategyRowValid = row => isPlainObject(row)
   && Object.keys(row).every(key => ['turnKey', 'scope', 'session', 'qualification', 'id', 'version',

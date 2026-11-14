@@ -5,9 +5,11 @@
  * Exit code 0 of an arbitrary command and model prose never reach this path; only the checker's
  * own evaluation does. Results carry counts and reason codes only — never file contents.
  */
+import { createHash } from 'node:crypto'
 import { readFileSync, realpathSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { isAbsolutePath, relativeInside } from './paths.mjs'
+import { pythonCheckFailureProofValid } from '../src/failure-evidence.mjs'
 
 const MAX_FILE_BYTES = 256 * 1024
 
@@ -45,8 +47,10 @@ const DEVELOPMENT_CHECK_IDS = Object.freeze({
   nodeTest: 'node-test-runner-spec-v1',
   typeScript: 'typescript-noemit-v1',
   pytest: 'pytest-summary-v1',
+  pythonJson: 'python-json-loader-v1',
 })
 const SAFE_LOCAL_PATH = /^(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9_./*-]+$/u
+const SAFE_PYTHON_PATH = /^(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9_./-]+$/u
 
 function simpleCommandWords(command) {
   if (typeof command !== 'string' || command.length === 0 || command.length > 4096
@@ -59,6 +63,12 @@ function developmentCommandSpec(command) {
   if (args === null || args.length === 0) return null
   const executable = (path, name) => SAFE_LOCAL_PATH.test(path)
     && (path === name || path.endsWith(`/${name}`))
+  if (args.length === 2 && /^(?:python|python3|python\.exe|python3\.exe)$/u.test(args[0].split('/').at(-1))
+    && SAFE_PYTHON_PATH.test(args[0]) && !args[0].includes('*')
+    && SAFE_PYTHON_PATH.test(args[1]) && !args[1].startsWith('/')
+    && args[1].endsWith('.py')) {
+    return { checkId: DEVELOPMENT_CHECK_IDS.pythonJson, executable: args[0], scriptPath: args[1], arguments: args.slice(1) }
+  }
   if (executable(args[0], 'node') && args[1] === '--test'
     && args.slice(2).every(arg => SAFE_LOCAL_PATH.test(arg)
       && (!arg.includes('*') || /(?:^|\/)[*][A-Za-z0-9_.-]*\.(?:test|spec)\.(?:mjs|cjs|js|ts)$/u.test(arg)))) {
@@ -114,12 +124,106 @@ export function developmentCheckIdForCommand(command) {
 export function developmentCheckMatchesVerification(verificationCheck, command) {
   const actual = developmentCommandSpec(command)
   if (actual === null || typeof verificationCheck !== 'string') return false
+  if (actual.checkId === DEVELOPMENT_CHECK_IDS.pythonJson) return verificationCheck === command
   if (verificationCheck === actual.checkId) return actual.checkId !== DEVELOPMENT_CHECK_IDS.pytest
     // Existing internal IDs stay compatible; pytest requires its exact command and target path.
   const declared = developmentCommandSpec(verificationCheck)
   return declared !== null && declared.checkId === actual.checkId
     && declared.arguments.length === actual.arguments.length
     && declared.arguments.every((part, index) => part === actual.arguments[index])
+}
+
+/** Parse one direct Python script command without shell wrappers or extra arguments. */
+export function pythonCommandSpec(command) {
+  const spec = developmentCommandSpec(command)
+  return spec?.checkId === DEVELOPMENT_CHECK_IDS.pythonJson ? spec : null
+}
+
+const pythonBOMLessonShape = (lesson, problemId) => {
+  if (lesson === null || typeof lesson !== 'object' || Array.isArray(lesson)
+    || lesson.problemId !== problemId || pythonCommandSpec(lesson.verification?.check) === null) return false
+  const expected = lesson.verification?.expected
+  if (typeof expected !== 'string'
+    || !/\bBOM\b.{0,32}(?:未(?:被)?(?:删除|移除|剥离)|保留|preserv|not.{0,8}(?:remov|strip))/iu.test(expected)
+    || !Array.isArray(lesson.evidenceIds) || lesson.evidenceIds.length === 0
+    || !Array.isArray(lesson.rootCause?.evidenceIds)
+    || lesson.rootCause.evidenceIds.length !== lesson.evidenceIds.length
+    || !lesson.evidenceIds.every((id, index) => lesson.rootCause.evidenceIds[index] === id)
+    || lesson.evidenceIds.length > 3 || new Set(lesson.evidenceIds).size !== lesson.evidenceIds.length) return false
+  return true
+}
+
+const pythonBOMLessonContract = (lesson, problemId) => pythonBOMLessonShape(lesson, problemId)
+  && typeof lesson.failurePattern === 'string'
+  && /JSONDecodeError\s*:\s*Unexpected\s+UTF-8\s+BOM/iu.test(lesson.failurePattern)
+
+const immutableBOMSourceCapsule = capsule => typeof capsule?.originSessionId === 'string'
+  && capsule.originSessionId !== '' && typeof capsule?.turnKey === 'string'
+  && /^[a-f0-9]{64}$/u.test(capsule.turnKey) && typeof capsule?.message === 'string'
+  && /JSONDecodeError\s*:\s*Unexpected\s+UTF-8\s+BOM/iu.test(capsule.message)
+
+function checkerFailureCapsuleGrounded(capsule, problem, lesson, { doc, entryId, version } = {}) {
+  if (capsule?.checkId !== DEVELOPMENT_CHECK_IDS.pythonJson || capsule.toolName !== 'mse_verify_python'
+    || capsule.failureClass !== 'checker_contract_failure' || typeof capsule.checkEventId !== 'string'
+    || !/^[a-f0-9]{64}$/u.test(capsule.checkEventId)
+    || typeof capsule.originSessionId !== 'string' || capsule.originSessionId === ''
+    || typeof capsule.turnKey !== 'string' || !/^[a-f0-9]{64}$/u.test(capsule.turnKey)
+    || typeof capsule.message !== 'string'
+    || !/^Python JSON\/BOM objective check failed: (?:output_mismatch|bom_not_stripped|parse_error|source_write_attempted)$/u
+      .test(capsule.message)
+    || !isPlainRecord(doc) || typeof entryId !== 'string' || !Number.isSafeInteger(version)) return false
+
+  const proof = capsule.checkProof
+  const reason = proof?.reason
+  if (capsule.message !== `Python JSON/BOM objective check failed: ${reason}`
+    || !pythonCheckFailureProofValid(proof, { problemId: problem.id, entryId,
+      entryVersion: proof?.entryVersion, checkEventId: capsule.checkEventId,
+      turnKey: capsule.turnKey, originSessionId: capsule.originSessionId,
+      command: lesson.verification.check, reason })
+    || proof.entryVersion >= version) return false
+
+  // Runtime audit arrays are intentionally bounded and may later rotate. Any matching row that
+  // remains must agree with the proof; the proof itself is the durable engine-side attestation.
+  const event = (doc.checkEvents ?? []).find(row => row.id === proof.checkEventId)
+  if (event !== undefined && (event.checkId !== DEVELOPMENT_CHECK_IDS.pythonJson || event.passed !== false
+    || event.entryId !== entryId || event.entryVersion !== proof.entryVersion || event.turnKey !== proof.turnKey
+    || event.summary?.kind !== 'python_json_loader' || event.summary?.reason !== reason
+    || proof.summaryHash !== digestJson(event.summary))) return false
+  const receipt = (doc.receipts ?? []).find(row => row.turnKey === proof.turnKey)
+  if (receipt !== undefined && (receipt.settled !== true || receipt.outcome !== 'failed'
+    || !receipt.offered?.some(row => row.id === entryId && row.version === proof.entryVersion
+      && row.mode !== 'guard')
+    || !receipt.methodFeedback?.some(row => row.entryId === entryId && row.version === proof.entryVersion
+      && row.kind === 'check_fail' && row.checkId === DEVELOPMENT_CHECK_IDS.pythonJson))) return false
+  const fact = (doc.turnFacts ?? []).find(row => row.turnKey === proof.turnKey)
+  if (fact !== undefined && (fact.sessionId !== proof.originSessionId || fact.outcome !== 'failed')) return false
+
+  const previous = (doc.methodHistory ?? []).find(row => row.entryId === entryId
+    && row.version === proof.entryVersion)
+  return previous === undefined || (previous.status === 'needs_revision'
+    && pythonBOMLessonShape(previous.lesson, problem.id)
+    && previous.lesson.verification.check === lesson.verification.check)
+}
+
+const digestJson = value => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+
+const isPlainRecord = value => value !== null && typeof value === 'object'
+  && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
+
+/** Scope the Python verifier to source-backed BOM lessons and audited same-problem revisions. */
+export function pythonBOMLessonEvidenceSupported(lesson, problem, context = {}) {
+  if (problem === null || typeof problem !== 'object' || Array.isArray(problem)
+    || problem.id !== lesson?.problemId || !pythonBOMLessonShape(lesson, problem.id)) return false
+  const capsules = problem.capsules ?? []
+  const cited = lesson.evidenceIds.map(id => capsules.find(capsule => capsule?.id === id) ?? null)
+  if (cited.some(capsule => capsule === null)) return false
+  const checked = cited.filter(capsule => checkerFailureCapsuleGrounded(capsule, problem, lesson, context))
+  const sourceOnly = checked.length === 0 && cited.every(immutableBOMSourceCapsule)
+  if (sourceOnly) return pythonBOMLessonContract(lesson, problem.id)
+  if (checked.length === 0 || !cited.every(capsule => immutableBOMSourceCapsule(capsule)
+    || checked.includes(capsule))) return false
+  return pythonBOMLessonContract(lesson, problem.id)
+    || checked.some(capsule => lesson.failurePattern === capsule.message)
 }
 
 function foregroundOutput(result) {

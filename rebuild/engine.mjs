@@ -23,10 +23,13 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { check, LearningError } from '../src/store.mjs'
 import { analyze } from '../src/recall.mjs'
-import { sanitizeDiagnosticText, buildFailureCapsule, SENSITIVE_PATTERN, AUTHORITY_PATTERN } from '../src/failure-evidence.mjs'
+import { sanitizeDiagnosticText, buildFailureCapsule, buildPythonCheckFailureProof,
+  appendCapsuleToRow, enforceCapsuleBudget,
+  SENSITIVE_PATTERN, AUTHORITY_PATTERN } from '../src/failure-evidence.mjs'
 import { validateFailureLessonOutput, evidenceTokenHashes } from '../src/failure-lessons.mjs'
 import { observeInState, abstainInState, linkCandidateInState,
-  interruptInState, REFLECTABLE_KINDS, INDEPENDENT_THRESHOLD } from '../src/problems.mjs'
+  interruptInState, REFLECTABLE_KINDS, INDEPENDENT_THRESHOLD, EVIDENCE_LIMIT, PROBLEM_COUNT_CAP }
+  from '../src/problems.mjs'
 import { MemoryStore, importOldLessons, entryIdFor, digestOf, memoryOf, ROLLBACK, ENTRY_LIMIT,
   boundedUnits, upgradeDocFormat, noCommit, RECALL_STRATEGY_LIMIT, ADAPTIVE_RECALL_POLICY_LIMIT,
   ADAPTIVE_RECALL_PROBE_LIMIT, ADAPTIVE_RECALL_DECISION_LIMIT } from './memory.mjs'
@@ -43,7 +46,8 @@ import { RECALL_QUALIFICATION } from './recall-qualification.mjs'
 import { addAdaptiveCandidate, competeAdaptiveCandidate, adaptivePolicyMatches, adaptiveQueryFeatures,
   adaptiveQueryKey, adaptiveTaskFeatures, narrowAdaptivePolicy,
   synthesizeAdaptiveTaskPolicy } from './adaptive-recall.mjs'
-import { developmentCheckMatchesVerification, developmentCheckIdForCommand }
+import { developmentCheckMatchesVerification, developmentCheckIdForCommand,
+  pythonBOMLessonEvidenceSupported }
   from './checker.mjs'
 import { replayAdaptivePolicy } from './adaptive-replay.mjs'
 import { localDayKey } from './time.mjs'
@@ -366,7 +370,7 @@ function settleRecallStrategy(doc, { turnKey, sessionId, outcome, receipt,
       const recurrence = feedback.some(item => item.entryId === row.id && item.version === row.version
         && item.kind === 'recurrence' && item.voided !== true)
       const checkerFailure = feedback.some(item => item.entryId === row.id && item.version === row.version
-        && item.kind === 'check_fail' && item.checkId === 'json-file-parses-v1'
+        && item.kind === 'check_fail' && ['json-file-parses-v1', 'python-json-loader-v1'].includes(item.checkId)
         && item.voided !== true)
       if (!recurrence && !checkerFailure) continue
       if (state.rows.some(item => item.mode === 'isolated'
@@ -2263,8 +2267,16 @@ export class RebuildEngine {
       && (passed ? summary.passed === summary.tests && summary.failed === 0 && summary.skipped === 0
         && summary.xfailed === 0 && summary.xpassed === 0 && summary.deselected === 0
         : summary.failed > 0)
-    check((summary === null && checkId !== 'pytest-summary-v1') || nodeSummary || typeSummary
-      || pytestSummary, 'invalid_check_summary')
+    const pythonSummary = checkId === 'python-json-loader-v1' && summary?.kind === 'python_json_loader'
+      && Object.keys(summary).every(key => ['kind', 'bytes', 'inputHash', 'bomCount', 'reads', 'parses', 'reason'].includes(key))
+      && Number.isSafeInteger(summary.bytes) && summary.bytes >= 3 && summary.bytes <= 64 * 1024
+      && typeof summary.inputHash === 'string' && /^[a-f0-9]{64}$/u.test(summary.inputHash)
+      && Number.isSafeInteger(summary.bomCount) && summary.bomCount >= 1 && summary.bomCount <= 8
+      && summary.reads === 1 && summary.parses === 1
+      && (passed ? summary.reason === 'matched'
+        : ['output_mismatch', 'bom_not_stripped', 'parse_error', 'source_write_attempted'].includes(summary.reason))
+    check((summary === null && !['pytest-summary-v1', 'python-json-loader-v1'].includes(checkId)) || nodeSummary || typeSummary
+      || pytestSummary || pythonSummary, 'invalid_check_summary')
     const turnKey = turnKeyOf(sessionId, turnId)
     const eventIdHash = digestOf(['check-event', eventId])
     return this.store.transaction(doc => {
@@ -2309,6 +2321,14 @@ export class RebuildEngine {
       }
       const offered = attribution.offered
       const target = attribution.target
+      if (checkId === 'python-json-loader-v1') {
+        const problem = doc.problemLoop?.problems.find(row => row.id === target.record.lesson?.problemId)
+        if (target.kind !== 'current'
+          || !pythonBOMLessonEvidenceSupported(target.record.lesson, problem,
+            { doc, entryId, version: target.record.version })) {
+          return { ok: true, settled: false, reason: 'objective_contract_mismatch' }
+        }
+      }
       if (sourceRequired === true) {
         const sources = editionSources(target.record)
         if (this.sourceGuard === null || this.#sourceOk(sessionId) !== true
@@ -2322,6 +2342,27 @@ export class RebuildEngine {
       const entry = doc.entries.find(row => row.id === entryId)
       if (entry === undefined || entry.status === 'retired' || entry.type !== 'lesson') {
         return { ok: true, settled: false, reason: 'entry_not_creditable' }
+      }
+      let pythonFailureCapsule = null
+      let pythonFailureProblem = null
+      if (checkId === 'python-json-loader-v1' && passed === false) {
+        pythonFailureProblem = doc.problemLoop?.problems.find(row => row.id === target.record.lesson?.problemId)
+        if (pythonFailureProblem === undefined) {
+          return { ok: true, settled: false, reason: 'objective_evidence_missing' }
+        }
+        const checkProof = buildPythonCheckFailureProof({ problemId: pythonFailureProblem.id,
+          entryId, entryVersion: offered.version, checkEventId: eventIdHash, turnKey, originSessionId: sessionId,
+          command: target.record.lesson.verification.check, summary })
+        if (checkProof === null) {
+          return { ok: true, settled: false, reason: 'objective_evidence_unavailable' }
+        }
+        pythonFailureCapsule = buildFailureCapsule({ eventId, at: this.now(),
+          toolName: 'mse_verify_python', failureClass: 'checker_contract_failure',
+          message: `Python JSON/BOM objective check failed: ${summary.reason}`,
+          checkId, checkEventId: eventIdHash, checkProof, originSessionId: sessionId, turnKey })
+        if (pythonFailureCapsule === null) {
+          return { ok: true, settled: false, reason: 'objective_evidence_unavailable' }
+        }
       }
       const kind = passed ? 'check_pass' : 'check_fail'
       const feedback = receipt.methodFeedback ?? (receipt.methodFeedback = [])
@@ -2353,6 +2394,22 @@ export class RebuildEngine {
         row.evidenceHash = evidenceHash
       }
       feedback.push({ entryId, version: offered.version, kind, checkId, at: this.now() })
+      if (pythonFailureCapsule !== null && pythonFailureProblem !== null) {
+        const appended = appendCapsuleToRow(pythonFailureProblem, pythonFailureCapsule)
+        if (appended === 'appended') {
+          const evidence = { eventId: digestOf(['python-check-evidence', eventIdHash]), turnHash: turnKey,
+            at: this.now() }
+          pythonFailureProblem.evidence = [...pythonFailureProblem.evidence, evidence].slice(-EVIDENCE_LIMIT)
+          pythonFailureProblem.evidenceRevision += 1
+          pythonFailureProblem.count = Math.min(PROBLEM_COUNT_CAP, pythonFailureProblem.count + 1)
+          pythonFailureProblem.summary = `Python JSON/BOM objective check failed: ${summary.reason}`
+          pythonFailureProblem.reason = 'python_check_failed'
+          pythonFailureProblem.nextAttemptAt = 0
+          pythonFailureProblem.lastAt = evidence.at
+          pythonFailureProblem.updatedAt = evidence.at
+          enforceCapsuleBudget(doc.problemLoop)
+        }
+      }
       if (passed === false && !this.#blockedNow(doc) && this.sourceGuard !== null
         && this.#sourceOk(sessionId)) {
         const adaptive = doc.recallStrategy.adaptive
@@ -2406,7 +2463,7 @@ export class RebuildEngine {
     const observedCheck = typeof command === 'string'
       ? developmentCheckIdForCommand(command) : checkId
     if (typeof observedCheck !== 'string'
-      || !['node-test-runner-spec-v1', 'typescript-noemit-v1', 'pytest-summary-v1'].includes(observedCheck)) return []
+      || !['node-test-runner-spec-v1', 'typescript-noemit-v1', 'pytest-summary-v1', 'python-json-loader-v1'].includes(observedCheck)) return []
     const turnKey = turnKeyOf(sessionId, turnId)
     const doc = this.store.read()
     const receipt = doc.receipts.find(row => row.turnKey === turnKey)
@@ -2415,6 +2472,13 @@ export class RebuildEngine {
       if (offer.mode === 'guard') return false
       const attribution = methodAttribution(doc, receipt, offer.id, offer.version)
       if (attribution.admitted !== true || attribution.target?.record?.type !== 'lesson') return false
+      if (observedCheck === 'python-json-loader-v1'
+        && (attribution.target.kind !== 'current'
+          || !pythonBOMLessonEvidenceSupported(attribution.target.record.lesson,
+            doc.problemLoop?.problems.find(problem => problem.id === attribution.target.record.lesson?.problemId),
+            { doc, entryId: attribution.target.record.id, version: attribution.target.record.version }))) {
+        return false
+      }
       const sources = editionSources(attribution.target.record)
       if (this.sourceGuard === null || this.#sourceOk(sessionId) !== true
         || sources.length === 0 || !sources.every(source => this.#sourceOk(source) === true)
