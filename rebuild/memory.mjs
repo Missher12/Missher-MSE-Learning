@@ -30,9 +30,9 @@
  */
 import { createHash } from 'node:crypto'
 import { isAbsolute, join } from 'node:path'
-import { LearningError, MAX_STORE_BYTES, check } from '../src/store.mjs'
+import { LearningError, check } from '../src/store.mjs'
 import { commitMemoryFile, prepareMemoryDirectory, readBoundedMemoryFileBytes, resolveMemoryDirectory,
-  withMemoryStoreLock }
+  withMemoryStoreLock, encodeMemoryDocument, decodeMemoryDocument, REQUEST_AUDIT_LIMIT }
   from './storage.mjs'
 import { problemLoopValid, ensureProblemLoop } from '../src/problems.mjs'
 import { ADAPTIVE_TASK_OPERATION_IDS } from './adaptive-operations.mjs'
@@ -84,7 +84,7 @@ const ADAPTIVE_TASK_OPERATIONS = new Set(ADAPTIVE_TASK_OPERATION_IDS)
 const ADAPTIVE_GENERIC_TASK_FEATURES = new Set(['null', 'empty', 'error', 'log', 'value', 'result', 'problem'])
 export const ENTRY_LIMIT = 256
 export const RECEIPT_LIMIT = 256
-export const REQUEST_LIMIT = 96
+export const REQUEST_LIMIT = REQUEST_AUDIT_LIMIT
 export const FACT_LIMIT = 256
 const hash = text => createHash('sha256').update(text).digest('hex')
 export const digestOf = value => hash(JSON.stringify(value))
@@ -818,7 +818,7 @@ export class MemoryStore {
     this.path = join(this.root, 'memory-v1.json')
     return this.root
   }
-  #readSnapshotAt(root) {
+  #readSnapshotAt(root, compareLogical = false) {
     let bytes
     try { bytes = readBoundedMemoryFileBytes(join(root, 'memory-v1.json')) }
     catch (error) {
@@ -832,9 +832,14 @@ export class MemoryStore {
     }
     this.hasObservedStore = true
     let doc
-    try { doc = JSON.parse(bytes.toString('utf8')); validateDoc(doc) }
+    let logicalBody
+    try {
+      doc = decodeMemoryDocument(bytes)
+      if (compareLogical) logicalBody = JSON.stringify(doc)
+      validateDoc(doc)
+    }
     catch { throw new LearningError('invalid_memory') }
-    return { doc, exists: true, bytes }
+    return { doc, exists: true, bytes, logicalBody }
   }
   #readAt(root) { return this.#readSnapshotAt(root).doc }
   read() { return this.#readAt(this.#resolveRoot()) }
@@ -847,7 +852,7 @@ export class MemoryStore {
   transaction(mutate) {
     const root = this.#resolveRoot({ writable: true })
     return withMemoryStoreLock(root, () => {
-      const source = this.#readSnapshotAt(root)
+      const source = this.#readSnapshotAt(root, true)
       const doc = source.doc
       // EVOLUTION016: migrate format3 only inside the one locked commit; pure reads do not rewrite.
       if (doc.format === 3) upgradeDocFormat(doc, Date.now())
@@ -870,12 +875,10 @@ export class MemoryStore {
         && !adaptive.decisions.length) delete doc.recallStrategy.adaptive
       if (requestedNoCommit) {
         const unchangedBody = JSON.stringify(doc)
-        if (source.bytes !== null && Buffer.byteLength(unchangedBody) === source.bytes.length
-          && Buffer.from(unchangedBody).equals(source.bytes)) return result
+        if (source.bytes !== null && unchangedBody === source.logicalBody) return result
       }
       doc.updatedAt = Date.now()
-      const body = JSON.stringify(doc)
-      check(Buffer.byteLength(body) <= MAX_STORE_BYTES, 'capacity')
+      const body = encodeMemoryDocument(doc)
       try {
         commitMemoryFile(join(root, 'memory-v1.json'), body)
         this.hasObservedStore = true

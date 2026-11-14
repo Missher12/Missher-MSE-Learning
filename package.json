@@ -1,6 +1,6 @@
 {
   "name": "@missher/dsh-mse-learning",
-  "version": "1.3.5",
+  "version": "1.3.6",
   "description": "Native DSH learning from corrections and concrete failures, with adaptive recall evidence and activity history.",
   "type": "module",
   "private": true,

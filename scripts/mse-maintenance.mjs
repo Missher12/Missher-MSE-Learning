@@ -2,7 +2,7 @@ import { lstatSync, readdirSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import { LearningError, MAX_STORE_BYTES } from '../src/store.mjs'
 import { ENTRY_LIMIT, MemoryStore, validateDoc } from '../rebuild/memory.mjs'
-import { readBoundedMemoryFileBytes, writeExclusiveMemorySnapshot } from '../rebuild/storage.mjs'
+import { readBoundedMemoryFileBytes, writeExclusiveMemorySnapshot, decodeMemoryDocument } from '../rebuild/storage.mjs'
 
 const fail = code => { throw new LearningError(code) }
 const validPath = value => typeof value === 'string' && isAbsolute(value)
@@ -176,7 +176,7 @@ function archiveRetired(stateRoot, output, ids) {
 function recoverCopy(input, stateRoot) {
   const bytes = readBoundedMemoryFileBytes(input, MAX_STORE_BYTES)
   let source
-  try { source = JSON.parse(bytes.toString('utf8')); validateDoc(source) }
+  try { source = decodeMemoryDocument(bytes); validateDoc(source) }
   catch { fail('invalid_memory') }
   progress.phase = 'export_validated'
   // Refuse an existing nonempty directory before MemoryStore can tighten its mode. The same

@@ -5,7 +5,62 @@ import {
   openSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { gzipSync, gunzipSync } from 'node:zlib'
 import { LearningError, MAX_STORE_BYTES, check } from '../src/store.mjs'
+
+export const REQUEST_AUDIT_LIMIT = 96
+
+/** Lossless wire encoding only. The engine still receives the exact original request rows.
+ * Each file stays <=2 MiB, and all expanded request audits together stay <=2 MiB, so a read
+ * cannot expand beyond 4 MiB. In-flight requests are never packed. No evidence is discarded. */
+export function encodeMemoryDocument(doc, reserve = 0) {
+  check(Number.isSafeInteger(reserve) && reserve >= 0, 'invalid_memory')
+  let auditBytes = 0
+  const requests = doc.requests.map(row => {
+    const raw = JSON.stringify(row)
+    const bytes = Buffer.byteLength(raw)
+    auditBytes += bytes
+    check(auditBytes + reserve <= MAX_STORE_BYTES, 'capacity')
+    if (row.settled !== true || bytes < 4096) return row
+    const packed = { ticket: row.ticket, auditEncoding: 'gzip-json-v1', auditBytes: bytes,
+      auditData: gzipSync(raw, { level: 1 }).toString('base64') }
+    return Buffer.byteLength(JSON.stringify(packed)) < bytes ? packed : row
+  })
+  const body = JSON.stringify({ ...doc, requests })
+  check(Buffer.byteLength(body) + reserve <= MAX_STORE_BYTES, 'capacity')
+  return body
+}
+
+/** Decode before the existing strict schema validation; malformed packing fails closed. */
+export function decodeMemoryDocument(bytes) {
+  check(Buffer.byteLength(bytes) <= MAX_STORE_BYTES, 'invalid_memory')
+  const doc = JSON.parse(bytes.toString('utf8'))
+  check(Array.isArray(doc?.requests) && doc.requests.length <= REQUEST_AUDIT_LIMIT, 'invalid_memory')
+  let auditBytes = 0
+  doc.requests = doc.requests.map(row => {
+    if (row === null || typeof row !== 'object' || !Object.hasOwn(row, 'auditEncoding')) {
+      auditBytes += Buffer.byteLength(JSON.stringify(row))
+      check(auditBytes <= MAX_STORE_BYTES, 'invalid_memory')
+      return row
+    }
+    check(Object.keys(row).length === 4 && row.auditEncoding === 'gzip-json-v1'
+      && typeof row.ticket === 'string' && row.ticket.length > 0 && row.ticket.length <= 64
+      && Number.isSafeInteger(row.auditBytes) && row.auditBytes > 0
+      && row.auditBytes <= MAX_STORE_BYTES - auditBytes
+      && typeof row.auditData === 'string', 'invalid_memory')
+    const compressed = Buffer.from(row.auditData, 'base64')
+    check(compressed.toString('base64') === row.auditData, 'invalid_memory')
+    const expanded = gunzipSync(compressed, { maxOutputLength: row.auditBytes })
+    check(expanded.length === row.auditBytes, 'invalid_memory')
+    const text = new TextDecoder('utf8', { fatal: true }).decode(expanded)
+    const original = JSON.parse(text)
+    check(original?.ticket === row.ticket && original.settled === true
+      && !Object.hasOwn(original, 'auditEncoding'), 'invalid_memory')
+    auditBytes += expanded.length
+    return original
+  })
+  return doc
+}
 
 const LOCK_MAX_AGE_MS = 5 * 60_000
 const LOCK_MAX_BYTES = 512

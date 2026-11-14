@@ -21,7 +21,7 @@
  * pause / route change / dispose never commit.
  */
 import { createHash, randomUUID } from 'node:crypto'
-import { check, LearningError, MAX_STORE_BYTES } from '../src/store.mjs'
+import { check, LearningError } from '../src/store.mjs'
 import { analyze } from '../src/recall.mjs'
 import { sanitizeDiagnosticText, buildFailureCapsule, SENSITIVE_PATTERN, AUTHORITY_PATTERN } from '../src/failure-evidence.mjs'
 import { validateFailureLessonOutput, evidenceTokenHashes } from '../src/failure-lessons.mjs'
@@ -30,7 +30,7 @@ import { observeInState, abstainInState, linkCandidateInState,
 import { MemoryStore, importOldLessons, entryIdFor, digestOf, memoryOf, ROLLBACK, ENTRY_LIMIT,
   boundedUnits, upgradeDocFormat, noCommit, RECALL_STRATEGY_LIMIT, ADAPTIVE_RECALL_POLICY_LIMIT,
   ADAPTIVE_RECALL_PROBE_LIMIT, ADAPTIVE_RECALL_DECISION_LIMIT } from './memory.mjs'
-import { isMemoryStorageError } from './storage.mjs'
+import { isMemoryStorageError, encodeMemoryDocument } from './storage.mjs'
 export { pathInside } from './paths.mjs'
 import { mechanismKey, resolveMethodVersion, versionWindow, ensureMethodStats, archiveVersion,
   selectHistory, renderHistoryPrompt, historyCapacity, methodNeedsGuard, guardSummary,
@@ -2723,8 +2723,23 @@ export class RebuildEngine {
     const sessionId = plan.sourceSessionId ?? null
     if (sessionId === null) return null
     const row = doc.routes.find(entry => entry.sessionId === sessionId)
-    if (row === undefined) return null
-    return { route: row.route, sessionId }
+    if (row !== undefined) return { route: row.route, sessionId }
+    // The short route cache may rotate while a method waits for new evidence. Its native
+    // problem origin is durable, but may only authorize the exact admitted failure turn:
+    // never borrow another problem/session's model or reconstruct an unproven route.
+    if (!['reflect', 'revise'].includes(plan.kind)) return null
+    const problem = doc.problemLoop.problems.find(item => item.id === plan.problemId)
+    const origin = problem?.origin
+    if (!origin || !this.#sourceOk(origin.sessionId)) return null
+    const evidence = (problem.capsules ?? []).find(capsule =>
+      plan.evidenceIds?.includes(capsule.id) && capsule.originSessionId === origin.sessionId
+      && capsule.turnKey === origin.turnHash)
+    if (!evidence || typeof origin.provider !== 'string' || typeof origin.model !== 'string') return null
+    const route = { provider: origin.provider, model: origin.model,
+      ...(origin.reasoningEffort === null || origin.reasoningEffort === undefined
+        ? {} : { reasoningEffort: origin.reasoningEffort }) }
+    if (digestOf(route) !== origin.routeId) return null
+    return { route, sessionId: origin.sessionId }
   }
 
   #schedule(doc, plan) {
@@ -2837,17 +2852,21 @@ export class RebuildEngine {
       row.updatedAt = now
     }
     clone.updatedAt = now
-    let bytes = Buffer.byteLength(JSON.stringify(clone), 'utf8')
     const entry = plan.entryId === null || plan.entryId === undefined ? undefined
       : clone.entries.find(row => row.id === plan.entryId)
     const archiveReserve = entry === undefined ? 0 : historyRowPreview(entry, { now }).bytes
     // Shared-limit finish-shape reserve (per kind), never a tuned/empirical number.
     const RESULT_RESERVE = 4096 + 480 + 640 + 640 + 160 + 512 + 16
-    bytes += plan.kind === 'revise' ? RESULT_RESERVE + archiveReserve
+    const reserve = plan.kind === 'revise' ? RESULT_RESERVE + archiveReserve
       : plan.kind === 'reflect' ? RESULT_RESERVE
         : plan.kind === 'digest' ? RESULT_RESERVE * 3 : 1024
-    return bytes <= MAX_STORE_BYTES ? { ok: true, bytes }
-      : { ok: false, reason: 'storage_capacity' }
+    try {
+      // Settled audits pack losslessly; the new in-flight row and finish reserve stay raw.
+      return { ok: true, bytes: Buffer.byteLength(encodeMemoryDocument(clone, reserve)) + reserve }
+    } catch (error) {
+      if (error?.code !== 'capacity') throw error
+      return { ok: false, reason: 'storage_capacity' }
+    }
   }
 
   /** Ask for one background job: a revision (OLD method + NEW frozen evidence) takes priority
@@ -3271,8 +3290,9 @@ export class RebuildEngine {
       const gate = doc.materials.find(material => material.key === row.material)
       const routeLive = () => {
         if (this.route !== null) return digestOf(this.route) === row.routeId
-        const origin = doc.routes.find(r => r.sessionId === row.sourceSessionId)
-        return origin !== undefined && digestOf(origin.route) === row.routeId
+        const origin = this.#resolveSource(doc, row)
+        return origin !== null && origin.sessionId === row.sourceSessionId
+          && digestOf(origin.route) === row.routeId
       }
       const usageField = key => Number.isSafeInteger(usage?.[key]) ? usage[key] : null
       const usageTotal = usageField('total')

@@ -2372,9 +2372,14 @@ test('L4 revision binds to the problem origin session and really starts on that 
   assert.equal(revise.kind, 'revise')
   const row = engine.store.read().problemLoop.problems.find(r => r.id === first.problemId)
   assert.equal(row.ticket, revise.ticket, 'the revision really occupies the single slot')
-  // Without the origin route the revision stays a READABLE wait (no borrowing another route).
+  // Without both the short cache and a proven durable origin route, revision still waits.
   engine.abortWork({ ticket: revise.ticket, failure: 'audited_stop', usage: { total: 10 } })
-  engine.store.transaction(doc => { doc.routes = doc.routes.filter(r => r.sessionId !== 'sx'); return true })
+  engine.store.transaction(doc => {
+    doc.routes = doc.routes.filter(r => r.sessionId !== 'sx')
+    Object.assign(doc.problemLoop.problems.find(r => r.id === first.problemId).origin,
+      { provider: null, model: null, reasoningEffort: null, routeId: null })
+    return true
+  })
   assert.equal(engine.beginWork(), null)
   assert.equal(engine.statusView().daily.waitReason, 'no_source_route',
     'missing origin source stays visible, never borrowed, never silent')

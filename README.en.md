@@ -2,7 +2,9 @@
 
 ![MSE Learning · 持久学习（品牌插画）](docs/images/cover-v2.webp)
 
-MSE learns reusable corrections and failure lessons for DSH. **1.3.5** reduces resources losslessly, removes unused legacy code, and adds Windows, macOS, and Linux core checks on x64/ARM64 while preserving the current UI, data, and learning policies.
+MSE learns reusable corrections and failure lessons for DSH. **1.3.6** resumes reflection after an old source route leaves the short cache and losslessly packs settled request audits to relieve storage pressure. The UI, learning records, and candidate approval criteria stay unchanged.
+
+Resumption requires an admitted native source, matching failure turn, and the exact original route; another session's model is never borrowed. The file remains limited to 2 MiB, with a separate 2 MiB bound on expanded request audits. Full stores still wait explicitly without clearing data. Packing takes effect on the next normal write. Keep older binaries disabled after rollback; never let them write the new encoding or replace new facts with an old backup.
 
 Targets: Windows, macOS, and Linux on x64/ARM64, Node ≥22.19. Core OS checks and DSH host acceptance are documented separately in [platform validation](https://github.com/Missher12/Missher-MSE-Learning/blob/main/VALIDATION.md).
 

@@ -46,6 +46,6 @@ jobs:
       - name: Report native runtime
         run: node -p "JSON.stringify({platform:process.platform,arch:process.arch,node:process.versions.node})"
       - name: Native filesystem and learning core
-        run: node --test rebuild/portability.test.mjs
+        run: node --test rebuild/portability.test.mjs rebuild/continuity.test.mjs
       - name: Windows path semantics on every OS
         run: node --test --test-name-pattern="workspace containment|real foreground checker" rebuild/windows-compat.test.mjs
