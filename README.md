@@ -2,7 +2,7 @@
 
 ![MSE Learning · 持久学习（品牌插画）](docs/images/cover-v2.webp)
 
-MSE 为 DSH 学习可复用纠正与失败经验。**1.3.9** 保留现有 Python JSON/BOM 检查路径，并为固定的配对入口 receipt 增加受限客观验证：当前回合只有唯一、来源合格且版本绑定的方法，且任务需要执行或验收时，才使用 `mse_verify_python_receipt` 检查 `intake.py` 与同目录 `counter.py` 实际读取的收据，以及 `loadedVersion` 是否对应宿主当前已加载版本。它不验证任意 Python 程序或业务语义。纯问答或用户明确要求不执行时不调用；旧成绩不继承，现有候选启用阈值不变。
+MSE 为 DSH 学习可复用纠正与失败经验。**1.3.10** 保留 1.3.9 的受限 Python JSON/BOM 与配对入口 receipt 检查；已登记的 native checker 失败现在会按本回合确实提供的精确方法版本隔离对应 active 策略，未知 checker ID 不会触发隔离。旧成绩不继承，现有候选启用阈值不变。
 
 检查通过原生工具执行一次受限副本，需要本机 Python 与提供完整只读约束的宿主沙箱。普通退出码 0、硬编码成功、取消、版本过期或缺少原生结果配对均不算通过；其它 Python 脚本与业务条件保持未验证。
 

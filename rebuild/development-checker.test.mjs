@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { developmentCheckIdForCommand, developmentCheckMatchesVerification,
-  runDevelopmentChecker } from './checker.mjs'
+  isKnownNativeCheckerId, runDevelopmentChecker } from './checker.mjs'
 
 const foreground = ({ exitCode, stdout = '', stderr = '', stdoutTruncated = false,
   stderrTruncated = false, ...extra } = {}) => ({
@@ -15,6 +15,16 @@ const failOutput = '✖ actual assertion (3.275887ms)\nℹ tests 1\nℹ suites 0
 const skipOutput = '﹣ not executed (1.053956ms) # SKIP\nℹ tests 1\nℹ suites 0\nℹ pass 0\nℹ fail 0\nℹ cancelled 0\nℹ skipped 1\nℹ todo 0\nℹ duration_ms 150.818348\n'
 const pytestPass = '.\n1 passed in 0.03s\n'
 const pytestFail = 'F\n1 failed in 0.03s\n'
+
+test('native checker identity accepts registered kinds and rejects caller-defined IDs', () => {
+  for (const checkId of ['json-file-parses-v1', 'node-test-runner-spec-v1',
+    'python-json-loader-v1', 'python-receipt-contract-v1']) {
+    assert.equal(isKnownNativeCheckerId(checkId), true, checkId)
+  }
+  for (const checkId of ['python-receipt-contract-v2', 'caller-defined-check']) {
+    assert.equal(isKnownNativeCheckerId(checkId), false, checkId)
+  }
+})
 
 test('Node spec output distinguishes a real pass, real failure, and non-executed tests', () => {
   const pass = runDevelopmentChecker({ command: 'node --test pass.test.mjs', result: foreground({ exitCode: 0, stdout: passOutput }) })

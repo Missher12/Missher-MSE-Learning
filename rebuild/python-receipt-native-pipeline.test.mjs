@@ -12,6 +12,7 @@ import SystemPrompt, { joinContextSections, renderContextSections } from '@deeps
 import LocalSandboxProvider from '@deepseek-ai/dsh-sandbox-local'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import bundle from './root.mjs'
+import { RECALL_QUALIFICATION } from './recall-qualification.mjs'
 
 const hash = value => createHash('sha256').update(value).digest('hex')
 const PYTHON = ['python3', 'python', 'python3.exe', 'python.exe'].find(executable =>
@@ -343,6 +344,72 @@ test('a current v3 birth binding is retained on its edition and survives request
     assert.deepEqual(h.api.engine.developmentRelevantOffers({ sessionId: h.session.id, turnId: '3',
       checkId: 'python-receipt-contract-v1', command: COMMAND }), [],
     'without the retained binding, rotated historical prose is still missing and cannot be reconstructed')
+  } finally { await h.teardown() }
+})
+
+test('a native receipt checker failure isolates the exact active fixed strategy version', NATIVE_OPTIONS, async t => {
+  const h = await createHarness()
+  try {
+    if (!h.nativeSandboxAvailable) { t.skip('native LocalSandboxProvider does not report full read-only enforcement here'); return }
+    installReceiptBirthV3Fixture(h)
+    h.api.engine.pause(false)
+    await h.startTurn(1)
+    assert.deepEqual(h.api.engine.developmentRelevantOffers({ sessionId: h.session.id, turnId: '1',
+      checkId: 'python-receipt-contract-v1', command: COMMAND }), [{ id: h.entryId, version: 3 }])
+
+    const projectScope = hash(JSON.stringify(['project', h.dir]))
+    const environment = hash('default')
+    const strategyScope = hash(JSON.stringify([projectScope, environment]))
+    const turnKey = hash(JSON.stringify([h.session.id, '1']))
+    const sessionKey = hash(JSON.stringify(h.session.id))
+    h.api.engine.store.transaction(doc => {
+      doc.recallStrategy.rows.push(
+        { turnKey: hash('prior-approved-turn'), scope: strategyScope, session: hash('prior-session'),
+          qualification: RECALL_QUALIFICATION.id, id: h.entryId, version: 3, mode: 'approved',
+          generation: 1, reason: 'same_turn_native_failure_match' },
+        { turnKey, scope: strategyScope, session: sessionKey, qualification: RECALL_QUALIFICATION.id,
+          id: h.entryId, version: 3, mode: 'active', generation: 1, reason: 'candidate_difference' })
+      return true
+    })
+
+    writeReceipts(h.dir, '9.9.9')
+    const result = await h.execute(1, 'receipt-active-strategy-fail')
+    assert.deepEqual(result.value, { status: 'fail', reason: 'wrong_loaded_version' })
+    const originalComplete = h.api.engine.complete.bind(h.api.engine)
+    h.api.engine.complete = options => {
+      const settled = originalComplete(options)
+      h.api.engine.pause(true)
+      return settled
+    }
+    await h.endTurn(1)
+
+    let doc = h.api.engine.store.read()
+    assert.equal(doc.receipts.find(row => row.turnKey === turnKey)?.outcome, 'failed')
+    assert.ok(doc.receipts.find(row => row.turnKey === turnKey)?.methodFeedback.some(row =>
+      row.entryId === h.entryId && row.version === 3 && row.kind === 'check_fail'
+        && row.checkId === 'python-receipt-contract-v1'))
+    assert.equal(doc.entries.find(row => row.id === h.entryId)?.status, 'needs_revision')
+
+    h.api.engine.pause(false)
+    const next = h.api.engine.prepare({ sessionId: h.session.id, turnId: '2', projectKey: h.dir,
+      prompt: '按当前方法验收 intake.py 和 counter.py 两份 MSE receipt 的 loadedVersion',
+      strategyEligible: true })
+    assert.ok(next.offered.some(row => row.id === h.entryId && row.version === 3 && row.mode === 'guard'))
+    assert.deepEqual(h.api.engine.developmentRelevantOffers({ sessionId: h.session.id, turnId: '2',
+      checkId: 'python-receipt-contract-v1', command: COMMAND }), [],
+    'a guarded method cannot receive a legal same-version pass')
+    assert.deepEqual(h.api.engine.recordCheck({ checkId: 'python-receipt-contract-v1', passed: true,
+      sessionId: h.session.id, turnId: '2', entryId: h.entryId, entryVersion: 3,
+      eventId: 'guarded-same-version-pass', summary: { kind: 'python_receipt_contract', entries: 2,
+        receiptReads: 2, versionHash: 'a'.repeat(64), bindingHash: 'b'.repeat(64),
+        sourceHash: 'c'.repeat(64), reason: 'matched' }, sourceRequired: true }),
+    { ok: false, code: 'guard_not_method_credit' })
+
+    doc = h.api.engine.store.read()
+    assert.ok(doc.recallStrategy.rows.some(row => row.id === h.entryId && row.version === 3
+      && row.mode === 'isolated'), 'a native receipt contract failure must isolate the active strategy')
+    assert.ok(!doc.recallStrategy.rows.some(row => row.id === h.entryId && row.version === 3
+      && row.mode === 'approved'), 'the failed active version must no longer remain approved')
   } finally { await h.teardown() }
 })
 

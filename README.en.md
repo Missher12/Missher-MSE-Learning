@@ -2,7 +2,7 @@
 
 ![MSE Learning · 持久学习（品牌插画）](docs/images/cover-v2.webp)
 
-MSE learns reusable corrections and failure lessons for DSH. **1.3.9** keeps the existing Python JSON/BOM check path and adds bounded objective verification for one fixed paired-entry receipt contract. When the current turn has one source-admitted, version-bound method and the task needs execution or acceptance, `mse_verify_python_receipt` checks the receipt actually read by `intake.py` and its sibling `counter.py`, including whether `loadedVersion` matches the host's currently loaded version. It does not verify arbitrary Python programs or business semantics. Do not call it for pure Q&A or an explicit no-execution request. Prior pass records are not inherited, and existing candidate approval thresholds remain unchanged.
+MSE learns reusable corrections and failure lessons for DSH. **1.3.10** keeps the bounded Python JSON/BOM and paired-entry receipt checks from 1.3.9. Failures from registered native checkers now isolate the active strategy for the exact method version offered in that turn; unknown checker IDs cannot trigger isolation. Prior pass records are not inherited, and existing candidate approval thresholds remain unchanged.
 
 Checks run one restricted snapshot through a native tool and require Python plus a host sandbox reporting full read-only enforcement. Exit code 0, hard-coded success, cancellation, stale versions, and unpaired results do not establish a pass. Other Python scripts and business contracts remain unverified.
 

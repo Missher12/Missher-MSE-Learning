@@ -49,7 +49,7 @@ import { addAdaptiveCandidate, competeAdaptiveCandidate, adaptivePolicyMatches, 
   synthesizeAdaptiveTaskPolicy } from './adaptive-recall.mjs'
 import { developmentCheckMatchesVerification, developmentCheckIdForCommand, pythonCommandSpec,
   pythonReceiptCommandSpec, pythonBOMLessonEvidenceSupported, pythonReceiptLessonBirthProofFor,
-  pythonReceiptLessonEvidenceSupported }
+  pythonReceiptLessonEvidenceSupported, isKnownNativeCheckerId }
   from './checker.mjs'
 import { replayAdaptivePolicy } from './adaptive-replay.mjs'
 import { localDayKey } from './time.mjs'
@@ -103,6 +103,9 @@ const strategyMethodMaterial = entry => JSON.stringify({ applicability: entry.ap
 const strategyFailureMaterial = capsule => JSON.stringify({ message: capsule.message ?? null,
   command: capsule.command ?? null, toolName: capsule.toolName ?? null,
   failureClass: capsule.failureClass ?? null })
+const hasNativeCheckerFailure = (feedback, entryId, version) => feedback.some(item =>
+  item.entryId === entryId && item.version === version && item.kind === 'check_fail'
+    && item.voided !== true && isKnownNativeCheckerId(item.checkId))
 const adaptiveFeaturesFor = (policy, probe) => policy?.schema === 'mse-adaptive-recall-v2'
   ? probe.taskFeatures ?? [] : probe.features
 const adaptiveQueryFor = (policy, probe) => policy?.schema === 'mse-adaptive-recall-v2'
@@ -371,9 +374,7 @@ function settleRecallStrategy(doc, { turnKey, sessionId, outcome, receipt,
       const feedback = receipt.methodFeedback ?? []
       const recurrence = feedback.some(item => item.entryId === row.id && item.version === row.version
         && item.kind === 'recurrence' && item.voided !== true)
-      const checkerFailure = feedback.some(item => item.entryId === row.id && item.version === row.version
-        && item.kind === 'check_fail' && ['json-file-parses-v1', 'python-json-loader-v1'].includes(item.checkId)
-        && item.voided !== true)
+      const checkerFailure = hasNativeCheckerFailure(feedback, row.id, row.version)
       if (!recurrence && !checkerFailure) continue
       if (state.rows.some(item => item.mode === 'isolated'
         && recallStrategyIdentity(item) === recallStrategyIdentity(row))) continue
@@ -544,8 +545,7 @@ function settleAdaptiveRecall(doc, { turnKey, sessionId, outcome, receipt, allow
       continue
     }
     if (signal.kind === 'checker_failure') {
-      const checkerFailure = methodFeedback.some(row => row.entryId === policy.entryId
-        && row.version === policy.version && row.kind === 'check_fail' && row.voided !== true)
+      const checkerFailure = hasNativeCheckerFailure(methodFeedback, policy.entryId, policy.version)
       const active = probe.activePolicies.includes(policy.id)
       if (!checkerFailure || !active || policy.mode !== 'approved') {
         decision(policyId, signal.entryId, signal.version, 'unknown', 'policy_stale')

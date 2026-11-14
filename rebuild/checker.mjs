@@ -51,6 +51,10 @@ const DEVELOPMENT_CHECK_IDS = Object.freeze({
   pythonJson: 'python-json-loader-v1',
   pythonReceipt: 'python-receipt-contract-v1',
 })
+export function isKnownNativeCheckerId(checkId) {
+  return typeof checkId === 'string'
+    && (Object.hasOwn(CHECKERS, checkId) || Object.values(DEVELOPMENT_CHECK_IDS).includes(checkId))
+}
 const SAFE_LOCAL_PATH = /^(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9_./*-]+$/u
 const SAFE_PYTHON_PATH = /^(?!.*(?:^|\/)\.\.(?:\/|$))[A-Za-z0-9_./-]+$/u
 
