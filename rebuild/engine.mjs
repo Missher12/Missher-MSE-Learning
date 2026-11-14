@@ -46,7 +46,7 @@ import { RECALL_QUALIFICATION } from './recall-qualification.mjs'
 import { addAdaptiveCandidate, competeAdaptiveCandidate, adaptivePolicyMatches, adaptiveQueryFeatures,
   adaptiveQueryKey, adaptiveTaskFeatures, narrowAdaptivePolicy,
   synthesizeAdaptiveTaskPolicy } from './adaptive-recall.mjs'
-import { developmentCheckMatchesVerification, developmentCheckIdForCommand,
+import { developmentCheckMatchesVerification, developmentCheckIdForCommand, pythonCommandSpec,
   pythonBOMLessonEvidenceSupported }
   from './checker.mjs'
 import { replayAdaptivePolicy } from './adaptive-replay.mjs'
@@ -2458,7 +2458,7 @@ export class RebuildEngine {
     }).map(offer => ({ id: offer.id, version: offer.version }))
   }
 
-  /** Offers for the declared development command and one exact lesson version, never guards/rules. */
+  /** Offers for one supported check and exact lesson version, never guards/rules. */
   developmentRelevantOffers({ sessionId, turnId, checkId, command }) {
     const observedCheck = typeof command === 'string'
       ? developmentCheckIdForCommand(command) : checkId
@@ -2485,7 +2485,9 @@ export class RebuildEngine {
         || this.#materialOk(strategyMethodMaterial(attribution.target.record), null) !== true) return false
       const declared = attribution.target.record.lesson?.verification?.check
       return typeof command === 'string'
-        ? developmentCheckMatchesVerification(declared, command) : declared === observedCheck
+        ? developmentCheckMatchesVerification(declared, command)
+        : observedCheck === 'python-json-loader-v1'
+          ? pythonCommandSpec(declared) !== null : declared === observedCheck
     }).map(({ id, version }) => ({ id, version }))
     return matches.length === 1 ? matches : []
   }

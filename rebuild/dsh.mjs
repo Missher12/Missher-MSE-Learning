@@ -84,6 +84,9 @@ function correctionMaterial(text) {
   return clauses.filter(clause => !clauseIsQuestion(clause)).join(' ').slice(0, 1536)
 }
 
+const PYTHON_GUIDANCE_EXPLICIT_OPT_OUT = /(?:\b(?:do not|don't|never|skip)\s+(?:run|execute|test|verify|validate|check)\b|(?:不(?:要|用|必|需|需要)?|无需)(?:执行|运行|验收|验证|测试|检查|调用|跑)|(?<!不要)(?<!别)(?:只|仅)(?:解释|说明)(?:原因|背景)?(?:即可|就好)?)/iu
+const PYTHON_VERIFIER_RUNTIME_GUIDANCE = '仅在本次任务需要执行或验收这条当前 Python/BOM 方法时，才调用 `mse_verify_python` 一次。纯问答或仅解释时不要调用；用户明确要求不执行、不验收时也不要调用。可先只读定位脚本读取的 JSON `inputPath`，再用当前方法原样的 `verification.check` 和 workspace-relative 路径调用。不要用 bash 重跑原始命令，也不要用 bash 退出码或自行打印的内容代替工具结果。路径不确定或结果为 `unknown` 时按未验证报告，不得称为通过。'
+
 const SCOPED_PATTERN = /(?:仅|只)(?:在)?(?:本|这个|该)(?:项目|仓库|库)|(?:在本|这个)(?:项目|仓库)(?:里|中|内)/u
 const textsOf = message => (message?.content ?? [])
   .filter(part => part?.type === 'text').map(part => part.text ?? '')
@@ -107,6 +110,35 @@ export function apply(ctx, config = {}) {
   const traceShortId = value => typeof value !== 'string' ? null
     : /^mem_[a-f0-9]{24}$/u.test(value) ? value.slice(4, 12)
       : /^[a-f0-9]{64}$/u.test(value) ? value.slice(0, 12) : null
+  const pythonGuidanceByAgent = new WeakMap()
+  const pythonGuidanceAgentsByTurn = new Map()
+  const clearPythonGuidanceAgent = agent => {
+    if (agent === null || typeof agent !== 'object') return
+    const current = pythonGuidanceByAgent.get(agent)
+    if (current === undefined) return
+    pythonGuidanceByAgent.delete(agent)
+    const key = traceTurnKey(current.sessionId, current.turnId)
+    const agents = pythonGuidanceAgentsByTurn.get(key)
+    agents?.delete(agent)
+    if (agents?.size === 0) pythonGuidanceAgentsByTurn.delete(key)
+  }
+  const rememberPythonGuidanceTurn = (agent, sessionId, turnId, prompt, inheritedAllowed = false) => {
+    if (agent === null || typeof agent !== 'object' || sessionId === undefined || turnId === undefined) return
+    clearPythonGuidanceAgent(agent)
+    const hasCurrentPrompt = typeof prompt === 'string' && prompt.trim() !== ''
+    const allowed = hasCurrentPrompt
+      ? !PYTHON_GUIDANCE_EXPLICIT_OPT_OUT.test(trustedBody(prompt)) : inheritedAllowed === true
+    const turnKey = traceTurnKey(sessionId, turnId)
+    pythonGuidanceByAgent.set(agent, { sessionId: String(sessionId), turnId: String(turnId), allowed })
+    const agents = pythonGuidanceAgentsByTurn.get(turnKey) ?? new Set()
+    agents.add(agent)
+    pythonGuidanceAgentsByTurn.set(turnKey, agents)
+  }
+  const clearPythonGuidanceTurn = (sessionId, turnId) => {
+    const key = traceTurnKey(sessionId, turnId)
+    for (const agent of pythonGuidanceAgentsByTurn.get(key) ?? []) pythonGuidanceByAgent.delete(agent)
+    pythonGuidanceAgentsByTurn.delete(key)
+  }
   const rsiTraceView = () => ({ processLocal: true, restartClears: true,
     recent: rsiTraceRows.slice(-RSI_TRACE_LIMIT).reverse().map(row => ({ ...row })) })
   let runtimeReadReason = null
@@ -139,6 +171,29 @@ export function apply(ctx, config = {}) {
       if (!isMemoryStorageError(error)) throw error
       return null
     }
+  }
+
+  // The SDK assembles the model-facing tool schema before agent/pre-step and refreshes dynamic
+  // context after it. Keep this optional runtime capability separate from learned recall; the
+  // provider rechecks the exact current-turn offer every time the SDK refreshes the context.
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['systemPrompt'], runtimeCtx => {
+      const systemPrompt = runtimeCtx?.systemPrompt
+      if (typeof systemPrompt?.context !== 'function') return
+      const teamOrder = systemPrompt.getContextOrder?.('TEAM_IDENTITY')
+      systemPrompt.context({
+        name: 'mse-python-verifier-choice',
+        order: Number.isFinite(teamOrder) ? teamOrder + 1 : 126,
+        text: ({ agent } = {}) => {
+          const state = agent === null || typeof agent !== 'object' ? null : pythonGuidanceByAgent.get(agent)
+          if (state?.allowed !== true) return ''
+          const offers = safeStoreAction('store_unavailable', () =>
+            engine.developmentRelevantOffers({ sessionId: state.sessionId, turnId: state.turnId,
+              checkId: PYTHON_VERIFIER_CHECK }), 'read') ?? []
+          return offers.length === 1 ? PYTHON_VERIFIER_RUNTIME_GUIDANCE : ''
+        },
+      })
+    })
   }
   const RSI_TRACE_STAGES = new Set(['admission', 'probe', 'tool_result', 'pending', 'settled'])
   const RSI_TRACE_REASONS = new Set([
@@ -560,6 +615,18 @@ export function apply(ctx, config = {}) {
     const session = payload?.agent?.session
     const sessionId = sessionIdOf(session)
     const turn = payload?.turn
+    const guideAgent = payload?.agent
+    const previousGuide = guideAgent !== null && typeof guideAgent === 'object'
+      ? pythonGuidanceByAgent.get(guideAgent) : null
+    clearPythonGuidanceAgent(guideAgent)
+    const trustedForGuide = (payload?.messages ?? []).filter(message => message?.role === 'user'
+      && message?.source?.kind === 'user' && !isMseSource(message.source))
+    const guidePrompt = trustedForGuide.length === 0 ? ''
+      : textsOf(trustedForGuide[trustedForGuide.length - 1]).join('\n')
+    const sameGuideTurn = previousGuide !== undefined && previousGuide !== null
+      && String(sessionId) === previousGuide.sessionId && String(turn) === previousGuide.turnId
+    if (!disposed) rememberPythonGuidanceTurn(guideAgent, sessionId, turn, guidePrompt,
+      sameGuideTurn && previousGuide.allowed)
     const decision = await next(payload)
     try {
     if (disposed || payload?.step !== 1 || sessionId === undefined || turn === undefined) return decision
@@ -1248,6 +1315,8 @@ export function apply(ctx, config = {}) {
 
   disposers.push(ctx.on('session/event', (session, event) => {
     const sessionId = sessionIdOf(session)
+    if (sessionId !== undefined && (event?.type === 'turn/end' || event?.type === 'turn/cancel')
+      && event.data?.turn !== undefined) clearPythonGuidanceTurn(sessionId, event.data.turn)
     capturePersistedDevelopmentResult(session, event, sessionId)
     ingestDiagnosticEvent(sessionId, session, event)
     if (event?.type === 'turn/start' && sessionId !== undefined

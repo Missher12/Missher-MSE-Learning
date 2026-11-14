@@ -2,7 +2,7 @@
 
 ![MSE Learning · 持久学习（品牌插画）](docs/images/cover-v2.webp)
 
-MSE learns reusable corrections and failure lessons for DSH. **1.3.7** adds objective verification for Python JSON/BOM repair methods: actual reading and parsing, output comparison, and source/BOM preservation. Results credit the exact recalled version, and failures feed the existing revision path. The UI, learning records, and candidate approval criteria stay unchanged.
+MSE learns reusable corrections and failure lessons for DSH. **1.3.8** adds dynamic guidance when the current turn has exactly one source-admitted Python JSON/BOM method: use `mse_verify_python` only when the task needs execution or acceptance. Do not call it for pure Q&A or an explicit no-execution request; bash exit status and self-reported output are not pass evidence. Objective verification, version binding, failure revision, UI, learning records, and candidate approval criteria stay unchanged.
 
 Python checks run one restricted snapshot through the native `mse_verify_python` tool and require Python plus a host sandbox reporting full read-only enforcement. Exit code 0, hard-coded success, cancellation, stale versions, and unpaired results do not establish a pass. Unsupported scripts and other business contracts remain unverified.
 

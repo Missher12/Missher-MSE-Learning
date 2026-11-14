@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { ToolsService } from '@deepseek-ai/dsh-tools'
 import * as NativeTools from '@deepseek-ai/dsh-tool-executor-native'
+import SystemPrompt, { joinContextSections, renderContextSections } from '@deepseek-ai/dsh-system-prompt'
 import LocalSandboxProvider from '@deepseek-ai/dsh-sandbox-local'
 import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import bundle from './root.mjs'
@@ -60,7 +61,6 @@ async function createHarness({ business = false } = {}) {
   let afterToolsResult = null
   const observedToolResults = []
   const llmCalls = []
-  ctx.provide('systemPrompt', { tools() { return () => {} } })
   ctx.provide('agents', {})
   ctx.provide('dshHomePath', name => join(dir, name))
   ctx.provide('llm', { async *stream(options) {
@@ -88,6 +88,7 @@ async function createHarness({ business = false } = {}) {
   }
 
   await ctx.plugin(WorkspaceRegistryMirror)
+  await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolsService)
   await ctx.plugin(NativeTools)
   const sandboxFiber = ctx.registry.plugin(LocalSandboxProvider, {
@@ -195,6 +196,21 @@ async function createHarness({ business = false } = {}) {
   }
   const agent = { session, options: { provider: 'fake-provider', model: 'fake-model' } }
 
+  const assembleModelSurface = async () => {
+    const modelSelection = { provider: 'fake-provider', model: 'fake-model' }
+    const toolSet = await ctx.tools.resolve({ agent, modelSelection, signal: new AbortController().signal })
+    const assembly = await ctx.systemPrompt.assemble({ agent, scope: agent, modelSelection, toolSet })
+    return {
+      assembly,
+      runtimeContext() {
+        const refreshed = ctx.systemPrompt.refreshContext(assembly,
+          { agent, scope: agent, modelSelection })
+        return joinContextSections(renderContextSections(refreshed))
+      },
+      dispose: () => toolSet.dispose(),
+    }
+  }
+
   const startTurn = async (turn, prompt = 'Python 加载 UTF-8 BOM JSON 配置时发生 JSONDecodeError，请按方法处理') => {
     session.append('turn/start', { turn })
     await session.flushEvents()
@@ -233,20 +249,35 @@ async function createHarness({ business = false } = {}) {
   }
   return { ctx, api, session, agent, entryId, problemId: problem.id, capsuleId, dir,
     startTurn, execute, executeFailingTool, endTurn, llmCalls, observedToolResults,
-    nativeSandboxAvailable,
+    nativeSandboxAvailable, assembleModelSurface,
     setSourceAllowed(value) { sourceAllowed = value },
     setAfterToolsResult(fn) { afterToolsResult = fn }, teardown }
 }
 
 test('the Cordis native pipeline persists the Python result, settles verified, and revises from a new failed capsule', NATIVE_TEST_OPTIONS, async t => {
   const h = await createHarness()
+  let modelSurface
   try {
     if (!h.nativeSandboxAvailable) { t.skip('native LocalSandboxProvider does not report full read-only enforcement here'); return }
-    const definitions = h.ctx.tools.view(h.agent)
-    assert.equal(definitions.knownNames.has('mse_verify_python'), true)
+    modelSurface = await h.assembleModelSurface()
+    const verifierSchema = modelSurface.assembly.tools.find(tool => tool.name === 'mse_verify_python')
+    assert.ok(verifierSchema, 'the actual SystemPromptService assembly includes the ToolsService schema')
+    assert.deepEqual(Object.keys(verifierSchema.parameters).sort(), ['command', 'inputPath'])
+    assert.doesNotMatch(modelSurface.runtimeContext(), /mse_verify_python/u,
+      'without a prepared eligible offer there is no Python-verifier runtime guidance')
     await h.startTurn(1)
+    const pythonGuidance = modelSurface.runtimeContext()
+    assert.match(pythonGuidance, /mse_verify_python/u)
+    assert.match(pythonGuidance, /bash/u)
+    assert.match(pythonGuidance, /exit code|退出码/iu)
+    assert.match(pythonGuidance, /纯问答/u)
+    assert.match(pythonGuidance, /unknown/u)
     assert.deepEqual(h.api.engine.developmentRelevantOffers({ sessionId: h.session.id, turnId: '1',
       command: COMMAND }), [{ id: h.entryId, version: 1 }])
+    assert.deepEqual(h.api.engine.developmentRelevantOffers({ sessionId: h.session.id, turnId: '1',
+      checkId: 'python-json-loader-v1' }), [{ id: h.entryId, version: 1 }])
+    modelSurface.dispose()
+    modelSurface = null
     const pass = await h.execute(1, 'python-pass')
     assert.deepEqual(pass.value, { status: 'pass', reason: 'matched' })
     assert.ok(h.session.events.some(event => event.type === 'tool/call'
@@ -311,7 +342,10 @@ test('the Cordis native pipeline persists the Python result, settles verified, a
       'the failure capsule carries the exact persisted checker event identity')
 
     writeFileSync(join(h.dir, '.mse-evolution', 'verify', 'check.py'), SCRIPT)
+    modelSurface = await h.assembleModelSurface()
     await h.startTurn(3)
+    assert.match(modelSurface.runtimeContext(), /mse_verify_python/u,
+      'the refreshed prompt follows the newly offered method version')
     assert.deepEqual(h.api.engine.developmentRelevantOffers({ sessionId: h.session.id, turnId: '3',
       command: COMMAND }), [{ id: h.entryId, version: 2 }],
     'the audited check-failure capsule keeps the same-problem revised method objectively verifiable')
@@ -330,21 +364,85 @@ test('the Cordis native pipeline persists the Python result, settles verified, a
     assert.equal(archivedV1.stats.checkFails, 1)
     assert.equal(doc.entries.find(row => row.id === h.entryId)?.methodStats.checkPasses, 1)
     assert.equal(doc.entries.find(row => row.id === h.entryId)?.methodStats.checkFails, 0)
-  } finally { await h.teardown() }
+    assert.doesNotMatch(modelSurface.runtimeContext(), /mse_verify_python/u,
+      'turn end clears the ephemeral guide')
+  } finally { modelSurface?.dispose(); await h.teardown() }
+})
+
+test('runtime guidance is refreshed from the unique current Python offer and respects an explicit no-execution request', async () => {
+  const h = await createHarness()
+  let modelSurface
+  try {
+    modelSurface = await h.assembleModelSurface()
+    const verifierSchema = modelSurface.assembly.tools.find(tool => tool.name === 'mse_verify_python')
+    assert.ok(verifierSchema, 'the actual SystemPromptService assembly includes the ToolsService schema')
+    assert.deepEqual(Object.keys(verifierSchema.parameters).sort(), ['command', 'inputPath'])
+    await h.startTurn(1)
+    assert.match(modelSurface.runtimeContext(), /mse_verify_python/u)
+    h.setSourceAllowed(false)
+    assert.doesNotMatch(modelSurface.runtimeContext(), /mse_verify_python/u,
+      'withdrawing the current source removes the guide on context refresh')
+    h.setSourceAllowed(true)
+    assert.match(modelSurface.runtimeContext(), /mse_verify_python/u,
+      'the still-current unique offer restores guidance when its source is admitted again')
+    await h.endTurn(1, 'aborted')
+    assert.doesNotMatch(modelSurface.runtimeContext(), /mse_verify_python/u)
+
+    await h.startTurn(2, 'Python 加载 UTF-8 BOM JSON 配置时发生 JSONDecodeError；只解释原因，不要执行代码或验收。')
+    assert.deepEqual(h.api.engine.developmentRelevantOffers({ sessionId: h.session.id, turnId: '2',
+      checkId: 'python-json-loader-v1' }), [{ id: h.entryId, version: 1 }],
+    'an explicit no-execution request still has the eligible offer, but the tool is not suggested')
+    assert.doesNotMatch(modelSurface.runtimeContext(), /mse_verify_python/u)
+  } finally { modelSurface?.dispose(); await h.teardown() }
+})
+
+test('MSE can mount when its optional runtime-context service is absent', async () => {
+  const dir = mkdtempSync(join(homedir(), '.mse-python-guidance-'))
+  const ctx = new Context().root
+  ctx.provide('agents', {})
+  ctx.provide('tools', { register() { return () => {} } })
+  ctx.provide('llm', { async *stream() {} })
+  ctx.provide('dshHomePath', name => join(dir, name))
+  ctx.provide('workspaceRegistry', { list() { return [] } })
+  const mseFiber = ctx.registry.plugin(bundle, { modelProvider: 'fake-provider', modelId: 'fake-model',
+    wakeIntervalMs: 60_000 })
+  try {
+    await mseFiber
+    assert.ok(ctx.get('mseRebuild'), 'the plugin still provides its host service without SystemPromptService')
+  } finally {
+    await mseFiber.dispose()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a business-only Python contract does not receive the BOM verifier guide', async () => {
+  const h = await createHarness({ business: true })
+  let modelSurface
+  try {
+    modelSurface = await h.assembleModelSurface()
+    await h.startTurn(1)
+    assert.deepEqual(h.api.engine.developmentRelevantOffers({ sessionId: h.session.id, turnId: '1',
+      checkId: 'python-json-loader-v1' }), [])
+    assert.doesNotMatch(modelSurface.runtimeContext(), /mse_verify_python/u)
+  } finally { modelSurface?.dispose(); await h.teardown() }
 })
 
 test('unsupported Python business checks and unpaired, missing, cancelled, stale, or withdrawn results get no credit', NATIVE_TEST_OPTIONS, async t => {
   const h = await createHarness({ business: true })
+  let modelSurface
   try {
     if (!h.nativeSandboxAvailable) { t.skip('native LocalSandboxProvider does not report full read-only enforcement here'); return }
+    modelSurface = await h.assembleModelSurface()
     await h.startTurn(1)
     assert.deepEqual(h.api.engine.developmentRelevantOffers({ sessionId: h.session.id, turnId: '1',
       command: COMMAND }), [], 'loadedVersion business invariants are outside JSON/BOM scope')
     const unsupported = await h.execute(1, 'python-business')
     assert.deepEqual(unsupported.value, { status: 'unknown', reason: 'no_unique_offer' })
+    assert.doesNotMatch(modelSurface.runtimeContext(), /mse_verify_python/u,
+      'an unsupported business invariant receives no objective-verifier guide')
     await h.endTurn(1)
     assert.equal(h.api.engine.store.read().checkEvents.length, 0)
-  } finally { await h.teardown() }
+  } finally { modelSurface?.dispose(); await h.teardown() }
 
   for (const mode of ['forged', 'missing-result', 'cancelled', 'withdrawn', 'stale-version']) {
     const x = await createHarness()
