@@ -1964,10 +1964,14 @@ export class RebuildEngine {
   /** Explicit user correction: stored IMMEDIATELY as a long-term rule; global unless the user
    *  named a project/environment. Never waits for a threshold, never expires. */
   recordCorrection({ text, sessionId, turnId, projectKey = null, environmentId = null,
-    source = 'direct_user' }) {
+    source = 'direct_user', applicability = '' }) {
     check(typeof text === 'string' && [...text].length >= 8 && [...text].length <= 240
       && Buffer.byteLength(text, 'utf8') <= 480 && /[\r\n\u0000-\u001f\u007f]/u.test(text) === false
-      && !SENSITIVE_PATTERN.test(text) && !AUTHORITY_PATTERN.test(text), 'invalid_rule')
+      && !SENSITIVE_PATTERN.test(text) && !AUTHORITY_PATTERN.test(text)
+      && typeof applicability === 'string'
+      && (applicability === '' || (applicability.length <= 160
+        && /[\r\n\u0000-\u001f\u007f]/u.test(applicability) === false
+        && text.includes(applicability))), 'invalid_rule')
     check(source === 'direct_user', 'rule_requires_user_source')
     const scope = scopeOf(projectKey)
     const id = entryIdFor('rule', scope, normalizeText(text))
@@ -1978,7 +1982,7 @@ export class RebuildEngine {
         capacityRefusal = true
         return ROLLBACK
       }
-      doc.entries.push({ id, type: 'rule', status: 'user_rule', instruction: text, applicability: '',
+      doc.entries.push({ id, type: 'rule', status: 'user_rule', instruction: text, applicability,
         exclusions: '', visibility: projectKey === null && environmentId === null ? 'global' : 'scoped',
         originScope: scope, originEnvironment: environmentOf(environmentId),
         originSession: typeof sessionId === 'string' ? sessionId.slice(0, 512) : null,

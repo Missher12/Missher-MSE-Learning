@@ -110,6 +110,7 @@ test('native Cordis command saves the literal user rule, returns a receipt, and 
   assert.equal(doc.entries[0].status, 'user_rule')
   assert.equal(doc.entries[0].visibility, 'scoped')
   assert.equal(doc.entries[0].instruction, rule)
+  assert.equal(doc.entries[0].applicability, rule)
   assert.equal(doc.entries[0].lesson, null)
   assert.equal(Object.hasOwn(doc.entries[0], 'check_passed'), false)
   assert.equal(Object.hasOwn(doc.entries[0], 'gains'), false)
@@ -119,6 +120,98 @@ test('native Cordis command saves the literal user rule, returns a receipt, and 
     projectKey: h.workspace, prompt: '请检查生成 JSON 配置的格式' })
   assert.equal(recalled.ok, true)
   assert.match(recalled.context, /先用 JSON\.parse 校验格式/u)
+})
+
+test('manual /mse rule is selected by the original prepare query when two older applicable rules compete', async t => {
+  const h = await createManualCommandHarness()
+  t.after(() => h.close())
+  const competitors = [
+    'MSE 候选策略启用审查时，先核对当前证据的登记批次',
+    'MSE 候选策略启用审查时，核实候选状态和对应计划',
+  ]
+  const competitorApplicability = 'MSE 候选策略启用审查时'
+  const competitorIds = []
+  for (const [index, text] of competitors.entries()) {
+    const saved = h.engine.recordCorrection({ text, sessionId: `older-session-${index}`,
+      turnId: `older-${index}`, projectKey: h.workspace })
+    assert.equal(saved.ok, true)
+    competitorIds.push(saved.id)
+    h.engine.store.transaction(doc => {
+      const row = doc.entries.find(entry => entry.id === saved.id)
+      row.applicability = competitorApplicability
+    })
+  }
+
+  const query = '现在要审查一个证据不足的 MSE 候选策略，该如何处理它的启用条件和已有学习数据？请用两句话说明原则，不执行任何工具。'
+  const competition = h.engine.prepare({ sessionId: 'competitive-session', turnId: 'competitive-turn',
+    projectKey: h.workspace, prompt: query })
+  assert.deepEqual(competition.offered.map(row => row.id), competitorIds,
+    'the fixture proves two older rules consume both method slots for the same query')
+
+  const rule = '在 MSE 开发中，候选策略启用必须使用当前版本的独立客观证据，并保留已有学习数据，不能拿旧成绩或清库让策略启用。'
+  const command = await h.run(`/mse ${rule}`)
+  assert.equal(command.result.kind, 'success')
+  const target = h.engine.store.read().entries.find(entry => entry.instruction === rule)
+  const prepared = h.engine.prepare({ sessionId: 'new-session', turnId: 'new-task',
+    projectKey: h.workspace, prompt: query })
+  assert.equal(prepared.ok, true)
+  assert.ok(prepared.offered.some(row => row.id === target.id),
+    `manual rule should survive applicability-first competition; selected ${JSON.stringify(prepared.offered)} over ${JSON.stringify(competitorIds)}`)
+  assert.ok(prepared.context.includes(rule))
+})
+
+test('manual applicability respects the existing 160 UTF-16 unit field bound without truncating the rule', async t => {
+  const h = await createManualCommandHarness()
+  t.after(() => h.close())
+  const within = '😀'.repeat(80)
+  const above = '😀'.repeat(81)
+  assert.equal(within.length, 160)
+  assert.equal(above.length, 162)
+  assert.ok(Buffer.byteLength(within, 'utf8') > 160, 'the existing memory schema caps UTF-16 units, not UTF-8 bytes')
+
+  assert.equal((await h.run(`/mse ${within}`)).result.kind, 'success')
+  assert.equal((await h.run(`/mse ${above}`)).result.kind, 'success')
+  const entries = h.engine.store.read().entries
+  const exact = entries.find(entry => entry.instruction === within)
+  const long = entries.find(entry => entry.instruction === above)
+  assert.equal(exact.applicability, within)
+  assert.equal(exact.applicability.length, 160)
+  assert.equal(long.applicability, '')
+  assert.equal(long.instruction, above, 'an over-limit applicability is omitted instead of truncating the original rule')
+  assert.throws(() => h.engine.recordCorrection({ text: 'x'.repeat(200), applicability: 'x'.repeat(161),
+    sessionId: h.session.id, turnId: 'invalid-applicability', projectKey: h.workspace }),
+  error => error?.code === 'invalid_rule')
+})
+
+test('traceable manual applicability does not bypass project visibility during prepare', async t => {
+  const h = await createManualCommandHarness()
+  t.after(() => h.close())
+  const scopedRule = '仅在本项目生成 MSE 报告时，保留报告中的原始证据'
+  const scopedResult = await h.run(`/mse ${scopedRule}`)
+  assert.equal(scopedResult.result.kind, 'success')
+  const sameProject = h.engine.prepare({ sessionId: 'same-project', turnId: 'same-project-turn',
+    projectKey: h.workspace, prompt: '本项目生成 MSE 报告时，如何保留报告中的原始证据？' })
+  assert.ok(sameProject.offered.some(row => row.id === h.engine.store.read().entries
+    .find(entry => entry.instruction === scopedRule).id))
+
+  const otherProject = h.engine.prepare({ sessionId: 'other-project', turnId: 'other-project-turn',
+    projectKey: join(h.workspace, '..', 'sibling-project'),
+    prompt: '本项目生成 MSE 报告时，如何保留报告中的原始证据？' })
+  assert.ok(!otherProject.context.includes(scopedRule))
+})
+
+test('deduplicating an existing empty-applicability rule never backfills or changes it', async t => {
+  const rule = '本项目归档 MSE 验收材料时保留原始文件与版本记录'
+  const h = await createManualCommandHarness({ seedRule: rule })
+  t.after(() => h.close())
+  const before = structuredClone(h.engine.store.read().entries.find(entry => entry.instruction === rule))
+  assert.equal(before.applicability, '')
+
+  const duplicate = await h.run(`/mse ${rule}`)
+  assert.equal(duplicate.result.kind, 'success')
+  assert.match(duplicate.result.text, /未覆盖/u)
+  const after = h.engine.store.read().entries.find(entry => entry.instruction === rule)
+  assert.deepEqual(after, before)
 })
 
 test('native command deduplicates without overwriting and only explicit --global changes scope', async t => {

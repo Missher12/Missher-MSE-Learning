@@ -657,7 +657,10 @@ export function apply(ctx, config = {}) {
     try {
       if (!ensureStoreReady()) return manualCommandError('学习库当前不可读取或写入；未确认保存结果。')
       const saved = engine.recordCorrection({ text, sessionId, turnId: String(Date.now()),
-        projectKey, environmentId: null, source: 'direct_user' })
+        projectKey, environmentId: null, source: 'direct_user',
+        // Preserve the user's exact source as a recall applicability anchor only when it fits
+        // the existing field bound. Long rules remain intact in instruction; never truncate.
+        applicability: text.length <= 160 ? text : '' })
       if (saved.ok !== true) {
         if (saved.reason === 'entry_capacity') return manualCommandError('学习库已达到容量上限，未保存。')
         return manualCommandError('学习库拒绝了这条经验，未保存。')
