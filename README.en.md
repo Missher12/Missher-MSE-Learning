@@ -2,7 +2,7 @@
 
 ![MSE Learning · 持久学习（品牌插画）](docs/images/cover-v2.webp)
 
-MSE learns reusable corrections and failure lessons for DSH. **1.3.10** keeps the bounded Python JSON/BOM and paired-entry receipt checks from 1.3.9. Failures from registered native checkers now isolate the active strategy for the exact method version offered in that turn; unknown checker IDs cannot trigger isolation. Prior pass records are not inherited, and existing candidate approval thresholds remain unchanged.
+MSE learns reusable corrections and failure lessons for DSH. **1.3.11** adds the native `/mse` command: `/mse <experience>` saves the literal text as a project rule; bare `/mse` distills only from bounded user-authored text in the just-finished task; `/mse --global <experience>` saves globally only when explicitly requested. Distillation uses the current model route once and refuses unclear sources, insufficient rules, or truncated output without claiming verification. 1.3.10 keeps the bounded Python JSON/BOM and paired-entry receipt checks from 1.3.9. Failures from registered native checkers isolate the active strategy for the exact method version offered in that turn; unknown checker IDs cannot trigger isolation. Prior pass records are not inherited, and existing candidate approval thresholds remain unchanged.
 
 Checks run one restricted snapshot through a native tool and require Python plus a host sandbox reporting full read-only enforcement. Exit code 0, hard-coded success, cancellation, stale versions, and unpaired results do not establish a pass. Other Python scripts and business contracts remain unverified.
 
@@ -11,6 +11,8 @@ Resumption requires an admitted native source, matching failure turn, and the ex
 Targets: Windows, macOS, and Linux on x64/ARM64, Node ≥22.19. Core OS checks and DSH host acceptance are documented separately in [platform validation](https://github.com/Missher12/Missher-MSE-Learning/blob/main/VALIDATION.md).
 
 Open Settings → Self-evolution to review six pages. Read-only views make no model calls. Background work may incur charges; unknown-cost calls are never replayed automatically.
+
+In the DSH command bar, `/mse <experience>` saves the exact text as a rule scoped to the current project by default. Use `/mse --global <experience>` to choose global scope. Bare `/mse` attempts one rule from user-authored text in the just-finished task, using the current model route once; unclear evidence, unverified source/scope, or malformed or truncated output is refused without saving. This command does not run checks or create verification scores.
 
 See the [publication record](https://github.com/Missher12/Missher-MSE-Learning/blob/main/PUBLICATION.md) and [validation record](https://github.com/Missher12/Missher-MSE-Learning/blob/main/VALIDATION.md).
 

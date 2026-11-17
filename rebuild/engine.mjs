@@ -1182,6 +1182,17 @@ function extractRejectReason(correction, cand) {
   }
   return null
 }
+
+/** Reuse the extractor's deterministic evidence, negation, object and scope checks for
+ *  user-commanded summaries. This validates only; it never writes candidate or scoring state. */
+export function validateManualRule({ userText, evidence, instruction, applicability = '' }) {
+  if (typeof userText !== 'string' || typeof evidence !== 'string'
+    || typeof instruction !== 'string' || typeof applicability !== 'string') return 'invalid_result'
+  if (sentencesOf(evidence).some(clauseIsQuestion)) return 'question_not_rule'
+  return extractRejectReason({ evidence, instruction, applicability,
+    durability: 'durable', scope: 'project', basis: 'manual_command' }, { userText, context: [] })
+}
+
 const localDay = localDayKey
 const dayEnd = day => { const [y, m, d] = day.split('-').map(Number); return new Date(y, m - 1, d, 23, 59, 59, 999).getTime() }
 const normalizeText = text => text.normalize('NFKC').toLocaleLowerCase('und').replace(/\s+/gu, '')

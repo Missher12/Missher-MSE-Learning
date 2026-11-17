@@ -28,10 +28,8 @@ try {
 export const Config = dshConfig
 
 export const name = 'mse-learning'
-// MSE16: workspaceRegistry MUST be declared here — this root object is what the Cordis loader
-// reads `inject` off BEFORE apply runs, and in the sandboxed host the inject list is the ONLY
-// service entry (anything else throws `cannot get property "workspaceRegistry" without inject`,
-// which is exactly how frozen-15 died on the real host).
+// Core host services MUST be declared here — Cordis treats each static inject as required.
+// Optional capabilities are loaded in their own dependent sub-plugin inside the adapter.
 export const inject = ['agents', 'tools', 'llm', 'dshHomePath', 'workspaceRegistry']
 
 export async function apply(ctx, config) {
