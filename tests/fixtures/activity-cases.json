@@ -1,0 +1,69 @@
+{
+  "now": 1772337600000,
+  "timezone": "Asia/Shanghai",
+  "entries": [
+    {
+      "id": "before-window",
+      "type": "rule",
+      "createdAt": 1735704000000,
+      "updatedAt": 1772337600000,
+      "importedFrom": null,
+      "status": "retired"
+    },
+    {
+      "id": "leap",
+      "type": "rule",
+      "createdAt": 1709179200000,
+      "importedFrom": null,
+      "status": "active"
+    },
+    {
+      "id": "yesterday",
+      "type": "lesson",
+      "createdAt": 1772294399000,
+      "importedFrom": null,
+      "status": "pending"
+    },
+    {
+      "id": "today-rule",
+      "type": "rule",
+      "createdAt": 1772294400000,
+      "importedFrom": null,
+      "status": "active"
+    },
+    {
+      "id": "today-digest",
+      "type": "digest",
+      "createdAt": 1772326800000,
+      "importedFrom": null,
+      "status": "active"
+    },
+    {
+      "id": "import",
+      "type": "rule",
+      "createdAt": 1772326800000,
+      "importedFrom": "legacy",
+      "status": "active"
+    },
+    {
+      "id": "future",
+      "type": "lesson",
+      "createdAt": 1772380800000,
+      "importedFrom": null,
+      "status": "pending"
+    }
+  ],
+  "expected": {
+    "retained": 7,
+    "validNonFutureNewLearning": 5,
+    "todayNew": 2,
+    "weekNew": 3,
+    "beforeYearWindowNew": 2,
+    "imported": 1,
+    "futureExcludedFromHeatmap": 1,
+    "dateSpecific": {
+      "2026-02-28": 1,
+      "2026-03-01": 2
+    }
+  }
+}

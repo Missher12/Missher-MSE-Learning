@@ -4,7 +4,7 @@ import { readFileSync, rmSync } from 'node:fs'
 import { projectActivity, mondayForDay } from './activity.mjs'
 import { buildEngine } from '../scripts/rsi/adaptive-engine-fixture.mjs'
 
-const fixture = JSON.parse(readFileSync(new URL('../delivery/usability130/ROOT-ACTIVITY-CASES.json', import.meta.url)))
+const fixture = JSON.parse(readFileSync(new URL('../tests/fixtures/activity-cases.json', import.meta.url)))
 
 test('activity uses unique retained IDs, original creation days, and excludes imports and future records', () => {
   const view = projectActivity(fixture.entries, fixture.now, fixture.timezone)

@@ -243,6 +243,48 @@ test('native command preserves the literal rule body after the command separator
   assert.equal(h.engine.store.read().entries[0].instruction, literal)
 })
 
+test('a positively worded temporary instruction cannot be saved by /mse', async t => {
+  const h = await createManualCommandHarness()
+  t.after(() => h.close())
+  for (const line of [
+    '/mse 这次先将测试按钮改成蓝色。',
+    '/mse --global 报告格式先确认，本次改用周统计。',
+    '/mse 这一次用示例数据绘制临时对比图。',
+  ]) {
+    const result = await h.run(line)
+    assert.equal(result.result.kind, 'error', line)
+    assert.equal(h.engine.store.read().entries.length, 0)
+  }
+  const durable = '比较这次运行结果和上次结果时，保留完整差异记录。'
+  assert.equal((await h.run('/mse ' + durable)).result.kind, 'success')
+  assert.equal(h.engine.store.read().entries[0].instruction, durable)
+})
+
+test('bare /mse refuses a positively worded temporary task before calling the model', async t => {
+  const h = await createManualCommandHarness()
+  t.after(() => h.close())
+  addCompletedTask(h.session, 1, '这次先将测试按钮改成蓝色。')
+  const result = await h.run('/mse')
+  assert.equal(result.result.kind, 'error')
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.engine.store.read().entries.length, 0)
+})
+
+test('manual /mse --global cannot save a rule explicitly limited to this project', async t => {
+  const h = await createManualCommandHarness()
+  t.after(() => h.close())
+  const literal = '仅在本项目生成 JSON 配置时，务必保留现有字段的顺序。'
+  const result = await h.run('/mse --global ' + literal)
+  assert.equal(result.result.kind, 'error')
+  assert.equal(h.engine.store.read().entries.length, 0)
+  assert.equal((await h.run('/mse ' + literal)).result.kind, 'success')
+  assert.equal(h.engine.store.read().entries[0].visibility, 'scoped')
+  addCompletedTask(h.session, 1, literal)
+  assert.equal((await h.run('/mse --global')).result.kind, 'error')
+  assert.equal(h.calls.length, 0)
+  assert.equal(h.engine.store.read().entries.length, 1)
+})
+
 test('bare /mse composes only bounded explicit user text from the last completed task', async t => {
   const h = await createManualCommandHarness({ history: [
     { type: 'turn/start', data: { turn: 3 } },

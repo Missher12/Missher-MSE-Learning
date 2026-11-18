@@ -626,6 +626,18 @@ export function apply(ctx, config = {}) {
 
   const MANUAL_COMMAND_USAGE = '用法：/mse <经验> 直接保存；/mse 从刚结束的任务整理；仅在明确选择全局时使用 /mse --global <经验>。'
   const manualCommandError = reason => ({ kind: 'error', text: `${reason}\n${MANUAL_COMMAND_USAGE}` })
+  const manualScopeError = (text, globalScope) => {
+    // Literal commands can begin with a time qualifier followed by any action. Reuse the
+    // existing temporary patterns as well, without treating a mid-clause comparison as a lead.
+    if (TEMPORARY_SCOPE.test(text)
+      || /(?:^|[，,。！？!?；;：:\n])\s*(?:[「“"]\s*)?(?:这(?:一)?次|本次|此次|这(?:一)?轮)/u.test(text)) {
+      return manualCommandError('这条要求只适用于当前任务或工单，未保存为长期规则。')
+    }
+    if (globalScope && /(?:^|[，,。！？!?；;：:\n])\s*(?:[「“"]\s*)?(?:仅|只)(?:在|限(?:于|在)?|适用于?)?\s*(?:本|这个|该|当前)(?:项目|仓库|工作区)/u.test(text)) {
+      return manualCommandError('正文仅适用于本项目，未保存为全局规则。请去掉 --global 后按本项目保存。')
+    }
+    return null
+  }
   const cancelledTurnReason = reason => ['aborted', 'cancelled', 'canceled'].includes(reason)
   const latestCommandTurn = session => {
     if (!Number.isSafeInteger(session?.seq) || typeof session?.eventAt !== 'function') return null
@@ -727,8 +739,9 @@ export function apply(ctx, config = {}) {
       const userContext = collected.items.filter(item => item.role === 'user' && item.turn === turnState.turn)
         .map(item => trustedBody(item.text).trim()).filter(value => value !== '')
       if (userContext.length === 0) return manualCommandError('最近任务没有足够清晰的用户内容可整理，未保存。')
-      if (userContext.some(value => TEMPORARY_SCOPE.test(value))) {
-        return manualCommandError('最近任务中的要求只适用于当前任务或工单，不能整理成长期规则。')
+      for (const item of userContext) {
+        const refused = manualScopeError(item, globalScope)
+        if (refused !== null) return refused
       }
       const route = invocation?.agent?.options
       if (typeof route?.provider !== 'string' || route.provider === ''
@@ -774,10 +787,6 @@ export function apply(ctx, config = {}) {
           return manualCommandError('无法从最近任务整理出符合格式的经验，未保存。')
         }
         text = composed.evidence
-        if (text === '' || TEMPORARY_SCOPE.test(text)
-          || textMentionsOutside(text, source.roots, source.cwd)) {
-          return manualCommandError('整理结果为空、仅适用于当前任务，或引用了项目外材料；未保存。')
-        }
       } catch (error) {
         if (disposed) return manualCommandError('插件已卸载，未保存。')
         if (isMemoryStorageError(error)) return manualCommandError('学习库当前不可用；未保存。')
@@ -790,7 +799,8 @@ export function apply(ctx, config = {}) {
       }
     }
     if (text === '') return manualCommandError('没有提供经验内容。')
-    if (TEMPORARY_SCOPE.test(text)) return manualCommandError('这条要求看起来只适用于当前任务或工单，不能作为长期规则保存。')
+    const refused = manualScopeError(text, globalScope)
+    if (refused !== null) return refused
     if (textMentionsOutside(text, source.roots, source.cwd)) {
       return manualCommandError('经验引用了当前项目之外的路径或材料，未保存。')
     }
