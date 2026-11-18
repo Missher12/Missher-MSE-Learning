@@ -18,9 +18,10 @@
  *   idle wake — reflection/revision first, then the daily digest at/after local 23:00; persistent
  *              backlog catches up one idle wake at a time. No OS timer, no config system.
  *
- * Model calls go through the explicit configured route (provider/model/reasoningEffort passed on
- * every call, route identity frozen with the request and verified at commit), a hard 60 s
- * deadline, and the contract's output byte bound. Pause, dispose and route change never commit.
+ * Correction extraction preserves the explicit and observed source routes; only a candidate
+ * with neither may recover its exact historical route from a bounded native session inspection.
+ * Every route is frozen with the request and checked at commit, with a hard 60 s deadline and the
+ * contract's output byte bound. Pause and dispose never commit.
  */
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { createHash } from 'node:crypto'
@@ -85,6 +86,104 @@ function trustedBody(text) {
 function correctionMaterial(text) {
   const clauses = trustedBody(text).match(CLAUSE_SPLIT) ?? []
   return clauses.filter(clause => !clauseIsQuestion(clause)).join(' ').slice(0, 1536)
+}
+
+const SOURCE_ROUTE_SCAN_LIMIT = 20_480
+const SOURCE_ROUTE_MAX_BYTES = 24 * 1024 * 1024
+
+function routeFromRequestHeader(event) {
+  if (!['initial', 'resume', 'change', 'series'].includes(event?.data?.reason)) return null
+  const config = event?.data?.header?.config
+  if (typeof config?.provider !== 'string' || config.provider === '' || config.provider.length > 32
+    || typeof config?.model !== 'string' || config.model === '' || config.model.length > 64
+    || typeof config?.reasoningEffort !== 'string' || config.reasoningEffort === ''
+    || config.reasoningEffort.length > 16
+    || /[\u0000-\u001f\u007f]/u.test(config.provider + config.model + config.reasoningEffort)) return null
+  return { provider: config.provider, model: config.model, reasoningEffort: config.reasoningEffort }
+}
+
+function sourceTurnRoutes(session, candidates, signal) {
+  if (!Array.isArray(candidates) || candidates.length === 0 || candidates.length > 60
+    || !Number.isSafeInteger(session?.seq) || typeof session?.eventAt !== 'function') return []
+  const states = new Map()
+  for (const candidate of candidates) {
+    const turn = Number(candidate.turnId)
+    if (!Number.isSafeInteger(turn) || String(turn) !== candidate.turnId) continue
+    const state = states.get(turn) ?? { turn, starts: 0, stepStarts: 0, ended: 0,
+      firstStepOpen: false, routeAtStepStart: null, headerCount: 0, stepRoute: null,
+      messageCount: 0, messageSource: null, interrupted: false, reason: null }
+    state.candidates ??= []
+    state.candidates.push(candidate)
+    states.set(turn, state)
+  }
+  if (states.size === 0) return []
+  let activeRoute = null
+  let activeTurn = null
+  const limit = Math.min(session.seq, SOURCE_ROUTE_SCAN_LIMIT)
+  for (let index = 0; index < limit; index += 1) {
+    if ((index & 255) === 0) signal?.throwIfAborted()
+    const event = session.eventAt(index)
+    if (event?.type === 'request/header') {
+      activeRoute = routeFromRequestHeader(event)
+      const state = states.get(activeTurn)
+      if (state !== undefined) {
+        state.headerCount += 1
+        if (state.firstStepOpen && state.headerCount === 1) state.stepRoute = activeRoute
+      }
+      continue
+    }
+    if (event?.type === 'turn/start' && Number.isSafeInteger(event.data?.turn)) {
+      activeTurn = event.data.turn
+      activeRoute = null
+      const state = states.get(activeTurn)
+      if (state !== undefined) state.starts += 1
+      continue
+    }
+    const state = states.get(event?.data?.turn)
+    if (event?.type === 'step/start' && event.data?.turn === activeTurn
+      && event.data?.step === 1 && state !== undefined) {
+      state.stepStarts += 1
+      if (state.stepStarts === 1) {
+        state.firstStepOpen = true
+        state.routeAtStepStart = state.headerCount === 1 ? activeRoute : null
+      }
+      continue
+    }
+    if (state?.firstStepOpen && event?.data?.turn === activeTurn && event.data?.step === 1
+      && event.type === 'assistant/message') {
+      state.messageCount += 1
+      state.messageSource = event.data?.message?.source ?? null
+      state.interrupted ||= event.data?.interrupted === true
+      state.firstStepOpen = false
+      continue
+    }
+    if (state?.firstStepOpen && event?.data?.turn === activeTurn && event.data?.step === 1
+      && event.type === 'assistant/attempt') {
+      state.messageCount += 1
+      state.firstStepOpen = false
+      continue
+    }
+    if (event?.type === 'turn/end' && event.data?.turn === activeTurn) {
+      if (state !== undefined) {
+        state.ended += 1
+        state.reason = event.data?.reason?.kind ?? null
+        state.firstStepOpen = false
+      }
+      activeTurn = null
+    }
+  }
+  signal?.throwIfAborted()
+  const recovered = []
+  for (const state of states.values()) {
+    const route = state.headerCount === 1 ? state.stepRoute ?? state.routeAtStepStart : null
+    if (state.starts !== 1 || state.stepStarts !== 1 || state.ended !== 1
+      || state.reason !== 'completed' || state.messageCount !== 1 || state.interrupted
+      || route === null || state.messageSource?.kind !== 'model'
+      || state.messageSource.provider !== route.provider || state.messageSource.model !== route.model
+      || typeof route.reasoningEffort !== 'string' || route.reasoningEffort === '') continue
+    for (const candidate of state.candidates) recovered.push({ ...candidate, route })
+  }
+  return recovered
 }
 
 const PYTHON_GUIDANCE_EXPLICIT_OPT_OUT = /(?:\b(?:do not|don't|never|skip)\s+(?:run|execute|test|verify|validate|check)\b|(?:不(?:要|用|必|需|需要)?|无需)(?:执行|运行|验收|验证|测试|检查|调用|跑)|(?<!不要)(?<!别)(?:只|仅)(?:解释|说明)(?:原因|背景)?(?:即可|就好)?)/iu
@@ -370,6 +469,10 @@ export function apply(ctx, config = {}) {
   let disposed = false
   let running = null // the ONE in-process model slot; freed only after the request exited
   const foregroundTurns = new Map()
+  let sessionQuery = null
+  let sessionPersistence = null
+  let routeRecoveryController = null
+  const routeRecoveryAttempted = new Set()
   const turnHasFailure = new Map()
   // Turns whose CURRENT material the host cannot permit (explicit outside-file references):
   // no learning side effect at all — not immediate saves, not the queue, not turnFacts, and
@@ -453,6 +556,15 @@ export function apply(ctx, config = {}) {
       return pathInside(real, roots.map(root => root.path))
     }
     return false
+  }
+  const routeCwdIdentity = (candidate, root) => {
+    if (!isAbsolutePath(candidate) || !isAbsolutePath(root?.path)) return null
+    try {
+      const realCandidate = realpathSync(candidate)
+      // The registry path is the declared boundary. Resolving it here would let a replaced
+      // symlink root and a child cwd migrate together outside that original authorization.
+      return pathInside(realCandidate, [root.path]) ? realCandidate : null
+    } catch { return null }
   }
   const attribution = (sessionId, roots) => roots !== null
     && roots.some(root => root.sessionIds.has(sessionId))
@@ -765,6 +877,7 @@ export function apply(ctx, config = {}) {
       if (disposed || invocation?.signal?.aborted === true) return manualCommandError('命令已取消，未保存。')
       const manualWork = { kind: 'manual-command', at: Date.now(), lifetime: new AbortController() }
       running = manualWork
+      routeRecoveryController?.abort()
       try {
         const modelSignals = [manualWork.lifetime.signal, AbortSignal.timeout(60_000)]
         if (invocation?.signal !== undefined) modelSignals.unshift(invocation.signal)
@@ -1044,6 +1157,20 @@ export function apply(ctx, config = {}) {
   let pluginManager = null
   // Optional host services: missing sandbox/subprocess support disables only this verifier.
   if (typeof ctx.inject === 'function') {
+    const sessionQueryFiber = ctx.inject(['sessionQuery', 'sessionPersistence'], runtimeCtx => {
+      const query = runtimeCtx?.sessionQuery
+      const persistence = runtimeCtx?.sessionPersistence
+      if (typeof query?.inspectSession !== 'function' || typeof persistence?.stat !== 'function') return
+      sessionQuery = query
+      sessionPersistence = persistence
+      runtimeCtx.effect?.(() => () => {
+        if (sessionQuery !== query) return
+        sessionQuery = null
+        sessionPersistence = null
+        routeRecoveryController?.abort()
+      }, 'mse-learning.sessionQuery')
+    })
+    if (typeof sessionQueryFiber?.dispose === 'function') disposers.push(() => sessionQueryFiber.dispose())
     ctx.inject(['sandbox', 'subprocess'], runtimeCtx => {
       pythonExecutionRuntime = { sandbox: runtimeCtx.sandbox, subprocess: runtimeCtx.subprocess }
     })
@@ -1083,6 +1210,96 @@ export function apply(ctx, config = {}) {
     const cwd = isAbsolutePath(rowCwd) ? rowCwd : null
     return !textMentionsOutside(text, roots, cwd)
   })
+
+  async function recoverPendingCorrectionRoutes() {
+    const query = sessionQuery
+    const persistence = sessionPersistence
+    if (typeof query?.inspectSession !== 'function' || typeof persistence?.stat !== 'function') return
+    const candidates = engine.pendingCorrectionRouteSources(routeRecoveryAttempted)
+    const sessionId = candidates[0]?.sessionId
+    if (sessionId === undefined) return
+    const roots = workspaceRoots()
+    if (roots === null) return
+    const selected = candidates.filter(candidate => candidate.sessionId === sessionId)
+    const markAttempted = () => {
+      routeRecoveryAttempted.add(sessionId)
+      if (routeRecoveryAttempted.size > 16) routeRecoveryAttempted.delete(routeRecoveryAttempted.values().next().value)
+    }
+    const rootFor = currentRoots => currentRoots.find(row => row.sessionIds.has(sessionId)
+      && selected.some(candidate => routeCwdIdentity(candidate.cwd, row) !== null))
+    const root = rootFor(roots)
+    if (root === undefined) {
+      if (roots.some(row => row.sessionIds.has(sessionId))) markAttempted()
+      return
+    }
+    const controller = new AbortController()
+    routeRecoveryController = controller
+    const currentRoots = () => {
+      if (controller.signal.aborted || disposed || running !== null || foregroundTurns.size > 0) return null
+      refreshSettings()
+      const fresh = workspaceRoots()
+      if (engine.paused || engine.settingsEnabled !== true || fresh === null
+        || !engine.pendingCorrectionRouteSources(routeRecoveryAttempted)
+          .some(candidate => candidate.sessionId === sessionId)) return null
+      return fresh
+    }
+    try {
+      let snapshot
+      let statCompleted = false
+      try {
+        snapshot = await persistence.stat(sessionId, { signal: controller.signal })
+        statCompleted = true
+      } catch { statCompleted = !controller.signal.aborted }
+      const afterStatRoots = currentRoots()
+      if (afterStatRoots === null) return
+      const statRoot = rootFor(afterStatRoots)
+      if (statRoot === undefined) {
+        if (afterStatRoots.some(row => row.sessionIds.has(sessionId))) markAttempted()
+        return
+      }
+      const statCwd = typeof snapshot?.header?.cwd === 'string' ? snapshot.header.cwd : null
+      const statCwdIdentity = statCwd === null ? null : routeCwdIdentity(statCwd, statRoot)
+      const bound = statCwdIdentity === null ? [] : selected.filter(candidate =>
+        routeCwdIdentity(candidate.cwd, statRoot) === statCwdIdentity)
+      const bounded = statCompleted && Number.isSafeInteger(snapshot?.sizeBytes)
+        && snapshot.sizeBytes >= 0 && snapshot.sizeBytes <= SOURCE_ROUTE_MAX_BYTES
+        && (snapshot.eventCount === undefined || (Number.isSafeInteger(snapshot.eventCount)
+          && snapshot.eventCount >= 0 && snapshot.eventCount <= SOURCE_ROUTE_SCAN_LIMIT))
+        && snapshot?.header?.id === sessionId && bound.length > 0
+      if (!bounded) {
+        markAttempted()
+        return
+      }
+      let recovered = []
+      let completedInspection = false
+      try {
+        recovered = await query.inspectSession(sessionId, session => {
+          const cwd = cwdOf(session)
+          const cwdIdentity = routeCwdIdentity(cwd, statRoot)
+          if (sessionIdOf(session) !== sessionId || cwdIdentity === null || cwdIdentity !== statCwdIdentity) return []
+          const sessionCandidates = bound.filter(candidate =>
+            routeCwdIdentity(candidate.cwd, statRoot) === cwdIdentity)
+          return sourceTurnRoutes(session, sessionCandidates, controller.signal)
+            .map(record => ({ ...record, sourceCwdIdentity: cwdIdentity }))
+        }, controller.signal)
+        completedInspection = true
+      } catch { completedInspection = !controller.signal.aborted }
+      const freshRoots = currentRoots()
+      if (freshRoots === null) return
+      const freshRoot = rootFor(freshRoots)
+      if (freshRoot === undefined) {
+        if (freshRoots.some(row => row.sessionIds.has(sessionId))) markAttempted()
+        return
+      }
+      const stillRegistered = recovered.filter(record => freshRoots.some(row =>
+        row.sessionIds.has(record.sessionId)
+        && routeCwdIdentity(record.cwd, row) === record.sourceCwdIdentity))
+      if (stillRegistered.length > 0) engine.recordCorrectionSourceRoutes(stillRegistered)
+      if (completedInspection) markAttempted()
+    } finally {
+      if (routeRecoveryController === controller) routeRecoveryController = null
+    }
+  }
 
   disposers.push(ctx.on('fs/observed', (target, observation, exec) => {
     if (disposed || typeof exec?.token !== 'symbol' || jsonWrites.has(exec.token)) return
@@ -1614,7 +1831,10 @@ export function apply(ctx, config = {}) {
     capturePersistedDevelopmentResult(session, event, sessionId)
     ingestDiagnosticEvent(sessionId, session, event)
     if (event?.type === 'turn/start' && sessionId !== undefined
-      && Number.isSafeInteger(event.data?.turn)) foregroundTurns.set(sessionId, String(event.data.turn))
+      && Number.isSafeInteger(event.data?.turn)) {
+      foregroundTurns.set(sessionId, String(event.data.turn))
+      routeRecoveryController?.abort()
+    }
     if (event?.type !== 'turn/end' || sessionId === undefined) return
     const turn = event?.data?.turn
     if (turn === undefined) return
@@ -1741,7 +1961,7 @@ export function apply(ctx, config = {}) {
     }
   }))
 
-  // ── one background slot over the explicit configured route ─────────────────────────────────
+  // ── one background slot over a frozen source-bound route ───────────────────────────────────
   async function runBackground(prepared) {
     const lifetime = new AbortController()
     running = { kind: 'background', at: Date.now(), ticket: prepared.ticket, lifetime }
@@ -1825,9 +2045,7 @@ export function apply(ctx, config = {}) {
     engine.busy = foregroundTurns.size > 0
     if (!ensureStoreReady()) return
     if (safeStoreAction('wake_state_unavailable', () => engine.syncDigest()) === null) return
-    // Either an explicit settings route or a host-reported session route unlocks background work;
-    // the default (observed) route needs NO new user-filled fields to work after installation.
-    if (engine.busy || engine.paused || !engine.hasRoute()) return
+    if (engine.busy || engine.paused) return
     // Registry unknown → fail CLOSED for all background dispatch (no sweep that would mark
     // rows revoked, no request/hash, no provider). Readable wait reason only; a later wake
     // with the registry back continues with the SAME pending rows.
@@ -1838,8 +2056,22 @@ export function apply(ctx, config = {}) {
     // Queued OLD candidates are re-verified against CURRENT attribution before any dispatch:
     // a source the host no longer confirms is refused once, readably (kept, never looped).
     engine.sweepUnverifiedSources()
-    const work = engine.beginWork()
+    let work = engine.beginWork()
     if (work !== null) { await runBackground(work); return }
+    await recoverPendingCorrectionRoutes()
+    if (disposed || running !== null || foregroundTurns.size > 0) return
+    refreshSettings()
+    engine.busy = foregroundTurns.size > 0
+    if (engine.busy || engine.paused || engine.settingsEnabled !== true) return
+    const freshRoots = workspaceRoots()
+    if (freshRoots === null) {
+      engine.noteCollectionSkip('registry_unavailable')
+      return
+    }
+    engine.sweepUnverifiedSources()
+    work = engine.beginWork()
+    if (work !== null) { await runBackground(work); return }
+    if (!engine.hasRoute()) return
     const now = Date.now()
     const today = localDayKey(now)
     if (new Date(now).getHours() >= dailyHour) {
@@ -1879,9 +2111,14 @@ export function apply(ctx, config = {}) {
       itself keeps running and the status stays reachable through the core service */ }
   }
 
-  const api = { engine, wake, status: statusView, pause: value => engine.pause(value === true),
+  const api = { engine, wake, status: statusView, pause: value => {
+    const paused = value === true
+    if (paused) routeRecoveryController?.abort()
+    return engine.pause(paused)
+  },
     dispose() {
       disposed = true
+      routeRecoveryController?.abort()
       diagnosticSlots.clear()
       rsiTraceRows.length = 0
       rsiProbeTurns.clear()

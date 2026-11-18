@@ -1676,6 +1676,54 @@ export class RebuildEngine {
     })
   }
 
+  pendingCorrectionRouteSources(skipSessionIds = []) {
+    if (this.route !== null) return []
+    const skipped = new Set(skipSessionIds)
+    const doc = this.store.read()
+    const missing = doc.corrections.filter(row => row.status === 'pending' && row.ticket === null
+      && (row.sourceRoute === undefined || row.sourceRoute === null)
+      && !doc.routes.some(route => route.sessionId === row.sessionId)
+      && !skipped.has(row.sessionId))
+      .sort((a, b) => a.at - b.at)
+    const sessionId = missing[0]?.sessionId
+    if (sessionId === undefined) return []
+    // One source session per wake; all its eligible turns share one native inspection.
+    return missing.filter(row => row.sessionId === sessionId)
+      .map(({ id, sessionId: sourceSessionId, turnId, cwd }) => ({
+        id, sessionId: sourceSessionId, turnId, cwd,
+      }))
+  }
+
+  recordCorrectionSourceRoutes(records) {
+    if (!Array.isArray(records) || records.length === 0 || records.length > 60) {
+      return { ok: false, code: 'invalid_source_routes' }
+    }
+    const normalized = records.map(record => {
+      const observed = observedRouteFor(record?.sessionId, record?.route)
+      return observed !== null && typeof record?.route?.reasoningEffort === 'string'
+        && record.route.reasoningEffort !== '' && record.route.provider.length <= 32
+        && record.route.model.length <= 64 && record.route.reasoningEffort.length <= 16
+        ? { ...record, route: observed.route } : null
+    })
+    if (normalized.some(record => record === null)) return { ok: false, code: 'invalid_source_route' }
+    return this.store.transaction(doc => {
+      if (this.route !== null) return { ok: true, skipped: 'explicit_route_available' }
+      let recorded = 0
+      for (const record of normalized) {
+        const candidate = doc.corrections.find(row => row.id === record.id)
+        if (candidate === undefined || candidate.sessionId !== record.sessionId
+          || candidate.turnId !== record.turnId || candidate.cwd !== record.cwd
+          || candidate.status !== 'pending' || candidate.ticket !== null
+          || !this.#sourceOk(candidate.sessionId)
+          || (candidate.sourceRoute !== undefined && candidate.sourceRoute !== null)
+          || doc.routes.some(row => row.sessionId === candidate.sessionId)) continue
+        candidate.sourceRoute = record.route
+        recorded += 1
+      }
+      return { ok: true, recorded }
+    })
+  }
+
   observeRoute({ sessionId, route }) {
     const observed = observedRouteFor(sessionId, route)
     if (observed === null) return { ok: false, code: 'invalid_route_observation' }
@@ -2928,16 +2976,22 @@ export class RebuildEngine {
 
   // Returns the prepared work, or a refusal REASON (string). A refusal never writes anything:
   // the caller persists only the waitReason through its own small transaction.
-  // The route for background work is resolved PER PROBLEM SOURCE: an explicit operator route
-  // overrides; otherwise ONLY the session that actually produced this work (the failure origin,
-  // or the session whose facts are being summarized) may supply its recorded route. A route
-  // observed from an unrelated session is NEVER borrowed — missing source is a readable wait.
+  // Preserve the 1.3.14 order for corrections: explicit route, then that candidate's current
+  // session route. A route frozen with the candidate or recovered from its own exact historical
+  // turn is the bounded fallback; routes from unrelated sessions are never borrowed.
   #resolveSource(doc, plan) {
     if (this.route !== null) return { route: this.route, sessionId: null }
     const sessionId = plan.sourceSessionId ?? null
     if (sessionId === null) return null
     const row = doc.routes.find(entry => entry.sessionId === sessionId)
     if (row !== undefined) return { route: row.route, sessionId }
+    if (plan.kind === 'extract') {
+      const candidate = doc.corrections.find(item => item.id === plan.candidateId
+        || (plan.ticket !== undefined && item.ticket === plan.ticket))
+      if (candidate === undefined || candidate.sessionId !== sessionId) return null
+      const route = candidate.sourceRoute
+      return route !== null && route !== undefined ? { route, sessionId } : null
+    }
     // The short route cache may rotate while a method waits for new evidence. Its native
     // problem origin is durable, but may only authorize the exact admitted failure turn:
     // never borrow another problem/session's model or reconstruct an unproven route.
@@ -3492,9 +3546,9 @@ export class RebuildEngine {
     })
   }
 
-  // The switches and the route are re-read AT COMMIT, not trusted from the caller: a settings
-  // change, a user pause or a vanished route source during the call means the answer never
-  // commits. Truncation with a KNOWN cost arms exactly one automatic retry for the same material.
+  // The switches and route source are re-read AT COMMIT, not trusted from the caller: settings
+  // and the same session/source route remain binding, including for correction fallback routes.
+  // Truncation with a KNOWN cost arms exactly one automatic retry for the same material.
   finishWork({ ticket, result, usage, outputBytes = null, finishKind = null }) {
     let refusal = null
     const out = this.store.transaction(doc => {
@@ -3503,6 +3557,13 @@ export class RebuildEngine {
       if (row.settled === true) return { ok: true, duplicate: true }
       const gate = doc.materials.find(material => material.key === row.material)
       const routeLive = () => {
+        if (row.kind === 'extract') {
+          const candidate = doc.corrections.find(item => item.ticket === ticket)
+          if (candidate === undefined || !this.#sourceOk(candidate.sessionId)) return false
+          const source = this.#resolveSource(doc, row)
+          return source !== null && source.sessionId === row.sourceSessionId
+            && digestOf(source.route) === row.routeId
+        }
         if (this.route !== null) return digestOf(this.route) === row.routeId
         const origin = this.#resolveSource(doc, row)
         return origin !== null && origin.sessionId === row.sourceSessionId
@@ -3552,8 +3613,7 @@ export class RebuildEngine {
         releaseTicket(memoryOf(doc), ticket, this.now())
         return { ok: false, code: 'paused_refusal', settled: true }
       }
-      // The answer must come back over a route the LIVE switches still allow: an explicit
-      // settings route must still match, and an observed source route must still exist.
+      // The answer must come back over the still-live explicit/session/frozen source route.
       if (!routeLive()) {
         row.settled = true
         row.usage = recordUsage

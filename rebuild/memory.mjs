@@ -332,7 +332,7 @@ const correctionDecisionValid = row => isPlainObject(row)
 const correctionValid = row => isPlainObject(row)
   && Object.keys(row).every(key => ['id', 'sessionId', 'turnId', 'at', 'day', 'userText', 'assistantBrief',
     'cwd', 'contentDigest', 'status', 'reason', 'ticket', 'entryIds', 'revision', 'context',
-    'decisions', 'contextOmitted'].includes(key))
+    'decisions', 'contextOmitted', 'sourceRoute'].includes(key))
   // rows written before this field stay valid: absent OR null are both accepted
   && (row.revision === undefined || row.revision === null || revisionRefValid(row.revision))
   && (row.cwd === null || boundedLabel(row.cwd, 512))
@@ -354,6 +354,13 @@ const correctionValid = row => isPlainObject(row)
     && row.decisions.length <= 2 && row.decisions.every(correctionDecisionValid)))
   && (row.contextOmitted === undefined || row.contextOmitted === null
     || boundedLabel(row.contextOmitted, 160))
+  // The source route is attached only after a matching persisted DSH turn proves it. Old rows
+  // remain valid with this field absent; an attached route must include the recorded effort.
+  && (row.sourceRoute === undefined || row.sourceRoute === null || (isPlainObject(row.sourceRoute)
+    && Object.keys(row.sourceRoute).every(key => ['provider', 'model', 'reasoningEffort'].includes(key))
+    && boundedLabel(row.sourceRoute.provider, 32) && boundedLabel(row.sourceRoute.model, 64)
+    && typeof row.sourceRoute.reasoningEffort === 'string' && row.sourceRoute.reasoningEffort !== ''
+    && boundedLabel(row.sourceRoute.reasoningEffort, 16)))
 
 const requestValid = row => isPlainObject(row)
   && Object.keys(row).every(key => ['ticket', 'kind', 'at', 'problemId', 'entryId', 'digestDay', 'requestHash',
