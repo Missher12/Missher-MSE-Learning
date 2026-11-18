@@ -29,6 +29,77 @@ test('status exposes only the newest eight fixed-field persisted adaptive decisi
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+test('paired structured checks supply independent controls while preserving the promotion and rollback gates', () => {
+  const fixture = buildEngine()
+  const { root, engine, targetX, targetZ, targetW, fail, prepare, settle } = fixture
+  try {
+    const train = [
+      ['seed-api', 'API 调用遇到阻塞，请定位原因'],
+      ['held-api-a', 'API 请求仍然阻塞，麻烦定位原因'],
+      ['held-api-b', 'API 调用返回错误，帮我排查原因'],
+    ]
+    for (const [session, prompt] of train) {
+      prepare(session, '1', prompt)
+      fail(session, '1', session, failureX)
+      settle(session, '1')
+    }
+    const chart = 'node --test chart.test.mjs'
+    const config = 'pytest -q config_test.py'
+    engine.store.transaction(doc => {
+      doc.entries.find(row => row.id === targetZ.id).lesson.verification.check = chart
+      doc.entries.find(row => row.id === targetW.id).lesson.verification.check = config
+      return true
+    })
+    const policy = () => engine.store.read().recallStrategy.adaptive.policies
+      .find(row => row.entryId === targetX.id)
+    const node = { kind: 'node_test_runner', tests: 1, passed: 1, failed: 0,
+      skipped: 0, cancelled: 0, todo: 0 }
+    const pytest = { kind: 'pytest', tests: 1, passed: 1, failed: 0, errors: 0,
+      skipped: 0, xfailed: 0, xpassed: 0, deselected: 0 }
+    function checkTurn(session, { entry = targetZ, checkId = 'node-test-runner-spec-v1',
+      command = chart, summary = node, prompt = '绘制图表并调整配色', native = true,
+      outcome = 'unknown', beforeSettle = null } = {}) {
+      const result = prepare(session, '1', prompt)
+      assert.ok(result.offered.some(offer => offer.id === entry.id && offer.mode === 'method'))
+      const recorded = engine.recordCheck({ sessionId: session, turnId: '1', entryId: entry.id,
+        entryVersion: entry.version, checkId, passed: true, evidence: summary, summary, sourceRequired: true,
+        eventId: session, ...(native ? { nativeResult: { callSeq: 4, resultSeq: 6, command } } : {}) })
+      assert.equal(recorded.settled, true)
+      beforeSettle?.()
+      settle(session, '1', outcome)
+      return result
+    }
+    assert.equal(policy().positives, 3)
+    checkTurn('standalone-check', { native: false })
+    checkTurn('wrong-command', { command: 'node --test unrelated.test.mjs' })
+    checkTurn('cancelled-check', { outcome: 'cancelled' })
+    checkTurn('revoked-check', { beforeSettle: () => fixture.registered.delete('revoked-check') })
+    assert.equal(policy().negativeControls, 0)
+    const turn = checkTurn('chart-check')
+    assert.equal(policy().negativeControls, 1)
+    assert.equal(policy().mode, 'observing')
+    const sample = policy().samples.at(-1)
+    const recorded = engine.store.read().checkEvents.find(row => row.turnKey === turn.turnKey)
+    assert.deepEqual(recorded.nativePair, { callSeq: 4, resultSeq: 6 })
+    assert.equal(sample.replay.nativeCheckEvent, recorded.id)
+    assert.deepEqual(sample.replay.observedEntry, { id: targetZ.id, version: 1 })
+    assert.deepEqual(sample.replay.baselineOffers, sample.replay.candidateOffers)
+    checkTurn('chart-repeat', { prompt: '请检查图表数据和图例渲染' })
+    assert.equal(policy().negativeControls, 1, 'another run of the same checked method is not a second control')
+    checkTurn('config-check', { prompt: '配置项合并发生冲突，请核对配置来源',
+      entry: targetW, checkId: 'pytest-summary-v1', command: config, summary: pytest })
+    assert.equal(policy().negativeControls, 2)
+    assert.equal(policy().mode, 'approved')
+    const active = prepare('live-api', '1', 'API 请求返回错误，请定位原因')
+    assert.ok(active.offered.some(row => row.id === targetX.id))
+    fail('live-api', '1', 'live-api-recurrence', failureX)
+    settle('live-api', '1')
+    assert.equal(policy().mode, 'isolated')
+    assert.ok(!prepare('after-regression', '1', 'API 请求返回错误，请定位原因')
+      .offered.some(row => row.id === targetX.id))
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('adaptive discovery needs two independent gains and two feasible full-offer controls', () => {
   const { root, engine, targetX, targetY, targetZ, targetW, fail, prepare, settle } = buildEngine()
   try {

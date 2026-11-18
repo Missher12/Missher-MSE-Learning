@@ -488,11 +488,17 @@ const checkSummaryValid = (checkId, summary, passed) => {
         'probe_exit_nonzero'].includes(summary.reason))
   return false
 }
+export const nativeCheckPairValid = row => isPlainObject(row)
+  && Object.keys(row).length === 2 && Number.isSafeInteger(row.callSeq) && row.callSeq >= 0
+  && Number.isSafeInteger(row.resultSeq) && row.resultSeq > row.callSeq
+
 const checkEventValid = row => isPlainObject(row)
   && Object.keys(row).every(key => ['id', 'at', 'checkId', 'turnKey', 'entryId', 'entryVersion',
-    'passed', 'summary'].includes(key))
+    'passed', 'summary', 'nativePair'].includes(key))
   && hex64(row.id) && Number.isFinite(row.at) && boundedLabel(row.checkId, 128) && hex64(row.turnKey)
   && entryHex(row.entryId) && Number.isSafeInteger(row.entryVersion) && typeof row.passed === 'boolean'
+  && (row.nativePair === undefined || (row.passed === true && row.summary !== undefined
+    && nativeCheckPairValid(row.nativePair)))
   && (row.summary === undefined ? !['python-json-loader-v1', 'python-receipt-contract-v1'].includes(row.checkId)
     : checkSummaryValid(row.checkId, row.summary, row.passed))
 
@@ -536,12 +542,14 @@ const adaptiveSampleValid = row => isPlainObject(row)
   && (row.replay === undefined || (isPlainObject(row.replay)
     && Object.keys(row.replay).every(key => ['features', 'baselineHasTarget', 'canAdd', 'expected',
       'matched', 'baselineOffers', 'candidateOffers', 'protectedOffers', 'baselineBytes',
-      'candidateBytes', 'observedEntry'].includes(key))
+      'candidateBytes', 'observedEntry', 'nativeCheckEvent'].includes(key))
     && Array.isArray(row.replay.features) && row.replay.features.length <= 8
     && row.replay.features.every(safeAdaptiveFeature)
     && new Set(row.replay.features).size === row.replay.features.length
     && typeof row.replay.baselineHasTarget === 'boolean' && typeof row.replay.canAdd === 'boolean'
     && typeof row.replay.expected === 'boolean'
+    && (row.replay.nativeCheckEvent === undefined || (row.result === 'negative_control'
+      && row.replay.baselineOffers !== undefined && hex64(row.replay.nativeCheckEvent)))
     && (row.replay.baselineOffers === undefined
       ? ['matched', 'candidateOffers', 'protectedOffers', 'baselineBytes', 'candidateBytes', 'observedEntry']
         .every(key => row.replay[key] === undefined)

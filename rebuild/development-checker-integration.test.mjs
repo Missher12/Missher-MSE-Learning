@@ -136,6 +136,11 @@ test(`${shellName}: Cordis checker accepts only paired in-workspace calls and re
     assert.equal(events[0].entryId, entryId)
     assert.equal(events[0].entryVersion, 1)
     assert.equal(events[0].passed, true)
+    assert.deepEqual(events[0].nativePair, {
+      callSeq: session.events.findIndex(event => event.type === 'tool/call' && event.data.callId === 'call-pass'),
+      resultSeq: session.events.findIndex(event => event.type === 'tool/result'
+        && event.data.message.toolCallId === 'call-pass'),
+    })
     assert.deepEqual(events[0].summary, { kind: 'node_test_runner', tests: 1, passed: 1,
       failed: 0, skipped: 0, cancelled: 0, todo: 0 })
     assert.equal(api.engine.store.read().turnFacts.find(row =>

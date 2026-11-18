@@ -54,11 +54,14 @@ function replayV2(policy) {
   const sessions = new Set([policy.firstSession])
   const queries = new Set([policy.firstQuery])
   const removed = new Set()
+  const checkedObjectives = new Set()
+  const controlObjectives = new Set()
   let evaluated = 0, independentGains = 0, independentControls = 0, regressions = 0,
     repeats = 0, incomplete = 0, maxCandidateBytes = 0
   for (const sample of policy.samples ?? []) {
     if (!['holdout_hit', 'negative_control', 'negative'].includes(sample.result)) continue
     const row = sample.replay
+    const checkedControl = row?.nativeCheckEvent !== undefined
     const complete = row && Array.isArray(row.features)
       && typeof row.baselineHasTarget === 'boolean' && typeof row.canAdd === 'boolean'
       && typeof row.expected === 'boolean' && typeof row.matched === 'boolean'
@@ -80,6 +83,12 @@ function replayV2(policy) {
       && row.observedEntry !== null && typeof row.observedEntry === 'object'
       && typeof row.observedEntry.id === 'string' && Number.isSafeInteger(row.observedEntry.version)
       && row.expected === (sample.result === 'holdout_hit')
+      && (!checkedControl || (sample.result === 'negative_control'
+        && typeof row.nativeCheckEvent === 'string' && /^[a-f0-9]{64}$/u.test(row.nativeCheckEvent)
+        && row.observedEntry.id !== policy.entryId && row.canAdd && !row.matched
+        && !row.baselineHasTarget && has(row.baselineOffers, row.observedEntry.id, row.observedEntry.version)
+        && sameOffers(row.baselineOffers, row.candidateOffers)
+        && row.baselineBytes === row.candidateBytes))
     if (!complete) { incomplete++; continue }
     maxCandidateBytes = Math.max(maxCandidateBytes, row.candidateBytes)
     for (const base of row.baselineOffers) {
@@ -98,7 +107,12 @@ function replayV2(policy) {
         || !candidateObjective || row.observedEntry.id !== policy.entryId
         || row.observedEntry.version !== policy.version)
       || !row.expected && row.matched && candidateTarget) regressions++
-    const independent = !sessions.has(sample.session) && !queries.has(sample.query)
+    const control = sample.result === 'negative_control'
+    const repeatedObjective = control && (checkedObjectives.has(row.observedEntry.id)
+      || checkedControl && controlObjectives.has(row.observedEntry.id))
+    if (control) controlObjectives.add(row.observedEntry.id)
+    if (checkedControl) checkedObjectives.add(row.observedEntry.id)
+    const independent = !sessions.has(sample.session) && !queries.has(sample.query) && !repeatedObjective
     sessions.add(sample.session); queries.add(sample.query)
     if (!independent) { repeats++; continue }
     evaluated++

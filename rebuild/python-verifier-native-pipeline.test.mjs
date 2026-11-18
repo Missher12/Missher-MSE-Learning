@@ -283,9 +283,11 @@ test('the Cordis native pipeline persists the Python result, settles verified, a
     assert.ok(h.session.events.some(event => event.type === 'tool/call'
       && event.data.callId === 'python-pass'))
     assert.ok(h.session.events.some(event => event.type === 'tool/result'
+      && event.data.message.source.kind === 'tool'
       && event.data.message.source.callId === 'python-pass'
-      && event.data.message.content[0]?.type === 'tool-result'
-      && event.data.message.content[0]?.toolCallId === 'python-pass'))
+      && (event.data.message.role === 'tool' && event.data.message.toolCallId === 'python-pass'
+        || event.data.message.role === 'user' && event.data.message.content[0]?.type === 'tool-result'
+          && event.data.message.content[0]?.toolCallId === 'python-pass')))
     await h.endTurn(1)
     let doc = h.api.engine.store.read()
     assert.equal(doc.checkEvents.at(-1)?.passed, true, JSON.stringify({

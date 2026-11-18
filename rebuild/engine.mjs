@@ -31,7 +31,7 @@ import { validateFailureLessonOutput, evidenceTokenHashes } from '../src/failure
 import { observeInState, abstainInState, linkCandidateInState,
   interruptInState, REFLECTABLE_KINDS, INDEPENDENT_THRESHOLD, EVIDENCE_LIMIT, PROBLEM_COUNT_CAP }
   from '../src/problems.mjs'
-import { MemoryStore, importOldLessons, entryIdFor, digestOf, memoryOf, ROLLBACK, ENTRY_LIMIT,
+import { MemoryStore, importOldLessons, entryIdFor, digestOf, memoryOf, ROLLBACK, ENTRY_LIMIT, nativeCheckPairValid,
   boundedUnits, upgradeDocFormat, noCommit, RECALL_STRATEGY_LIMIT, ADAPTIVE_RECALL_POLICY_LIMIT,
   ADAPTIVE_RECALL_PROBE_LIMIT, ADAPTIVE_RECALL_DECISION_LIMIT } from './memory.mjs'
 import { isMemoryStorageError, encodeMemoryDocument } from './storage.mjs'
@@ -41,8 +41,7 @@ import { mechanismKey, resolveMethodVersion, versionWindow, ensureMethodStats, a
   historyAdmission, historyRowPreview, methodAttribution, creditWindow, editionSources,
   sourceSnapshot }
   from './evolution.mjs'
-import { selectRecallErrorLog, normalizedView, NORMALIZATION_RULE } from './recall.mjs'
-import { selectRecallWithUserRulePriority } from './recall-user-rule-priority.mjs'
+import { compareRecallWithUserRulePriority } from './recall-user-rule-priority.mjs'
 import { RECALL_QUALIFICATION } from './recall-qualification.mjs'
 import { addAdaptiveCandidate, competeAdaptiveCandidate, adaptivePolicyMatches, adaptiveQueryFeatures,
   adaptiveQueryKey, adaptiveTaskFeatures, narrowAdaptivePolicy,
@@ -106,6 +105,13 @@ const strategyFailureMaterial = capsule => JSON.stringify({ message: capsule.mes
 const hasNativeCheckerFailure = (feedback, entryId, version) => feedback.some(item =>
   item.entryId === entryId && item.version === version && item.kind === 'check_fail'
     && item.voided !== true && isKnownNativeCheckerId(item.checkId))
+const structuredDevelopmentPass = (checkId, summary) => {
+  if (checkId === 'node-test-runner-spec-v1' || checkId === 'pytest-summary-v1') {
+    return summary?.tests > 0 && summary.passed === summary.tests
+  }
+  return ['python-json-loader-v1', 'python-receipt-contract-v1'].includes(checkId)
+    && summary?.reason === 'matched'
+}
 const adaptiveFeaturesFor = (policy, probe) => policy?.schema === 'mse-adaptive-recall-v2'
   ? probe.taskFeatures ?? [] : probe.features
 const adaptiveQueryFor = (policy, probe) => policy?.schema === 'mse-adaptive-recall-v2'
@@ -390,6 +396,30 @@ function settleRecallStrategy(doc, { turnKey, sessionId, outcome, receipt,
     && (row.mode === 'shadow' || row.mode === 'matched' || row.mode === 'active')))
 }
 
+function checkedControlObjective(doc, probe, receipt, now) {
+  if (receipt?.settled !== true || !['unknown', 'verified'].includes(receipt.outcome)
+    || (doc.turnFacts.find(row => row.turnKey === probe.turnKey)?.failures ?? 0) > 0
+    || receipt.methodFeedback?.some(row => row.voided !== true && row.kind !== 'check_pass')) return null
+  const checks = doc.checkEvents.filter(row => row.turnKey === probe.turnKey)
+  if (checks.some(row => row.passed !== true)) return null
+  const paired = checks.filter(row => row.nativePair !== undefined
+    && structuredDevelopmentPass(row.checkId, row.summary))
+  if (paired.length !== 1) return null
+  const [check] = paired
+  const attribution = methodAttribution(doc, receipt, check.entryId, check.entryVersion)
+  if (!attribution.admitted || attribution.target.kind !== 'current'
+    || !receipt.methodFeedback?.some(row => row.entryId === check.entryId
+      && row.version === check.entryVersion && row.kind === 'check_pass'
+      && row.checkId === check.checkId && row.voided !== true)) return null
+  const entry = attribution.target.record
+  if (entry.type !== 'lesson' || entry.status !== 'check_passed' || methodNeedsGuard(entry, now)
+    || !adaptiveEntryVisible(entry, probe.projectScope, probe.environment)
+    || !hex64(entry.problemSignature ?? '')
+    || doc.problemLoop?.problems.some(problem => problem.id === entry.lesson?.problemId
+      && problem.signature === entry.problemSignature) !== true) return null
+  return { check, entry }
+}
+
 function settleAdaptiveRecall(doc, { turnKey, sessionId, outcome, receipt, allowStrategy,
   sourceAdmit, materialAdmit, now }) {
   const adaptive = doc.recallStrategy.adaptive
@@ -398,7 +428,9 @@ function settleAdaptiveRecall(doc, { turnKey, sessionId, outcome, receipt, allow
   if (probe === undefined) return
   const decision = (policyId, entryId, version, result, reason) => adaptiveDecision(adaptive,
     { turnKey, scope: probe.scope, policyId, entryId, version, result, reason, at: now })
-  if (outcome !== 'failed' || !allowStrategy) {
+  const checkedControl = allowStrategy && probe.controlPolicies.length > 0 && ['unknown', 'verified'].includes(outcome)
+    ? checkedControlObjective(doc, probe, receipt, now) : null
+  if (!allowStrategy || (outcome !== 'failed' && checkedControl === null)) {
     const reason = !allowStrategy ? 'strategy_disabled' : 'cancelled_or_unknown'
     for (const signal of probe.pending) {
       decision(signal.policyId, signal.entryId, signal.version, 'unknown', reason)
@@ -406,7 +438,7 @@ function settleAdaptiveRecall(doc, { turnKey, sessionId, outcome, receipt, allow
     adaptive.probes = adaptive.probes.filter(row => row.turnKey !== turnKey)
     return
   }
-  if (receipt !== undefined && (receipt.settled !== true || receipt.outcome !== 'failed')) {
+  if (receipt !== undefined && (receipt.settled !== true || receipt.outcome !== outcome)) {
     adaptive.probes = adaptive.probes.filter(row => row.turnKey !== turnKey)
     return
   }
@@ -446,10 +478,21 @@ function settleAdaptiveRecall(doc, { turnKey, sessionId, outcome, receipt, allow
   }
 
   const signalGroups = new Map()
-  for (const signal of probe.pending) {
+  for (const signal of checkedControl === null ? probe.pending : []) {
     const rows = signalGroups.get(signal.policyId) ?? []
     rows.push(signal)
     signalGroups.set(signal.policyId, rows)
+  }
+  if (checkedControl !== null) {
+    const entry = checkedControl.entry
+    if (adaptiveEditionAdmitted(entry, sourceAdmit)
+      && materialAdmit(strategyMethodMaterial(entry)) === true) {
+      for (const policy of adaptive.policies) {
+        if (policy.schema !== 'mse-adaptive-recall-v2' || !probe.controlPolicies.includes(policy.id)) continue
+        signalGroups.set(policy.id, [{ kind: 'negative_control', entryId: policy.entryId,
+          version: policy.version, objective: policy.objective }])
+      }
+    }
   }
   for (const [policyId, signals] of signalGroups) {
     const rejected = signals.find(signal => ['negative', 'recurrence', 'checker_failure'].includes(signal.kind))
@@ -467,7 +510,7 @@ function settleAdaptiveRecall(doc, { turnKey, sessionId, outcome, receipt, allow
       decision(policyId, signal.entryId, signal.version, 'unknown', 'policy_stale')
       continue
     }
-    const nativeSignal = ['discovery', 'holdout', 'negative', 'negative_control', 'recurrence']
+    const nativeSignal = checkedControl === null && ['discovery', 'holdout', 'negative', 'negative_control', 'recurrence']
       .includes(signal.kind)
     const capsule = nativeSignal ? findAdaptiveCapsule(doc, probe, signal.problemId,
       signal.signature, sessionId) : null
@@ -664,16 +707,32 @@ function settleAdaptiveRecall(doc, { turnKey, sessionId, outcome, receipt, allow
     if (signal.kind === 'negative_control') {
       const control = probe.controlPolicies.includes(policy.id)
       const comparison = probe.comparisons.find(row => row.policyId === policy.id)
-      const competing = matches.length === 1 && (matches[0].id !== policy.entryId
-        || matches[0].version !== policy.version)
+      const observed = checkedControl?.entry ?? (matches.length === 1 ? matches[0] : null)
+      const competing = observed !== null && (observed.id !== policy.entryId
+        || observed.version !== policy.version)
       const taskQuery = adaptiveQueryFor(policy, probe)
       const independent = policy.samples.every(row => row.session !== probe.session
         && row.query !== taskQuery)
+      const repeatsControl = policy.samples.some(row => row.result === 'negative_control'
+        && row.replay?.observedEntry?.id === observed?.id
+        && (checkedControl !== null || row.replay?.nativeCheckEvent !== undefined))
       const noLoss = probe.baselineOffers.every(row => probe.offered.some(actual =>
         actual.id === row.id && actual.version === row.version && actual.mode === row.mode))
       const features = adaptiveFeaturesFor(policy, probe)
+      if (checkedControl !== null) {
+        const observedOffer = { id: observed.id, version: observed.version, mode: 'method' }
+        const preservesObserved = offers => offers?.some(row => recallOfferKey(row) === recallOfferKey(observedOffer))
+        const observedCheck = observed.lesson.verification.check
+        const targetCheck = target.lesson.verification.check
+        if (observed.lesson.problemId === policy.objective || observed.problemSignature === target.problemSignature
+          || normalizeText(observedCheck) === normalizeText(targetCheck)
+          || developmentCheckMatchesVerification(targetCheck, observedCheck)
+          || !preservesObserved(probe.baselineOffers) || !preservesObserved(comparison?.baselineOffers)
+          || !preservesObserved(comparison?.candidateOffers)
+          || probe.offered.some(row => row.id === policy.entryId && row.version === policy.version)) continue
+      }
       if (!control || !competing || !independent || !noLoss || comparison?.canAdd !== true
-        || comparison.baselineHasTarget || adaptivePolicyMatches(policy, features)
+        || repeatsControl || comparison.baselineHasTarget || adaptivePolicyMatches(policy, features)
         || policy.mode !== 'observing') {
         decision(policyId, policy.entryId, policy.version, 'rejected', 'same_session_or_query')
         continue
@@ -682,7 +741,8 @@ function settleAdaptiveRecall(doc, { turnKey, sessionId, outcome, receipt, allow
       policy.updatedAt = now
       policy.samples = [...policy.samples, { turnKey, session: probe.session, query: adaptiveQueryFor(policy, probe),
         result: 'negative_control', reason: 'independent_unmatched_objective', at: now,
-        replay: adaptiveSampleProjection(policy, probe, comparison, signal, matches[0]) }].slice(-8)
+        replay: { ...adaptiveSampleProjection(policy, probe, comparison, signal, observed),
+          ...(checkedControl === null ? {} : { nativeCheckEvent: checkedControl.check.id }) } }].slice(-8)
       policy.reason = policy.schema === 'mse-adaptive-recall-v2' && policy.positives >= 3
         ? 'awaiting_negative_control' : 'awaiting_independent_holdout'
       decision(policy.id, policy.entryId, policy.version, 'negative_control',
@@ -1964,14 +2024,15 @@ export class RebuildEngine {
   /** Explicit user correction: stored IMMEDIATELY as a long-term rule; global unless the user
    *  named a project/environment. Never waits for a threshold, never expires. */
   recordCorrection({ text, sessionId, turnId, projectKey = null, environmentId = null,
-    source = 'direct_user', applicability = '' }) {
+    source = 'direct_user', applicability = '', separateApplicability = false }) {
     check(typeof text === 'string' && [...text].length >= 8 && [...text].length <= 240
       && Buffer.byteLength(text, 'utf8') <= 480 && /[\r\n\u0000-\u001f\u007f]/u.test(text) === false
       && !SENSITIVE_PATTERN.test(text) && !AUTHORITY_PATTERN.test(text)
       && typeof applicability === 'string'
-      && (applicability === '' || (applicability.length <= 160
+      && (applicability === '' ? !separateApplicability : (applicability.length <= 160
         && /[\r\n\u0000-\u001f\u007f]/u.test(applicability) === false
-        && text.includes(applicability))), 'invalid_rule')
+        && (separateApplicability ? applicability.trim() !== '' && !SENSITIVE_PATTERN.test(applicability)
+          && !AUTHORITY_PATTERN.test(applicability) : text.includes(applicability)))), 'invalid_rule')
     check(source === 'direct_user', 'rule_requires_user_source')
     const scope = scopeOf(projectKey)
     const id = entryIdFor('rule', scope, normalizeText(text))
@@ -2261,7 +2322,7 @@ export class RebuildEngine {
   /** A checker event is deduplicated by eventId and bound to ONE injected version. It never
    *  credits or condemns every lesson of a turn wholesale. */
   recordCheck({ checkId, passed, evidence = null, sessionId, turnId, entryId = null,
-    entryVersion = null, eventId = null, summary = null, sourceRequired = false }) {
+    entryVersion = null, eventId = null, summary = null, sourceRequired = false, nativeResult = null }) {
     check(typeof checkId === 'string' && checkId.length > 0 && checkId.length <= 128
       && typeof passed === 'boolean' && typeof eventId === 'string' && eventId.length > 0
       && eventId.length <= 512, 'invalid_check')
@@ -2315,10 +2376,11 @@ export class RebuildEngine {
       if (receipt === undefined) return { ok: true, settled: false, reason: 'no_injection_this_turn' }
       if (entryId === null) return { ok: false, code: 'entry_binding_required' }
       // The event stays a REAL audit fact even when it may not credit a method.
-      const auditCheck = version => {
+      const auditCheck = (version, nativePair = null) => {
         if (doc.checkEvents.length > 126) doc.checkEvents = doc.checkEvents.slice(-126)
         doc.checkEvents.push({ id: eventIdHash, at: this.now(), checkId, turnKey,
-          entryId, entryVersion: version, passed, ...(summary === null ? {} : { summary }) })
+          entryId, entryVersion: version, passed, ...(summary === null ? {} : { summary }),
+          ...(nativePair === null ? {} : { nativePair }) })
       }
       // REVIEW-FIX2: ONE shared admission judgment (cancelled/guard/missing/partial) instead of
       // a per-entry-point chain; the checker keeps its own audit row and (entry,version) dedupe.
@@ -2489,7 +2551,20 @@ export class RebuildEngine {
           }
         }
       }
-      auditCheck(offered.version)
+      // Only the host passes the persisted event positions, after matching both events.
+      // Keep the safe pair and typed summary, never the shell command or captured output.
+      const nativePair = nativeResult === null ? null
+        : { callSeq: nativeResult.callSeq, resultSeq: nativeResult.resultSeq }
+      const command = nativeResult?.command
+      const declared = target.record.lesson?.verification?.check
+      const exactContract = command !== undefined && (checkId === 'python-receipt-contract-v1'
+        ? declared === command && pythonReceiptCommandSpec(command) !== null
+        : developmentCheckIdForCommand(command) === checkId
+          && developmentCheckIdForCommand(declared) === checkId
+          && developmentCheckMatchesVerification(declared, command))
+      const paired = passed && sourceRequired && target.kind === 'current' && !receipt.settled
+        && nativeCheckPairValid(nativePair) && structuredDevelopmentPass(checkId, summary) && exactContract
+      auditCheck(offered.version, paired ? nativePair : null)
       return { ok: true, settled: true, outcome: passed ? 'check_passed' : 'needs_revision',
         entryId, entryVersion: offered.version, evidenceHash, versionScope: target.kind }
     })
@@ -2588,7 +2663,7 @@ export class RebuildEngine {
         const now = this.now()
         const selectorOptions = { prompt, scope, environment, maxBytes: this.maxContextBytes, now,
           guardAdmit: text => this.#materialOk(text, null) }
-        const baseline = selectRecallWithUserRulePriority(doc.entries, selectorOptions)
+        const { selection: baseline, candidate } = compareRecallWithUserRulePriority(doc.entries, selectorOptions)
         let selected = baseline
         const admitted = strategyEligible === true && typeof sessionId === 'string'
           && sessionId !== '' && !this.#blockedNow(doc) && this.#sourceOk(sessionId)
@@ -2600,10 +2675,9 @@ export class RebuildEngine {
           pruneAdaptiveState(doc)
           if (JSON.stringify(adaptive) !== beforePrune) adaptiveWriteAttempted = true
         }
-        if (admitted && normalizedView(prompt).semantic.includes(NORMALIZATION_RULE.conceptId)) {
+        if (admitted && candidate !== null) {
           const strategyScope = strategyScopeOf(scope, environment)
           const strategy = doc.recallStrategy
-          const candidate = selectRecallErrorLog(doc.entries, selectorOptions)
           const baselineOffers = new Set(baseline.offered.map(recallOfferKey))
           const differences = candidate.offered.filter(row => row.mode === 'method'
             && !baselineOffers.has(recallOfferKey(row)))

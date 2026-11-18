@@ -2,7 +2,7 @@
 
 ![MSE Learning · 持久学习（品牌插画）](docs/images/cover-v2.webp)
 
-MSE learns reusable corrections and failure lessons for DSH. **1.3.13** fixes scope checks for the native `/mse` command. Text after `/mse` is saved verbatim as a project rule. Bare `/mse` can extract a rule from the user’s words in the just-finished task. The command rejects task-specific instructions and asks you to omit `--global` when the rule explicitly applies only to the current project. Repeated submissions return the existing record.
+MSE learns reusable corrections and failure lessons for DSH. **1.3.14** adds optional recall context to `/mse`, uses paired objective checks as control evidence for recall candidates, and reuses the same recall comparison within a turn.
 
 Checks run one restricted snapshot through a native tool and require Python plus a host sandbox reporting full read-only enforcement. Exit code 0, hard-coded success, cancellation, stale versions, and unpaired results do not establish a pass. Other Python scripts and business contracts remain unverified.
 
@@ -12,7 +12,9 @@ Targets: Windows, macOS, and Linux on x64/ARM64, Node ≥22.19. Core OS checks a
 
 Open Settings → Self-evolution to review six pages. Read-only views make no model calls. Background work may incur charges; unknown-cost calls are never replayed automatically.
 
-In the DSH command bar, `/mse <experience>` saves the exact text as a rule scoped to the current project by default. Use `/mse --global <experience>` to choose global scope. Bare `/mse` attempts one rule from user-authored text in the just-finished task, using the current model route once; unclear evidence, unverified source/scope, or malformed or truncated output is refused without saving. This command does not run checks or create verification scores.
+In the DSH command bar, `/mse <experience>` saves the exact text as a project rule. Put `--when "situation"` before the experience to give recall a short ranking hint of up to 160 UTF-16 code units. Put `--global` first to select global scope. Task-specific instructions are refused and repeated submissions return the original record.
+
+Bare `/mse` attempts to extract one rule from the user's words in the just-finished task, using the current model route once. It explains any refusal caused by unclear evidence, unverified scope, or incomplete output.
 
 See the [publication record](https://github.com/Missher12/Missher-MSE-Learning/blob/main/PUBLICATION.md) and [validation record](https://github.com/Missher12/Missher-MSE-Learning/blob/main/VALIDATION.md).
 

@@ -624,7 +624,7 @@ export function apply(ctx, config = {}) {
     return { items, reasons: [...new Set(reasons)] }
   }
 
-  const MANUAL_COMMAND_USAGE = '用法：/mse <经验> 直接保存；/mse 从刚结束的任务整理；仅在明确选择全局时使用 /mse --global <经验>。'
+  const MANUAL_COMMAND_USAGE = '用法：/mse <经验> 直接保存，/mse 从刚结束的任务整理。可在经验前加 --when "适用场景"，全局规则先加 --global。'
   const manualCommandError = reason => ({ kind: 'error', text: `${reason}\n${MANUAL_COMMAND_USAGE}` })
   const manualScopeError = (text, globalScope) => {
     // Literal commands can begin with a time qualifier followed by any action. Reuse the
@@ -634,7 +634,7 @@ export function apply(ctx, config = {}) {
       return manualCommandError('这条要求只适用于当前任务或工单，未保存为长期规则。')
     }
     if (globalScope && /(?:^|[，,。！？!?；;：:\n])\s*(?:[「“"]\s*)?(?:仅|只)(?:在|限(?:于|在)?|适用于?)?\s*(?:本|这个|该|当前)(?:项目|仓库|工作区)/u.test(text)) {
-      return manualCommandError('正文仅适用于本项目，未保存为全局规则。请去掉 --global 后按本项目保存。')
+      return manualCommandError('内容仅适用于本项目，未保存为全局规则。请去掉 --global 后按本项目保存。')
     }
     return null
   }
@@ -664,7 +664,7 @@ export function apply(ctx, config = {}) {
     const workspace = roots.find(root => root.sessionIds.has(sessionId) && realInside(cwd, [root]))
     return workspace === undefined ? null : { sessionId, cwd, roots, workspace }
   }
-  const manualReceipt = (text, projectKey, sessionId) => {
+  const manualReceipt = (text, projectKey, sessionId, condition) => {
     let stored
     try {
       if (!ensureStoreReady()) return manualCommandError('学习库当前不可读取或写入；未确认保存结果。')
@@ -672,7 +672,8 @@ export function apply(ctx, config = {}) {
         projectKey, environmentId: null, source: 'direct_user',
         // Preserve the user's exact source as a recall applicability anchor only when it fits
         // the existing field bound. Long rules remain intact in instruction; never truncate.
-        applicability: text.length <= 160 ? text : '' })
+        applicability: condition ?? (text.length <= 160 ? text : ''),
+        separateApplicability: condition !== null })
       if (saved.ok !== true) {
         if (saved.reason === 'entry_capacity') return manualCommandError('学习库已达到容量上限，未保存。')
         return manualCommandError('学习库拒绝了这条经验，未保存。')
@@ -682,10 +683,14 @@ export function apply(ctx, config = {}) {
       const scope = stored.visibility === 'global' ? '全局' : '本项目'
       const state = stored.status === 'retired' ? '已有相同记录（当前已停用，未修改）'
         : saved.duplicate ? '已存在相同规则，未覆盖' : '已保存用户规则'
-      return { kind: 'success', text: `${state}\n范围：${scope}\n内容：${stored.instruction}\nID：${stored.id}` }
+      const scene = condition !== null && stored.applicability !== ''
+        ? `\n适用场景：${stored.applicability}` : ''
+      return { kind: 'success', text: `${state}\n范围：${scope}${scene}\n内容：${stored.instruction}\nID：${stored.id}` }
     } catch (error) {
       if (error?.code === 'invalid_rule') {
-        return manualCommandError('经验不符合保存限制：需为 8–240 个字符、最多 480 字节，且不能包含换行、敏感材料或授权信息；未保存。')
+        return manualCommandError(condition === null
+          ? '经验不符合保存限制，需为 8–240 个字符、最多 480 字节，且不能包含换行、敏感材料或授权信息。未保存。'
+          : '经验或适用场景不符合保存限制。经验需为 8–240 个字符且最多 480 字节，适用场景需填非空短句且最多 160 个 UTF-16 单元。两者均不能包含换行、敏感材料或授权信息。未保存。')
       }
       if (isMemoryStorageError(error)) return manualCommandError('学习库当前不可用；未保存。')
       throw error
@@ -708,6 +713,15 @@ export function apply(ctx, config = {}) {
       globalScope = true
       rawInput = rawInput.slice('--global'.length)
       if (/^[\t\n\r ]/u.test(rawInput)) rawInput = rawInput.slice(1)
+    }
+    let condition = null
+    if (/^[\t ]*--when(?:[\t\n\r ]|$)/u.test(rawInput)) {
+      const parts = /^[\t ]*--when[\t ]+(?:"([^"\r\n]*)"|“([^”\r\n]*)”|「([^」\r\n]*)」)[\t ]([^\r\n]*)$/u.exec(rawInput)
+      if (parts === null || parts[4].trim() === '') {
+        return manualCommandError('请给适用场景加引号，并在引号后填写经验正文。未保存。')
+      }
+      condition = parts[1] ?? parts[2] ?? parts[3]
+      rawInput = parts[4]
     }
     let text = rawInput
     if (text.trim() === '') {
@@ -799,13 +813,15 @@ export function apply(ctx, config = {}) {
       }
     }
     if (text === '') return manualCommandError('没有提供经验内容。')
-    const refused = manualScopeError(text, globalScope)
-    if (refused !== null) return refused
-    if (textMentionsOutside(text, source.roots, source.cwd)) {
-      return manualCommandError('经验引用了当前项目之外的路径或材料，未保存。')
+    for (const material of condition === null ? [text] : [text, condition]) {
+      const refused = manualScopeError(material, globalScope)
+      if (refused !== null) return refused
+      if (textMentionsOutside(material, source.roots, source.cwd)) {
+        return manualCommandError('内容引用了当前项目之外的路径或材料，未保存。')
+      }
     }
     if (invocation?.signal?.aborted === true) return manualCommandError('命令已取消，未保存。')
-    return manualReceipt(text, globalScope ? null : source.cwd, source.sessionId)
+    return manualReceipt(text, globalScope ? null : source.cwd, source.sessionId, condition)
   }
 
   // ── trusted user facts + recall injection ──────────────────────────────────────────────────
@@ -1338,7 +1354,7 @@ export function apply(ctx, config = {}) {
               call.callId)) {
               if (!pendingDevelopmentChecks.has(key)) pendingDevelopmentChecks.set(key, [])
               pendingDevelopmentChecks.get(key).push({ callId: call.callId, toolName: call.toolName, callSeq: call.callSeq,
-                step: call.step, persisted: false, isError: result?.isError === true,
+                step: call.step, persisted: false, isError: result?.isError === true, command: call.command,
                 checkId: checked.checkId,
                 passed: checked.status === 'pass', summary: checked.evidence,
                 entryId: offers[0].id, entryVersion: offers[0].version })
@@ -1546,19 +1562,19 @@ export function apply(ctx, config = {}) {
     if (call?.type !== 'tool/call' || call.data?.callId !== callId || call.data?.name !== row.toolName
       || call.data?.turn !== turn || call.data?.step !== step
       || !persistedToolResult(message, callId, row.isError)) return
-    if (row.checkId === PYTHON_VERIFIER_CHECK || row.checkId === PYTHON_RECEIPT_CHECK) {
-      let args = call.data?.arguments
-      if (typeof args === 'string') {
-        try { args = JSON.parse(args) } catch { return }
-      }
-      if (args?.command !== row.command) return
-      if (row.checkId === PYTHON_VERIFIER_CHECK && args?.inputPath !== row.inputPath) return
-      if (row.checkId === PYTHON_RECEIPT_CHECK && args?.projectManifest !== row.projectManifest) return
+    let args = call.data?.arguments
+    if (typeof args === 'string') {
+      try { args = JSON.parse(args) } catch { return }
     }
+    if (args?.command !== row.command) return
+    if (row.checkId === PYTHON_VERIFIER_CHECK && args?.inputPath !== row.inputPath) return
+    if (row.checkId === PYTHON_RECEIPT_CHECK && args?.projectManifest !== row.projectManifest) return
     if (typeof session?.eventAt !== 'function' || !Number.isSafeInteger(session?.seq)) return
     const exactLoggedResult = logged => logged?.type === 'tool/result'
       && logged.data?.turn === turn && logged.data?.step === step
       && persistedToolResult(logged.data?.message, callId, row.isError)
+      && (logged.sourceEventSeqs === undefined || (Array.isArray(logged.sourceEventSeqs)
+        && logged.sourceEventSeqs.length === 1 && logged.sourceEventSeqs[0] === row.callSeq))
     let resultSeq = Number.isSafeInteger(event.seq) && exactLoggedResult(session.eventAt(event.seq))
       ? event.seq : -1
     if (resultSeq < 0) {
@@ -1588,6 +1604,7 @@ export function apply(ctx, config = {}) {
       return
     }
     row.persisted = true
+    row.resultSeq = resultSeq
   }
 
   disposers.push(ctx.on('session/event', (session, event) => {
@@ -1667,6 +1684,9 @@ export function apply(ctx, config = {}) {
         checkId: check.checkId, passed: check.passed, evidence: check.summary, summary: check.summary,
         sessionId, turnId: String(turn), entryId: check.entryId, entryVersion: check.entryVersion,
         sourceRequired: true,
+        ...(reason === 'completed' && !failed ? { nativeResult: {
+          callSeq: check.callSeq, resultSeq: check.resultSeq, command: check.command,
+        } } : {}),
         eventId: `development-check:${check.callId}` }))
     }
     for (const check of cancelled ? [] : checks) {
@@ -1841,7 +1861,7 @@ export function apply(ctx, config = {}) {
       definitionId: '@missher/dsh-mse-learning',
       name: 'mse',
       description: '保存一条长期用户规则，或从刚结束的任务中整理一条。',
-      input: { hint: '[--global] [经验内容]' },
+      input: { hint: '[--global] [--when "适用场景"] [经验内容]' },
       recordInput: false,
       handler: executeManualCommand,
     }))
