@@ -468,7 +468,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
   // any model-provided basis) stays verbatim, bounded elsewhere by statusView.
   const BASIS_ZH = { current_message: '当前消息', scope_conservative_project: '范围保守按项目',
     legacy_intent: '旧意图格式', model_one_off: '模型判一次性', model_uncertain: '模型长期性不明',
-    legacy_uncertain: '旧格式不确定', temporary_sentence: '临时句', invalid_row: '异常模型行',
+    legacy_uncertain: '旧格式不确定', temporary_sentence: '临时句', structured_work_order: '单次工单',
+    invalid_row: '异常模型行',
     project_without_attributed_cwd: '项目归属不明', scope_uncertain_no_project: '范围不明且无项目',
     invalid_rows: '异常模型行' }
   const basisTextOf = basis => String(basis ?? '').split(';').filter(Boolean).map(part => {
@@ -867,7 +868,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const basisLabels = locale === 'en' ? { current_message: 'Current message',
       scope_conservative_project: 'Conservative project scope', legacy_intent: 'Legacy intent',
       model_one_off: 'Model judged one-off', model_uncertain: 'Model judged uncertain',
-      legacy_uncertain: 'Legacy uncertain', temporary_sentence: 'Temporary wording',
+      legacy_uncertain: 'Legacy uncertain', temporary_sentence: 'Temporary wording', structured_work_order: 'One-off work order',
       invalid_row: 'Invalid model row', project_without_attributed_cwd: 'Project attribution unknown',
       scope_uncertain_no_project: 'Scope unclear; no project', invalid_rows: 'Invalid model rows' } : BASIS_ZH
     const basisText = value => String(value ?? '').split(';').filter(Boolean).map(part => {

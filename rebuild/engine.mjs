@@ -924,6 +924,66 @@ export const TEMPORARY_SCOPE = new RegExp(
   + '|(?:修完|装完|改完|完成|测试通过)(?:之后|后)?再(?:装|安装|部署|上线|发布)'
   + '|先(?:别|不)(?:安装|打包|部署|重启))', 'u')
 
+// A complete structured work order is not itself a durable correction. Require a task-like
+// reference plus either an explicit one-off repair-ticket preamble, or a paired terminal
+// protocol and a plan/deliverable cue. Ordinary mentions of development, checks, delivery,
+// stdout or versions do not meet this boundary.
+const INDEPENDENT_WORK_ORDER_PREFIX = /^(?:(?:另外|此外|除此之外|与本工单无关)[，,、]?\s*)(?=[\s\S]{0,80}(?:以后|记住|长期纠正))[\s\S]+$/u
+const WORK_ORDER_INDEPENDENT_TAIL = /(?:^|(?:\r?\n){2,})[ \t]*(?:(?:另外|此外|除此之外)[，,、]?\s*|(?:与(?:本|这次)工单无关)[，,、:：\s]*|独立长期纠正[：:\s]*)(?=[\s\S]{0,80}(?:以后|记住))[\s\S]*?(?=(?:\r?\n){2,}|$)/gu
+const cleanIndependentWorkOrderRule = text => String(text ?? '')
+  .replace(/^\s*(?:另外|此外|除此之外)[，,、]?\s*/u, '')
+  .replace(/^\s*(?:与(?:本|这次)工单无关|本工单以外)[，,、:：\s]*/u, '')
+  .replace(/^\s*独立长期纠正[：:]?\s*/u, '')
+  .replace(/^[。！？；;，,\s]+/u, '').trim()
+const workOrderTemporaryPreamble = text =>
+  /(?:本次|这次|本轮)[^。！？；;\n]{0,32}(?:临时|一次性)[^。！？；;\n]{0,24}(?:返修)?工单[^。！？；;\n]{0,12}(?:不(?:是|形成|作为|成为|归为)|不得|不要)[^。！？；;\n]{0,24}(?:长期|持久)(?:规则|记忆|规范|偏好)?/u.test(text)
+const WORK_ORDER_REFERENCE = /\b[A-Z][A-Z0-9]*(?:[-_][A-Z0-9]+)+\b/u
+const maskWorkOrderSpan = value => ' '.repeat(value.length)
+function workOrderEvidenceText(value, maskInlineCode = true) {
+  let text = String(value ?? '').replace(/```[\s\S]*?```|[「“"][^」”"\n]{1,300}[」”"]|'[^'\n]{1,120}'/gu,
+    maskWorkOrderSpan)
+  if (maskInlineCode) text = text.replace(/`[^`\n]{1,200}`/gu, maskWorkOrderSpan)
+  return text.replace(/^[ \t]*>.*$/gmu, maskWorkOrderSpan).split('\n').map(line =>
+    /^(?:\s*\[[0-9]{2,4}[-:][0-9]|\s*(?:[0-9]{2}:){2}[0-9]|\s*(?:WARN|ERROR|INFO|DEBUG|FATAL)\b|\s*Traceback\b|\s*at [\w.$]+ ?\()/iu.test(line)
+      ? maskWorkOrderSpan(line) : line).join('\n')
+}
+/** Return the task-body boundary only for trusted, structurally marked one-off work orders. */
+export const structuredWorkOrderBoundary = value => {
+  const original = String(value ?? '')
+  const visible = workOrderEvidenceText(original)
+  const protocolVisible = workOrderEvidenceText(original, false)
+  const reference = WORK_ORDER_REFERENCE.exec(visible.slice(0, 240))
+  if (reference === null) return null
+  const start = reference.index
+  const prefix = visible.slice(0, start).trim()
+  if (prefix !== '' && !INDEPENDENT_WORK_ORDER_PREFIX.test(prefix)) return null
+  const body = visible.slice(start)
+  const header = body.slice(0, 360)
+  if (workOrderTemporaryPreamble(header)) {
+    const independent = prefix === '' ? [] : [original.slice(0, start).trim()]
+    const tailView = workOrderEvidenceText(original.slice(start))
+    for (const match of tailView.matchAll(WORK_ORDER_INDEPENDENT_TAIL)) {
+      independent.push(original.slice(start + match.index, start + match.index + match[0].length).trim())
+    }
+    return { start, independentText: independent.map(cleanIndependentWorkOrderRule)
+      .filter(Boolean).join('\n') }
+  }
+  const structure = /(?:PLAN\.md|实施取舍|交付实际|候选版本|按其[\s\S]{0,12}?\d{1,3}项)/iu.test(body)
+  if (!structure) return null
+  const terminal = /(?:最后|最终)[\s\S]{0,28}(?:原生)?(?:消息|回复|输出)\s*`?([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*)_DONE`?\s*(?:或|或者|or)\s*`?\1_BLOCKED`?/iu.exec(
+    protocolVisible.slice(start))
+  if (terminal === null) return null
+  const terminalEnd = start + terminal.index + terminal[0].length
+  const independent = prefix === '' ? [] : [original.slice(0, start).trim()]
+  const tailView = workOrderEvidenceText(original.slice(terminalEnd))
+  for (const match of tailView.matchAll(WORK_ORDER_INDEPENDENT_TAIL)) {
+    independent.push(original.slice(terminalEnd + match.index,
+      terminalEnd + match.index + match[0].length).trim())
+  }
+  return { start, independentText: independent.map(cleanIndependentWorkOrderRule)
+    .filter(Boolean).join('\n') }
+}
+
 // CONTEXT-SCOPE-016: a plain correction can carry bounded, HOST-attributed prior-turn context
 // (≤4 items, each ≤512 UTF-16 units, total ≤1536) used only to resolve references/conditions —
 // never as a new instruction. Durability and scope are separate decisions; cwd is attribution,
@@ -1626,22 +1686,25 @@ export class RebuildEngine {
     referenceText = null, context = null, contextSkip = null }) {
     check(typeof sessionId === 'string' && sessionId !== '' && typeof turnId === 'string'
       && typeof userText === 'string' && userText.length > 0, 'invalid_candidate')
+    const workOrder = structuredWorkOrderBoundary(userText)
+    const sourceText = workOrder === null ? String(userText) : String(userText).slice(workOrder.start)
     // MSE20: clamp in UTF-16 code units (the store validator's unit) and never split a surrogate
     // pair — an emoji-heavy body must be admitted bounded, not throw invalid_memory at the host.
-    const clean = boundedUnits(String(userText)
+    const clean = boundedUnits(sourceText
       .replace(/[\u0000-\u001f\u007f]/gu, ' ').trim(), 1536)
     if (clean.length === 0) return { ok: true, skipped: 'empty' }
-    const brief = assistantBrief === null ? null
+    const brief = assistantBrief === null || workOrder !== null ? null
       : boundedUnits(String(assistantBrief).replace(/[\u0000-\u001f\u007f]/gu, ' '), 768)
     // CONTEXT-SCOPE-016: freeze only bounded, HOST-attributed items. An overlong/unknown item is
     // OMITTED whole (never cut down into a different condition) and its readable reason is kept;
     // a context item is never a new instruction, only reference material for THIS correction.
     const cleanContext = []
-    const skipped = Array.isArray(contextSkip) ? contextSkip
+    const skipped = workOrder !== null ? [] : Array.isArray(contextSkip) ? contextSkip
       .filter(reason => typeof reason === 'string' && reason.length > 0 && reason.length <= 64)
       .slice(0, 4) : []
     let contextUnits = 0
-    for (const item of Array.isArray(context) ? context.slice(0, CONTEXT_MAX_ITEMS + 2) : []) {
+    for (const item of workOrder === null && Array.isArray(context)
+      ? context.slice(0, CONTEXT_MAX_ITEMS + 2) : []) {
       if (cleanContext.length >= CONTEXT_MAX_ITEMS) { skipped.push('context_overflow'); continue }
       const role = item?.role
       const text = typeof item?.text === 'string'
@@ -1662,13 +1725,17 @@ export class RebuildEngine {
         return { ok: true, duplicate: true, id }
       }
       if (doc.corrections.length > 60) doc.corrections.shift()
-      const { snapshot: revision, reason: unverified } = revisionSnapshot(doc, referenceText, clean)
+      const { snapshot: revision, reason: unverified } = workOrder === null
+        ? revisionSnapshot(doc, referenceText, clean) : { snapshot: null, reason: 'temporary_scope' }
       doc.corrections.push({ id, sessionId, turnId: boundedUnits(String(turnId), 64), at: this.now(),
         day: localDayKey(this.now()), userText: clean, assistantBrief: brief,
         ...(cleanContext.length === 0 ? {} : { context: cleanContext }),
         ...(skipped.length === 0 ? {} : { contextOmitted: boundedUnits([...new Set(skipped)].join(','), 160) }),
         cwd: typeof cwd === 'string' ? boundedUnits(cwd, 512) : null,
-        contentDigest: digestOf(clean), status: 'pending', reason: unverified, ticket: null, entryIds: [],
+        contentDigest: digestOf(clean), status: workOrder === null ? 'pending' : 'ignored',
+        reason: workOrder === null ? unverified : 'temporary_scope', ticket: null, entryIds: [],
+        ...(workOrder === null ? {} : { decisions: [{ durability: 'one_off', scope: 'project',
+          basis: 'structured_work_order', result: 'ignored', reason: 'temporary_scope' }] }),
         // Frozen revision target (metadata only — never the quoted text): commit-time exact
         // re-check against THIS version; anything else is a stale reference, zero changes.
         revision })
@@ -3205,6 +3272,22 @@ export class RebuildEngine {
     // unrelated route). A blocked candidate stays pending and readable and never parks the rest.
     for (const candidate of doc.corrections.filter(row => row.status === 'pending')
       .sort((a, b) => a.at - b.at)) {
+      // Legacy 1.3.15 rows were already flattened/clamped. Their trusted work-order identifier,
+      // paired terminal protocol or explicit temporary-ticket preamble still survives in the
+      // stored text; settle the row readably before route/material checks or any request start.
+      if (structuredWorkOrderBoundary(candidate.userText) !== null) {
+        const ignored = this.store.transaction(doc2 => {
+          const row = doc2.corrections.find(item => item.id === candidate.id)
+          if (row === undefined || row.status !== 'pending' || row.ticket !== null) return false
+          row.status = 'ignored'
+          row.reason = 'temporary_scope'
+          row.decisions = [{ durability: 'one_off', scope: 'project', basis: 'structured_work_order',
+            result: 'ignored', reason: 'temporary_scope' }]
+          return true
+        })
+        if (ignored === true) this.noteCollectionSkip('temporary_scope')
+        continue
+      }
       // Selection pass is read-only; unverified sources are refused by the persisted sweep
       // (sweepUnverifiedSources) run by the host before dispatch. Defensive skip kept anyway.
       if (!this.#sourceOk(candidate.sessionId)) continue

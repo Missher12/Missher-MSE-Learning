@@ -6859,6 +6859,170 @@ test('CS21 FIX3: citation authority must live in the ANCHOR sentence, not anothe
   assert.equal(clean.store.read().entries[0].visibility, 'global')
 })
 
+// Short synthetic work orders preserve the live failure shapes without shipping local ticket text.
+const SYNTHETIC_WORK_ORDER = `TASK-MSE-042 TASK-MSE-042 这是本次临时实施工单，不新增长期规则。实施取舍：完成候选版本校验并保留已有成果。不对，验收报告必须说明实际检查过的版本。只做本地假provider检查，不安装、不发布。最后原生最终消息 STATUS042_DONE 或 STATUS042_BLOCKED。`
+
+const NO_EXTRACTION_EXPECTED = [{ answer: { schema: 'mse-correction-extract-v1', corrections: [] },
+  usage: { totalTokens: 1 } }]
+
+test('OW1 red: the synthetic work order is audited and refused before extraction', async () => {
+  const w = extWiring(root(), NO_EXTRACTION_EXPECTED)
+  try {
+    const s = w.mk('ow1', '/repo/alpha')
+    await w.turn(s, 58, SYNTHETIC_WORK_ORDER)
+    const doc = w.plugin.engine.store.read()
+    assert.equal(w.ext().length, 0, 'the task-scoped work order never reaches the provider')
+    assert.equal(doc.requests.length, 0, 'no extraction request or retry is scheduled')
+    assert.equal(doc.entries.length, 0, 'the one-off work order creates no rules')
+    assert.equal(doc.corrections.length, 1, 'the refusal remains a correction audit row')
+    assert.equal(doc.corrections[0].status, 'ignored')
+    assert.equal(doc.corrections[0].reason, 'temporary_scope')
+  } finally { w.plugin.dispose() }
+})
+
+test('OW2 red: full new input is checked before the 1536-unit candidate clamp', async () => {
+  const terminal = '最后原生最终消息 STATUS042_DONE 或 STATUS042_BLOCKED。'
+  const at = SYNTHETIC_WORK_ORDER.indexOf(terminal)
+  assert.ok(at > 0)
+  const long = SYNTHETIC_WORK_ORDER.slice(0, at) + '补充实施说明。'.repeat(230)
+    + SYNTHETIC_WORK_ORDER.slice(at)
+  assert.ok(long.indexOf('STATUS042_DONE') > 1536,
+    'the only complete terminal protocol is beyond the persisted candidate limit')
+  const w = extWiring(root(), NO_EXTRACTION_EXPECTED)
+  try {
+    await w.turn(w.mk('ow2', '/repo/alpha'), 1, long)
+    const doc = w.plugin.engine.store.read()
+    assert.equal(w.ext().length, 0, 'classification used the complete incoming message')
+    assert.equal(doc.corrections[0].status, 'ignored')
+    assert.equal(doc.corrections[0].reason, 'temporary_scope')
+    assert.ok(!doc.corrections[0].userText.includes('STATUS042_DONE'),
+      'the test actually exercises a candidate whose stored prefix has no terminal marker')
+  } finally { w.plugin.dispose() }
+})
+
+test('OW3 red: old flat pending work orders are audited before route lookup; settled rows stay untouched', () => {
+  const engine = new RebuildEngine({ stateRoot: root() })
+  engine.setRoute({ provider: 'fake', model: 'm1' })
+  engine.setSourceGuard(() => true)
+  const prior = engine.recordCorrectionCandidate({ sessionId: 'ow3-settled', turnId: '57',
+    userText: '不对，应该先检查 JSON 再保存。', cwd: '/repo/alpha' })
+  const first = engine.beginWork()
+  assert.ok(first)
+  engine.markDispatched(first.ticket)
+  engine.finishWork({ ticket: first.ticket, usage: { total: 10 },
+    result: { schema: 'mse-correction-extract-v1', corrections: [] } })
+  engine.store.transaction(doc => {
+    const row = doc.corrections.find(item => item.id === prior.id)
+    row.userText = SYNTHETIC_WORK_ORDER
+    row.status = 'saved'
+    row.reason = null
+    return true
+  })
+  const settledBefore = engine.store.read().corrections.find(row => row.id === prior.id)
+  const requestsBefore = engine.store.read().requests
+  const pending = engine.recordCorrectionCandidate({ sessionId: 'ow3-pending', turnId: '58',
+    userText: SYNTHETIC_WORK_ORDER, cwd: '/repo/alpha' })
+  assert.equal(pending.ok, true)
+  engine.store.transaction(doc => {
+    const row = doc.corrections.find(item => item.id === pending.id)
+    row.status = 'pending'
+    row.reason = null
+    delete row.decisions
+    return true
+  }) // restore the pre-fix 1.3.15 row shape for the legacy pending-path check
+  const work = engine.beginWork()
+  const doc = engine.store.read()
+  assert.equal(work, null, 'the flat legacy candidate is stopped before a model request')
+  assert.deepEqual(doc.requests, requestsBefore, 'the protected row created no request or replay')
+  assert.deepEqual(doc.corrections.find(row => row.id === prior.id), settledBefore,
+    'the already-settled row is not edited or deleted')
+  const row = doc.corrections.find(item => item.id === pending.id)
+  assert.equal(row.status, 'ignored')
+  assert.equal(row.reason, 'temporary_scope')
+})
+
+test('OW4 red: a truncated legacy repair ticket stays temporary across later correction-like sentences', () => {
+  const oldFlat = (`TASK-REPAIR-041 # TASK-REPAIR-041 这是本次临时返修工单，不是长期规则。继续同一批修复；不对，验收结果必须包含真实 stdout 证据。引用上批终态「STATUS041_DONE」。${'本批修复继续执行。'.repeat(180)}`).slice(0, 1536)
+  assert.equal(oldFlat.length, 1536, 'the synthetic legacy row keeps the persisted candidate limit')
+  const engine = new RebuildEngine({ stateRoot: root() })
+  engine.setRoute({ provider: 'fake', model: 'm1' })
+  engine.setSourceGuard(() => true)
+  const queued = engine.recordCorrectionCandidate({ sessionId: 'ow4', turnId: '1',
+    userText: oldFlat, cwd: '/repo/alpha' })
+  assert.equal(queued.ok, true)
+  engine.store.transaction(doc => {
+    const row = doc.corrections.find(item => item.id === queued.id)
+    row.status = 'pending'
+    row.reason = null
+    delete row.decisions
+    return true
+  }) // this is how the truncated 1.3.15 candidate persisted before the fix
+  assert.equal(engine.beginWork(), null, 'the explicit one-off work-order preamble blocks the old flat row')
+  const row = engine.store.read().corrections[0]
+  assert.equal(row.status, 'ignored')
+  assert.equal(row.reason, 'temporary_scope')
+})
+
+test('OW5 ordinary corrections with overlapping development, check, and delivery terms still learn and inject', async () => {
+  const w = extWiring(root(), [{ answer: { schema: 'mse-correction-extract-v1', corrections: [{
+    evidence: '报告开发、检查和交付结果时，必须说明实际验证过的版本',
+    instruction: '报告开发、检查和交付结果时，必须说明实际验证过的版本',
+    applicability: '报告工作进度和交付结果时', durability: 'durable', scope: 'global',
+    basis: '普通纠正', reason: '报告口径' }] }, usage: { totalTokens: 50 } }])
+  try {
+    await w.turn(w.mk('ow5a', '/repo/alpha'), 1,
+      '不对，报告开发、检查和交付结果时，必须说明实际验证过的版本。')
+    assert.ok(ruleInstruction(w.plugin, '实际验证过的版本'),
+      'similar vocabulary without a structured work-order boundary remains learnable')
+    const out = await w.handlers.get('agent/pre-step')[0]({ agent: { session: w.mk('ow5b', '/repo/beta') },
+      step: 1, turn: 1, messages: [{ id: 'ow5-inject', role: 'user', source: { kind: 'user' },
+        content: [{ type: 'text', text: '如何报告开发、检查和交付结果？' }] }] },
+    async p => ({ kind: 'enter', messages: p.messages }))
+    assert.ok(out.messages.some(message => (message.content ?? [])
+      .some(block => block?.type === 'text' && block.text.includes('实际验证过的版本'))),
+    'a normal correction still reaches a new session through recall')
+  } finally { w.plugin.dispose() }
+})
+
+test('OW6 a separately marked long-term correction outside the work order still saves', async () => {
+  const w = extWiring(root(), NO_EXTRACTION_EXPECTED)
+  try {
+    const text = '另外与本工单无关，以后每次交付报告都要注明真实核验范围。这个要求只限于本项目。\n'
+      + SYNTHETIC_WORK_ORDER
+    await w.turn(w.mk('ow6', '/repo/alpha'), 1, text)
+    const doc = w.plugin.engine.store.read()
+    const independent = ruleInstruction(w.plugin, '真实核验范围')
+    assert.ok(independent,
+      'an explicitly independent durable correction is processed on its own')
+    assert.equal(independent.visibility, 'scoped')
+    assert.ok(independent.instruction.includes('只限于本项目'), 'its whole scope condition stays attached')
+    assert.equal(doc.corrections.length, 1, 'the work-order audit remains alongside the rule')
+    assert.equal(doc.corrections[0].status, 'ignored')
+    assert.equal(doc.corrections[0].reason, 'temporary_scope')
+    assert.equal(w.ext().length, 0, 'the one-off task itself never reaches extraction')
+  } finally { w.plugin.dispose() }
+})
+
+test('OW7 terminal marker code spans are accepted locally and a separate trailing rule still saves', async () => {
+  const coded = SYNTHETIC_WORK_ORDER.replace('STATUS042_DONE 或 STATUS042_BLOCKED',
+    '`STATUS042_DONE` 或 `STATUS042_BLOCKED`')
+  const w = extWiring(root(), NO_EXTRACTION_EXPECTED)
+  try {
+    const text = `${coded}\n\n另外，以后报告验收结果时，应该写出实际测试过的版本。这个要求只限于本项目。`
+    await w.turn(w.mk('ow7', '/repo/alpha'), 1, text)
+    const doc = w.plugin.engine.store.read()
+    const independent = ruleInstruction(w.plugin, '实际测试过的版本')
+    assert.ok(independent,
+      'the independent clause after the work-order terminator remains learnable')
+    assert.equal(independent.visibility, 'scoped')
+    assert.ok(independent.instruction.includes('只限于本项目'), 'the separate paragraph keeps its full condition')
+    assert.equal(doc.corrections.length, 1)
+    assert.equal(doc.corrections[0].status, 'ignored')
+    assert.equal(doc.corrections[0].reason, 'temporary_scope')
+    assert.equal(w.ext().length, 0, 'inline code is accepted only as part of the terminal protocol')
+  } finally { w.plugin.dispose() }
+})
+
 test('RSI real pre-step: two scoped approvals, exact rollback, and a late old-version failure', async () => {
   const dir = root()
   const w = extWiring(dir, [])

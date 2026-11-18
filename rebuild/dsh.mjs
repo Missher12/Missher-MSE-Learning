@@ -31,7 +31,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { FAILURE_LESSON_MAX_BYTES } from '../src/failure-lessons.mjs'
 import { usageTokens } from '../adapters/dsh/usage.mjs'
 import { RebuildEngine, pathInside, TEMPORARY_SCOPE, REVISION_INTENT,
-  validateManualRule } from './engine.mjs'
+  structuredWorkOrderBoundary, validateManualRule } from './engine.mjs'
 import { readModel, mseMessageSource, isMseSource } from './llm.mjs'
 import { SENSITIVE_PATTERN, AUTHORITY_PATTERN } from '../src/failure-evidence.mjs'
 import { runChecker, runDevelopmentChecker } from './checker.mjs'
@@ -190,7 +190,7 @@ const PYTHON_GUIDANCE_EXPLICIT_OPT_OUT = /(?:\b(?:do not|don't|never|skip)\s+(?:
 const PYTHON_VERIFIER_RUNTIME_GUIDANCE = '仅在本次任务需要执行或验收这条当前 Python/BOM 方法时，才调用 `mse_verify_python` 一次。纯问答或仅解释时不要调用；用户明确要求不执行、不验收时也不要调用。可先只读定位脚本读取的 JSON `inputPath`，再用当前方法原样的 `verification.check` 和 workspace-relative 路径调用。不要用 bash 重跑原始命令，也不要用 bash 退出码或自行打印的内容代替工具结果。路径不确定或结果为 `unknown` 时按未验证报告，不得称为通过。'
 const PYTHON_RECEIPT_RUNTIME_GUIDANCE = '仅在本次任务需要执行或验收这条双入口 receipt 方法时，才调用 `mse_verify_python_receipt` 一次。传入当前方法原样的 `verification.check`，以及从本次明确关联的项目上下文只读定位到的 workspace-relative `projectManifest`；项目身份不清楚时按 unknown 处理。工具只读 manifest 与 receipts，并在宿主 active 插件和 bundle 声明唯一关联时采信实际版本，不猜 expectedVersion，也不把 manifest.version 当已加载版本。按当前方法获授权修复 receipt 时保留 candidateFile 与其它字段；工具只验证，不改脚本、结果或材料来凑通过。它会运行 intake.py 与同目录 counter.py 的原始入口并验证各自实际读取的 receipt。路径不确定或结果为 `unknown` 时按未验证报告。'
 
-const SCOPED_PATTERN = /(?:仅|只)(?:在)?(?:本|这个|该)(?:项目|仓库|库)|(?:在本|这个)(?:项目|仓库)(?:里|中|内)/u
+const SCOPED_PATTERN = /(?:仅|只)(?:限于|在)?(?:本|这个|该)(?:项目|仓库|库)|(?:在本|这个)(?:项目|仓库)(?:里|中|内)/u
 const textsOf = message => (message?.content ?? [])
   .filter(part => part?.type === 'text').map(part => part.text ?? '')
 const PYTHON_VERIFIER_TOOL = 'mse_verify_python'
@@ -988,6 +988,16 @@ export function apply(ctx, config = {}) {
         } else throw error
       }
     }
+    const recordCandidateSafely = options => {
+      try { engine.recordCorrectionCandidate(options) } catch (error) {
+        const code = typeof error?.code === 'string' ? error.code : ''
+        if (code === 'invalid_memory' || code === 'invalid_candidate' || code === 'capacity') {
+          engine.noteCollectionSkip('candidate_rejected', wsRoots.length)
+        } else if (code === 'state_unavailable') {
+          engine.noteCollectionSkip('store_unavailable', wsRoots.length)
+        } else throw error
+      }
+    }
     if (userText !== '' && inWorkspace) {
       // UNIFIED material gate (stage-3b): collected material for THIS turn is screened for
       // explicit outside-file references BEFORE any learning side effect — immediate saves,
@@ -1021,10 +1031,20 @@ export function apply(ctx, config = {}) {
       // turn — never older/history messages, and never a question (「以后谁负责…」 asks, it does
       // not instruct). No new recognition system: one position, one question test.
       const lastText = trusted.length > 0 ? textsOf(trusted[trusted.length - 1]).join('\n') : ''
-      let explicitCorrection = false
+      // The native user message has no durable "scheduled" or permission provenance. Protect a
+      // work order from its full trusted text here, before either the immediate rule path or the
+      // 1536-unit candidate material clamp. A clearly separate durable prefix is still handled
+      // by the ordinary correction path below.
+      const workOrder = structuredWorkOrderBoundary(lastText)
+      const learningText = workOrder === null ? lastText : workOrder.independentText
+      if (workOrder !== null) {
+        recordCandidateSafely({ sessionId, turnId: String(turn), userText: lastText.slice(workOrder.start),
+          cwd: cwdOf(session) ?? null })
+      }
+      let explicitCorrection = workOrder !== null && learningText === ''
       // The immediate layer runs over the SAME trusted body (quotes/logs stripped) — the
       // quoted 「记住：…」 in a log block must not be learned as the user's own rule (F1).
-      const found = CORRECTION_PATTERN.exec(trustedBody(lastText))
+      const found = CORRECTION_PATTERN.exec(trustedBody(learningText))
       if (found !== null) {
         const lead = found[1]
         // Keep the prohibition word in the stored rule; only neutral lead-ins are dropped.
@@ -1037,7 +1057,7 @@ export function apply(ctx, config = {}) {
         // else falls into the bounded candidate queue, where evidence, temporariness and scope
         // get the same checks a normal correction gets. No hardcoded bad-rule list.
         const durableLead = lead === '记住' || lead === '以后'
-        if (!isQuestion && durableLead && !TEMPORARY_SCOPE.test(lastText)) {
+        if (!isQuestion && durableLead && !TEMPORARY_SCOPE.test(learningText)) {
           // EXPECTED admission refusals (the engine's own char/byte/source rules — a long
           // multi-byte clause can exceed 480 UTF-8 bytes) must never escape through the host
           // hook: they become a readable no-immediate-save outcome, the agent's next step
@@ -1046,7 +1066,7 @@ export function apply(ctx, config = {}) {
           // the ordinary bounded candidate path below sees the same material unchanged.
           try {
             engine.recordCorrection({ text: clause, sessionId, turnId: String(turn),
-              projectKey: SCOPED_PATTERN.test(lastText) ? cwdOf(session) : null })
+              projectKey: SCOPED_PATTERN.test(learningText) ? cwdOf(session) : null })
             explicitCorrection = true
           } catch (error) {
             if (error?.code !== 'invalid_rule') throw error
@@ -1059,14 +1079,14 @@ export function apply(ctx, config = {}) {
       // The immediately preceding assistant text only disambiguates references — never a rule
       // source (the engine verifies evidence against THIS user text at commit time).
       if (!explicitCorrection) {
-        const material = correctionMaterial(lastText)
+        const material = correctionMaterial(learningText)
         // Revision path (X1/X3 review): a rule may only be revised through an EXPLICIT
         // retraction intent in the quote-stripped trusted body — questions, agreement, tickets
         // and logs never open the revision queue. A quote may only NAME the target: the engine
         // freezes the reference (id/version/instruction fingerprint) at enqueue and never
         // persists the raw quoting text for revision candidates.
         const revises = material !== '' && REVISION_INTENT.test(material)
-          && engine.referencesExistingRule(lastText)
+          && engine.referencesExistingRule(learningText)
         const ordinary = material !== '' && (material.match(CLAUSE_SPLIT) ?? []).some(clause =>
           CORRECTION_SIGNAL.test(clause) && CORRECTION_DIRECTIVE.test(clause))
         if (ordinary || revises) {
@@ -1089,20 +1109,9 @@ export function apply(ctx, config = {}) {
             // rejection (a mismatched producer/validator bound would otherwise throw here). The
             // same limits/validations stay in place: a rejected write becomes a readable skip
             // counter and the agent's next step returns normally. Unknown errors still propagate.
-            try {
-              engine.recordCorrectionCandidate({ sessionId, turnId: String(turn), userText: material,
-                assistantBrief, cwd: cwdHere ?? null, referenceText: revises ? lastText : null,
-                context: ctxCollected.items, contextSkip: ctxCollected.reasons })
-            } catch (error) {
-              const code = typeof error?.code === 'string' ? error.code : ''
-              // Expected data/bound refusals and host store refusals are readable skips: the
-              // agent's normal step must not depend on the learning store being writable.
-              if (code === 'invalid_memory' || code === 'invalid_candidate' || code === 'capacity') {
-                engine.noteCollectionSkip('candidate_rejected', wsRoots.length)
-              } else if (code === 'state_unavailable') {
-                engine.noteCollectionSkip('store_unavailable', wsRoots.length)
-              } else throw error
-            }
+            recordCandidateSafely({ sessionId, turnId: String(turn), userText: material,
+              assistantBrief, cwd: cwdHere ?? null, referenceText: revises ? learningText : null,
+              context: ctxCollected.items, contextSkip: ctxCollected.reasons })
           }
         }
       }

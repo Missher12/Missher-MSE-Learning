@@ -2,7 +2,7 @@
 
 ![MSE Learning · 持久学习（品牌插画）](docs/images/cover-v2.webp)
 
-MSE learns reusable corrections and failure lessons for DSH. **1.3.15** resumes eligible corrections after the session route cache rotates. Background learning can recover the model route from the original completed turn when the session remains admitted and its native record identifies the route. Paired objective checks continue to provide control evidence for recall candidates.
+MSE learns reusable corrections and failure lessons for DSH. **1.3.16** keeps clearly marked one-off work orders out of long-term rules. Eligible ordinary corrections still learn automatically, including queued corrections whose original completed turn identifies its model route.
 
 Checks run one restricted snapshot through a native tool and require Python plus a host sandbox reporting full read-only enforcement. Exit code 0, hard-coded success, cancellation, stale versions, and unpaired results do not establish a pass. Other Python scripts and business contracts remain unverified.
 
