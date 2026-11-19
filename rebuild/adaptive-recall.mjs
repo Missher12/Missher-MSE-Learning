@@ -18,6 +18,8 @@ const TASK_TOPIC_GROUPS = Object.freeze([
 const adaptiveFeatureOrder = new Map([...ALIAS_GROUPS.map(group => group.id),
   ...TASK_TOPIC_GROUPS.map(group => group.id), ...ACTION_GROUPS.map(group => group.id)]
   .map((id, index) => [id, index]))
+const adaptiveFeatureLabelById = new Map([...ALIAS_GROUPS, ...TASK_TOPIC_GROUPS, ...ACTION_GROUPS]
+  .map(group => [group.id, group.forms[0]]))
 export const ADAPTIVE_FEATURE_IDS = Object.freeze([...adaptiveFeatureOrder.keys()])
 // An explicit refusal anywhere in the same sentence is weak evidence at best. Omit that
 // feature rather than treating a distant modifier or a coordinated negative list as assent.
@@ -164,6 +166,13 @@ export function adaptiveTaskFeatures(prompt, context = []) {
   const orderedTopics = [...new Set(topics)].sort((a, b) =>
     (adaptiveFeatureOrder.get(a) ?? 999) - (adaptiveFeatureOrder.get(b) ?? 999))
   return [...orderedTopics.slice(0, 7), ...[...new Set(operations)].sort().slice(0, 4)].slice(0, 8)
+}
+
+/** Stable safe labels for an already screened feature vector; never echoes source text. */
+export function adaptiveTaskFeatureLabels(features) {
+  return [...new Set((Array.isArray(features) ? features : [])
+    .filter(id => adaptiveFeatureOrder.has(id)))].slice(0, 8)
+    .map(id => adaptiveFeatureLabelById.get(id)).filter(label => typeof label === 'string')
 }
 
 export function adaptiveEntryFeatures(entry) {

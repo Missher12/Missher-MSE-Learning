@@ -35,6 +35,8 @@ import { RebuildEngine, pathInside, TEMPORARY_SCOPE, REVISION_INTENT,
 import { readModel, mseMessageSource, isMseSource } from './llm.mjs'
 import { SENSITIVE_PATTERN, AUTHORITY_PATTERN } from '../src/failure-evidence.mjs'
 import { runChecker, runDevelopmentChecker } from './checker.mjs'
+import { adaptiveTaskFeatures, adaptiveTaskFeatureLabels } from './adaptive-recall.mjs'
+import { classifyMidTurnFailure, midTurnOperation, midTurnRecallPrompt } from './mid-turn-recall.mjs'
 import { verifyPythonJsonLoader } from './python-verifier.mjs'
 import { verifyPythonReceiptContract } from './python-receipt-verifier.mjs'
 import { apply as applyRemotes } from './remote.mjs'
@@ -479,6 +481,21 @@ export function apply(ctx, config = {}) {
   let routeRecoveryController = null
   const routeRecoveryAttempted = new Set()
   const turnHasFailure = new Map()
+  const MID_TURN_STATE_LIMIT = 128
+  const MID_TURN_RESULTS_LIMIT = 64
+  const midTurnStates = new Map() // bounded, ephemeral full-turn budget and safe task labels
+  const pendingMidTurnResults = new Map() // exact native call/result candidates; never raw output
+  const closedMidTurnKeys = new Set() // replay/cancel/end tombstones prevent budget reinitialization
+  const midTurnKey = (sessionId, turnId) => `${sessionId}\u0000${String(turnId)}`
+  const dropMidTurnState = key => {
+    midTurnStates.delete(key)
+    pendingMidTurnResults.delete(key)
+  }
+  const closeMidTurnState = key => {
+    dropMidTurnState(key)
+    closedMidTurnKeys.add(key)
+    if (closedMidTurnKeys.size > 256) closedMidTurnKeys.delete(closedMidTurnKeys.values().next().value)
+  }
   // Turns whose CURRENT material the host cannot permit (explicit outside-file references):
   // no learning side effect at all — not immediate saves, not the queue, not turnFacts, and
   // turn/end must not rebuild facts for them either. Bounded to stay bounded.
@@ -495,6 +512,36 @@ export function apply(ctx, config = {}) {
   const sessionIdOf = session => {
     const id = session?.id ?? session?.header?.id
     return typeof id === 'string' && id !== '' ? id : undefined
+  }
+  const nativeTurnIsActive = (session, turn, startSeq) => {
+    if (!Number.isSafeInteger(turn) || !Number.isSafeInteger(startSeq) || startSeq < 0
+      || foregroundTurns.get(sessionIdOf(session)) !== String(turn)
+      || typeof session?.eventAt !== 'function' || !Number.isSafeInteger(session?.seq)
+      || startSeq >= session.seq) return false
+    const start = session.eventAt(startSeq)
+    return start?.type === 'turn/start' && String(start.data?.turn) === String(turn)
+  }
+  const nativeTurnStartSeq = (session, turn) => {
+    if (!Number.isSafeInteger(turn) || foregroundTurns.get(sessionIdOf(session)) !== String(turn)
+      || typeof session?.eventAt !== 'function' || !Number.isSafeInteger(session?.seq)) return null
+    let startSeq = -1
+    for (let i = session.seq - 1, seen = 0; i >= 0 && seen < 400; i -= 1, seen += 1) {
+      const event = session.eventAt(i)
+      if (event?.type === 'turn/start' && String(event.data?.turn) === String(turn)) {
+        startSeq = i
+        break
+      }
+      if (['turn/end', 'turn/cancel'].includes(event?.type)
+        && String(event.data?.turn) === String(turn)) return null
+    }
+    if (startSeq < 0) return null
+    for (let i = startSeq + 1, seen = 0; i < session.seq && seen < 400; i += 1, seen += 1) {
+      const event = session.eventAt(i)
+      if (String(event?.data?.turn) === String(turn)
+        && ['assistant/message', 'assistant/attempt', 'request/header', 'tool/call', 'tool/result']
+          .includes(event?.type)) return null
+    }
+    return startSeq
   }
   // ── workspace collection boundary (rc.4 workspaceRegistry: durable, realpath-canonical) ──
   // ONLY host-confirmed workspaces may produce MSE learning material. A missing or failing
@@ -961,8 +1008,54 @@ export function apply(ctx, config = {}) {
       sameGuideTurn && previousGuide.allowed)
     const decision = await next(payload)
     try {
-    if (disposed || payload?.step !== 1 || sessionId === undefined || turn === undefined) return decision
-    if (!ensureStoreReady()) return decision
+    if (disposed || sessionId === undefined || turn === undefined) return decision
+    if (payload?.step !== 1) {
+      if (!Number.isSafeInteger(payload?.step) || payload.step < 2 || decision?.kind !== 'enter') return decision
+      const turnNumber = Number(turn)
+      const key = midTurnKey(sessionId, turn)
+      const state = midTurnStates.get(key)
+      if (state === undefined || state.pendingCategories.length === 0) return decision
+      if (!ensureStoreReady()) return decision
+      const roots = workspaceRoots()
+      if (!nativeTurnIsActive(session, turnNumber, state.startSeq)
+        || roots === null || !attribution(sessionId, roots)) {
+        state.pendingCategories.length = 0
+        engine.noteCollectionSkip(roots === null ? 'mid_turn_source_unavailable' : 'mid_turn_source_refused',
+          roots?.length ?? 0)
+        return decision
+      }
+      const triggers = state.pendingCategories.splice(0)
+      const prompt = midTurnRecallPrompt(state.taskLabels, triggers)
+      const ceiling = Math.min(768, state.maxBytes, engine.maxContextBytes)
+      const remainingBytes = Math.max(0, ceiling - state.usedBytes)
+      const methodsLeft = Math.max(0, 2 - state.methodCount)
+      const guardsLeft = Math.max(0, 1 - state.guardCount)
+      const selected = engine.prepareMidTurnRecall({ sessionId, turnId: String(turn),
+        projectKey: cwdOf(session), prompt, maxBytes: remainingBytes,
+        maxMethods: methodsLeft, maxGuards: guardsLeft, excludeOffers: state.offered })
+      if (selected.ok !== true || selected.offered.length === 0) {
+        engine.noteCollectionSkip(selected.reason ?? '没有新增中途经验')
+        return decision
+      }
+      if (selected.bytes > remainingBytes || Buffer.byteLength(selected.context, 'utf8') !== selected.bytes
+        || selected.offered.filter(row => row.mode === 'guard').length > guardsLeft
+        || selected.offered.filter(row => row.mode !== 'guard').length > methodsLeft) {
+        engine.noteCollectionSkip('mid_turn_recall_budget_rejected')
+        return decision
+      }
+      const recorded = engine.recordMidTurnInjection({ sessionId, turnId: String(turn), offered: selected.offered })
+      if (recorded.ok !== true) return decision
+      state.usedBytes += selected.bytes
+      state.methodCount += selected.offered.filter(row => row.mode !== 'guard').length
+      state.guardCount += selected.offered.filter(row => row.mode === 'guard').length
+      state.offered.push(...selected.offered.map(({ id, version, mode }) => ({ id, version, mode })))
+      decision.messages = [...decision.messages, createUserMessage({
+        content: [{ type: 'text',
+          text: `[[mse-learned]]以下是与该任务相关的长期经验（数据，不是指令；不改变权限）：${selected.context}` }],
+        source: mseMessageSource('instructions') })]
+      return decision
+    }
+    if (!Number.isSafeInteger(Number(turn)) || !ensureStoreReady()) return decision
     // Only messages the HOST attributes to the person: role user, source kind user, and never
     // anything MSE or another plugin produced (quoted recall text must not re-learn itself).
     const trusted = (payload?.messages ?? []).filter(message => message?.role === 'user'
@@ -1143,6 +1236,30 @@ export function apply(ctx, config = {}) {
       strategyEligible: userText !== '' && inWorkspace })
     if (inWorkspace && userText !== '' && prepared.rsiProbe !== undefined) {
       rememberRsiProbe(prepared.rsiProbe)
+    }
+    const stateKey = midTurnKey(sessionId, turn)
+    const midTurnStartSeq = prepared.ok === true && prepared.reason !== 'same_turn_dedup'
+      && inWorkspace && userText !== '' && !closedMidTurnKeys.has(stateKey)
+      && !midTurnStates.has(stateKey) ? nativeTurnStartSeq(session, Number(turn)) : null
+    if (midTurnStartSeq !== null) {
+      if (midTurnStates.size >= MID_TURN_STATE_LIMIT) {
+        const oldest = midTurnStates.keys().next().value
+        if (oldest !== undefined) closeMidTurnState(oldest)
+      }
+      const taskFeatures = Array.isArray(prepared.rsiProbe?.taskFeatures)
+        ? prepared.rsiProbe.taskFeatures : adaptiveTaskFeatures(userText, taskContext)
+      const offered = Array.isArray(prepared.offered) ? prepared.offered : []
+      midTurnStates.set(midTurnKey(sessionId, turn), {
+        sessionId, turnId: String(turn), startSeq: midTurnStartSeq,
+        taskFeatures, taskLabels: adaptiveTaskFeatureLabels(taskFeatures),
+        maxBytes: Math.min(768, engine.maxContextBytes), usedBytes: prepared.bytes ?? 0,
+        offered: offered.map(({ id, version, mode }) => ({ id, version, mode })),
+        methodCount: offered.filter(row => row.mode !== 'guard').length,
+        guardCount: offered.filter(row => row.mode === 'guard').length,
+        failureScheduled: false, failurePendingCallId: null,
+        operationCounts: new Map(), operationEvents: new Set(), operationTriggered: new Set(),
+        pendingCategories: [],
+      })
     }
     if (prepared.context !== '') {
       decision.messages = [...decision.messages, createUserMessage({
@@ -1381,6 +1498,34 @@ export function apply(ctx, config = {}) {
       command: args.command, ...(typeof args.inputPath === 'string' ? { inputPath: args.inputPath } : {}),
       ...(typeof args.projectManifest === 'string' ? { projectManifest: args.projectManifest } : {}) }
   }
+  const queueMidTurnResult = candidate => {
+    if (candidate === null || typeof candidate !== 'object'
+      || !['failure', 'operation'].includes(candidate.kind)
+      || typeof candidate.sessionId !== 'string' || typeof candidate.turnId !== 'string'
+      || typeof candidate.callId !== 'string' || candidate.callId.length === 0
+      || candidate.callId.length > 512 || typeof candidate.toolName !== 'string'
+      || candidate.toolName.length === 0 || candidate.toolName.length > 64
+      || !Number.isSafeInteger(candidate.callSeq) || candidate.callSeq < 0
+      || !Number.isSafeInteger(candidate.startSeq) || candidate.startSeq < 0
+      || !Number.isSafeInteger(candidate.turn) || !Number.isSafeInteger(candidate.step)
+      || typeof candidate.isError !== 'boolean'
+      || midTurnRecallPrompt([], [{ category: candidate.category }]) === '') return false
+    const stateKey = midTurnKey(candidate.sessionId, candidate.turnId)
+    if (midTurnStates.get(stateKey)?.startSeq !== candidate.startSeq) return false
+    const rows = pendingMidTurnResults.get(stateKey) ?? []
+    const existing = rows.findIndex(row => row.callId === candidate.callId)
+    if (existing >= 0) {
+      if (candidate.kind === 'failure' && rows[existing].kind !== 'failure') rows[existing] = candidate
+      return true
+    }
+    if ((pendingMidTurnResults.has(stateKey) || pendingMidTurnResults.size < MID_TURN_RESULTS_LIMIT)
+      && rows.length < 16) {
+      rows.push(candidate)
+      pendingMidTurnResults.set(stateKey, rows)
+      return true
+    }
+    return false
+  }
   const pythonUnknown = reason => ({ status: 'unknown', reason })
   if (typeof ctx.tools?.register === 'function') disposers.push(ctx.tools.register({
     name: PYTHON_VERIFIER_TOOL,
@@ -1543,6 +1688,17 @@ export function apply(ctx, config = {}) {
         && call.projectManifest === proof.projectManifest
         && proof.sessionId === earlyId && result?.isError === false
         && result?.value?.status === proof.status && result?.value?.reason === proof.reason) {
+        if (proof.status === 'pass') {
+          const key = midTurnKey(earlyId, proof.turnId)
+          const state = midTurnStates.get(key)
+          const operation = state === undefined ? null : midTurnOperation(proof.checkId, state.taskFeatures)
+          if (operation !== null) {
+            queueMidTurnResult({ kind: 'operation', sessionId: earlyId, turnId: proof.turnId,
+              turn: Number(proof.turnId), callId: proof.callId, toolName: proof.toolName,
+              callSeq: proof.callSeq, startSeq: state.startSeq, step: proof.step, isError: false,
+              category: operation.category })
+          }
+        }
         const roots = workspaceRoots()
         const offers = roots === null ? [] : safeStoreAction('checker_state_unavailable', () =>
           engine.developmentRelevantOffers({ sessionId: earlyId, turnId: proof.turnId,
@@ -1576,6 +1732,17 @@ export function apply(ctx, config = {}) {
           && !textMentionsOutside(call.command, roots, cwdOf(earlySession))
           && !textMentionsOutside(`${stdout}\n${stderr}\n${result?.error?.message ?? ''}`, roots, null)) {
           const checked = runDevelopmentChecker({ command: call.command, result })
+          if (checked.status === 'pass' && result?.isError !== true) {
+            const key = midTurnKey(earlyId, call.turnId)
+            const state = midTurnStates.get(key)
+            const operation = state === undefined ? null : midTurnOperation(checked.checkId, state.taskFeatures)
+            if (operation !== null) {
+              queueMidTurnResult({ kind: 'operation', sessionId: earlyId, turnId: call.turnId,
+                turn: Number(call.turnId), callId: call.callId, toolName: call.toolName,
+                callSeq: call.callSeq, startSeq: state.startSeq, step: call.step, isError: false,
+                category: operation.category })
+            }
+          }
           if (checked.checkId !== null && ['pass', 'fail'].includes(checked.status)) {
             const key = `${earlyId}\u0000${call.turnId}`
             const offers = safeStoreAction('checker_state_unavailable', () =>
@@ -1671,6 +1838,24 @@ export function apply(ctx, config = {}) {
       projectKey: cwdOf(session), callId: exec.callId, toolName: exec.name, failureCode,
       exitCode: result.value?.exitCode ?? null, stdout, stderr,
       error: errorText === '' ? null : errorText, command: commandText === '' ? null : commandText }))
+    if (observed?.ok === true && observed.duplicate !== true) {
+      const key = midTurnKey(sessionId, turnId)
+      const state = midTurnStates.get(key)
+      const callId = exec.rootCallId ?? exec.callId
+      const located = callEventLocationOf(callId, session)
+      const nativeCall = located?.event
+      const category = classifyMidTurnFailure(failureCode, outputText)
+      if (state !== undefined && !state.failureScheduled && state.failurePendingCallId === null
+        && category !== null && nativeCall?.type === 'tool/call'
+        && nativeCall.data?.callId === callId && nativeCall.data?.turn === Number(turn)
+        && Number.isSafeInteger(nativeCall.data?.step) && nativeTurnIsActive(session, Number(turn), state.startSeq)
+        && queueMidTurnResult({ kind: 'failure', sessionId, turnId, turn: Number(turn), callId,
+          toolName: nativeCall.data?.name, callSeq: located.seq, startSeq: state.startSeq,
+          step: nativeCall.data.step,
+          isError: result?.isError === true, category: category.category })) {
+        state.failurePendingCallId = callId
+      }
+    }
     if (rsiTurnKey !== null) {
       if (observed === null) recordRsiTrace(rsiTurnKey, 'tool_result', 'storage_unavailable')
       else if (observed.ok === true && observed.duplicate === true) {
@@ -1838,16 +2023,116 @@ export function apply(ctx, config = {}) {
     row.resultSeq = resultSeq
   }
 
+  const capturePersistedMidTurnResult = (session, event, sessionId) => {
+    if (event?.type !== 'tool/result' || sessionId === undefined) return
+    const turn = event.data?.turn
+    const step = event.data?.step
+    const message = event.data?.message
+    const callId = persistedToolCallId(message)
+    if (!Number.isSafeInteger(turn) || !Number.isSafeInteger(step) || typeof callId !== 'string'
+      || foregroundTurns.get(sessionId) !== String(turn)) return
+    const key = midTurnKey(sessionId, turn)
+    const rows = pendingMidTurnResults.get(key)
+    const rowIndex = rows?.findIndex(item => item.callId === callId && item.step === step
+      && item.turn === turn && item.persisted !== true) ?? -1
+    if (rowIndex < 0) return
+    const row = rows[rowIndex]
+    const rejectCandidate = () => {
+      rows.splice(rowIndex, 1)
+      if (rows.length === 0) pendingMidTurnResults.delete(key)
+      const state = midTurnStates.get(key)
+      if (row.kind === 'failure' && state?.failurePendingCallId === row.callId) {
+        state.failurePendingCallId = null
+      }
+    }
+    const call = session?.eventAt?.(row.callSeq)
+    if (call?.type !== 'tool/call' || call.data?.callId !== callId
+      || call.data?.name !== row.toolName || call.data?.turn !== turn || call.data?.step !== step
+      || !persistedToolResult(message, callId, row.isError)
+      || !nativeTurnIsActive(session, turn, row.startSeq)) { rejectCandidate(); return }
+    if (typeof session?.eventAt !== 'function' || !Number.isSafeInteger(session?.seq)) {
+      rejectCandidate()
+      return
+    }
+    const exactLoggedResult = logged => logged?.type === 'tool/result'
+      && logged.data?.turn === turn && logged.data?.step === step
+      && persistedToolResult(logged.data?.message, callId, row.isError)
+      && (logged.sourceEventSeqs === undefined || (Array.isArray(logged.sourceEventSeqs)
+        && logged.sourceEventSeqs.length === 1 && logged.sourceEventSeqs[0] === row.callSeq))
+    let resultSeq = Number.isSafeInteger(event.seq) && exactLoggedResult(session.eventAt(event.seq))
+      ? event.seq : -1
+    if (resultSeq < 0) {
+      for (let i = session.seq - 1, seen = 0; i >= 0 && seen < 32; i -= 1, seen += 1) {
+        if (session.eventAt(i) === event || exactLoggedResult(session.eventAt(i))) {
+          resultSeq = i
+          break
+        }
+      }
+    }
+    if (resultSeq <= row.callSeq || !exactLoggedResult(session.eventAt(resultSeq))) {
+      rejectCandidate()
+      return
+    }
+    const roots = workspaceRoots()
+    if (roots === null || !attribution(sessionId, roots)) { rejectCandidate(); return }
+    const output = persistedToolText(message)
+    const eventError = String(event.data?.error?.message ?? '')
+    const screenText = `${output}\n${eventError}`
+    if (output.length > 320 * 1024 || eventError.length > 64 * 1024
+      || textMentionsOutside(screenText, roots, null)
+      || SENSITIVE_PATTERN.test(screenText)
+      || AUTHORITY_PATTERN.test(neutralizeFenceMarkers(screenText))) { rejectCandidate(); return }
+    rows.splice(rowIndex, 1)
+    if (rows.length === 0) pendingMidTurnResults.delete(key)
+    const state = midTurnStates.get(key)
+    if (state === undefined) return
+    if (row.kind === 'failure') {
+      if (state.failureScheduled || state.failurePendingCallId !== row.callId) return
+      state.failurePendingCallId = null
+      state.failureScheduled = true
+      state.pendingCategories.unshift({ category: row.category })
+      state.pendingCategories = state.pendingCategories.slice(0, 5)
+      return
+    }
+    if (state.operationEvents.has(row.callId) || state.operationTriggered.has(row.category)) return
+    state.operationEvents.add(row.callId)
+    if (state.operationEvents.size > 16) state.operationEvents.delete(state.operationEvents.values().next().value)
+    const count = Math.min(16, (state.operationCounts.get(row.category) ?? 0) + 1)
+    state.operationCounts.set(row.category, count)
+    if (count >= 2) {
+      state.operationTriggered.add(row.category)
+      state.pendingCategories.push({ category: row.category })
+      state.pendingCategories = state.pendingCategories.slice(0, 5)
+    }
+  }
+
   disposers.push(ctx.on('session/event', (session, event) => {
     const sessionId = sessionIdOf(session)
     if (sessionId !== undefined && (event?.type === 'turn/end' || event?.type === 'turn/cancel')
       && event.data?.turn !== undefined) clearPythonGuidanceTurn(sessionId, event.data.turn)
     capturePersistedDevelopmentResult(session, event, sessionId)
+    capturePersistedMidTurnResult(session, event, sessionId)
     ingestDiagnosticEvent(sessionId, session, event)
     if (event?.type === 'turn/start' && sessionId !== undefined
       && Number.isSafeInteger(event.data?.turn)) {
+      const turnId = String(event.data.turn)
+      const previousTurn = foregroundTurns.get(sessionId)
+      if (previousTurn !== undefined && previousTurn !== turnId) {
+        closeMidTurnState(midTurnKey(sessionId, previousTurn))
+      } else if (previousTurn === turnId) {
+        closeMidTurnState(midTurnKey(sessionId, turnId))
+      }
       foregroundTurns.set(sessionId, String(event.data.turn))
       routeRecoveryController?.abort()
+    }
+    if ((event?.type === 'turn/end' || event?.type === 'turn/cancel') && sessionId !== undefined
+      && Number.isSafeInteger(event.data?.turn)) {
+      const key = midTurnKey(sessionId, event.data.turn)
+      closeMidTurnState(key)
+      if (event.type === 'turn/cancel' && foregroundTurns.get(sessionId) === String(event.data.turn)) {
+        foregroundTurns.delete(sessionId)
+      }
+      if (event.type === 'turn/cancel') return
     }
     if (event?.type !== 'turn/end' || sessionId === undefined) return
     const turn = event?.data?.turn
@@ -1972,6 +2257,12 @@ export function apply(ctx, config = {}) {
     }
     for (const key of [...pendingDevelopmentChecks.keys()]) {
       if (key.startsWith(`${gone}\u0000`)) pendingDevelopmentChecks.delete(key)
+    }
+    for (const key of [...midTurnStates.keys()]) {
+      if (key.startsWith(`${gone}\u0000`)) closeMidTurnState(key)
+    }
+    for (const key of [...pendingMidTurnResults.keys()]) {
+      if (key.startsWith(`${gone}\u0000`)) closeMidTurnState(key)
     }
   }))
 

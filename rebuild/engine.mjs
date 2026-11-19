@@ -42,6 +42,7 @@ import { mechanismKey, resolveMethodVersion, versionWindow, ensureMethodStats, a
   sourceSnapshot }
   from './evolution.mjs'
 import { compareRecallWithUserRulePriority } from './recall-user-rule-priority.mjs'
+import { selectMidTurnRecall } from './mid-turn-selection.mjs'
 import { RECALL_QUALIFICATION } from './recall-qualification.mjs'
 import { addAdaptiveCandidate, competeAdaptiveCandidate, adaptivePolicyMatches, adaptiveQueryFeatures,
   adaptiveQueryKey, adaptiveTaskFeatures, narrowAdaptivePolicy,
@@ -2873,6 +2874,74 @@ export class RebuildEngine {
   }
 
   // ── recall ──────────────────────────────────────────────────────────────────────────────────
+  /** Read-only same-turn selection. It deliberately writes no receipt, turn usage, or RRSI data. */
+  prepareMidTurnRecall({ sessionId, turnId, projectKey, environmentId = null, prompt, maxBytes, maxMethods, maxGuards,
+    excludeOffers = [] }) {
+    check(typeof prompt === 'string' && prompt.length <= 512, 'invalid_prompt')
+    check(Number.isSafeInteger(maxBytes) && maxBytes >= 0 && maxBytes <= DEFAULT_CONTEXT_BYTES
+      && Number.isSafeInteger(maxMethods) && maxMethods >= 0 && maxMethods <= 2
+      && Number.isSafeInteger(maxGuards) && maxGuards >= 0 && maxGuards <= 1, 'invalid_mid_turn_budget')
+    const turnKey = turnKeyOf(sessionId, turnId)
+    try {
+      const doc = this.store.read()
+      if (!this.#sourceOk(sessionId)) return { ok: false, context: '', bytes: 0, offered: [],
+        reason: '当前会话来源未通过工作区验证' }
+      if (doc.receipts.some(row => row.turnKey === turnKey && row.settled === true)
+        || doc.turnFacts.some(row => row.turnKey === turnKey && row.outcome !== null
+          && row.outcome !== undefined)) {
+        return { ok: false, context: '', bytes: 0, offered: [], reason: '当前回合已经结束' }
+      }
+      if (this.#materialOk(prompt, null) !== true) {
+        return { ok: false, context: '', bytes: 0, offered: [], reason: '当前召回条件未通过材料检查' }
+      }
+      const max = Math.min(maxBytes, this.maxContextBytes, DEFAULT_CONTEXT_BYTES)
+      const options = { prompt, scope: scopeOf(projectKey), environment: environmentOf(environmentId), maxBytes: max,
+        maxMethods, maxGuards, excludeOffers, now: this.now(),
+        guardAdmit: text => this.#materialOk(text, null) }
+      const selection = selectMidTurnRecall(doc.entries, options)
+      if (selection.offered.length === 0) return { ok: true, context: '', bytes: 0, offered: [],
+        reason: max === 0 || (maxMethods === 0 && maxGuards === 0)
+          ? '本回合召回预算已用完' : '没有找到适用于当前任务的经验' }
+      return { ok: true, context: selection.lines.join(''), bytes: selection.bytes,
+        offered: selection.offered, reason: null }
+    } catch (error) {
+      if (!storageFailure(error)) throw error
+      this.noteCollectionSkip('mid_turn_recall_state_unavailable')
+      return { ok: false, context: '', bytes: 0, offered: [], reason: '经验库暂时不可读取' }
+    }
+  }
+
+  /** Count a late injection without changing the original request receipt or adaptive probe. */
+  recordMidTurnInjection({ sessionId, turnId, offered }) {
+    if (!Array.isArray(offered) || offered.length === 0 || offered.length > 3
+      || !this.#sourceOk(sessionId)) return { ok: false, injected: 0 }
+    const turnKey = turnKeyOf(sessionId, turnId)
+    try {
+      return this.store.transaction(doc => {
+        if (doc.receipts.some(row => row.turnKey === turnKey && row.settled === true)
+          || doc.turnFacts.some(row => row.turnKey === turnKey && row.outcome !== null
+            && row.outcome !== undefined)) return { ok: false, injected: 0 }
+        let injected = 0
+        for (const offer of offered) {
+          const entry = doc.entries.find(row => row.id === offer?.id && row.version === offer?.version
+            && row.status !== 'retired')
+          if (entry === undefined || !['method', 'guard'].includes(offer.mode)) continue
+          entry.injected += 1
+          entry.lastInjectedAt = this.now()
+          if (offer.mode !== 'guard' && offer.version === entry.version) {
+            ensureMethodStats(entry, this.now()).injected += 1
+          }
+          injected += 1
+        }
+        return { ok: injected === offered.length, injected }
+      })
+    } catch (error) {
+      if (!storageFailure(error)) throw error
+      this.noteCollectionSkip('mid_turn_recall_state_unavailable')
+      return { ok: false, injected: 0 }
+    }
+  }
+
   prepare({ sessionId, turnId, projectKey, environmentId = null, prompt, taskContext = [],
     strategyEligible = false }, adaptiveEligible = true) {
     check(typeof prompt === 'string' && prompt.length <= 32_768, 'invalid_prompt')

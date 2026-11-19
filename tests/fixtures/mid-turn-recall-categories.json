@@ -1,0 +1,23 @@
+{
+  "schema": "mse-mid-turn-public-fixtures-v1",
+  "failure_categories": [
+    "json_parse_error",
+    "json_trailing_comma",
+    "syntax_error",
+    "missing_dependency",
+    "permission_error",
+    "test_failure",
+    "type_error",
+    "network_error",
+    "tool_timeout",
+    "tool_error",
+    "nonzero_exit"
+  ],
+  "operation_check_ids": [
+    "python-json-loader-v1",
+    "node-test-runner-spec-v1",
+    "pytest-summary-v1",
+    "typescript-noemit-v1",
+    "python-receipt-contract-v1"
+  ]
+}
