@@ -16,6 +16,10 @@ In the DSH command bar, `/mse <experience>` saves the exact text as a project ru
 
 Bare `/mse` attempts to extract one rule from the user's words in the just-finished task, using the current model route once. It explains any refusal caused by unclear evidence, unverified scope, or incomplete output.
 
+## Learning outcomes
+
+Reusable corrections can carry into a later session. In a controlled DSH comparison, an adaptive policy recovered two missed matches, injected 149 bytes in a new session once qualified, and stopped offering the method after the failure recurred. [Examples and reproducible evidence](docs/LEARNING-RESULTS.md#english)
+
 See the [publication record](https://github.com/Missher12/Missher-MSE-Learning/blob/main/PUBLICATION.md) and [validation record](https://github.com/Missher12/Missher-MSE-Learning/blob/main/VALIDATION.md).
 
 <details>

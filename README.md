@@ -12,6 +12,10 @@ MSE 为 DSH 学习可复用纠正与失败经验。**1.4.2** 的「自我进化�
 
 在「设置 → 自我进化」查看六页状态。只读查看不调用模型；后台复盘与总结可能产生费用，未知费用不会自动重发。
 
+## 学习成果
+
+普通纠正可在相关新会话里用上。同题隔离宿主对照中，新策略补齐了旧版漏掉的两次匹配，达标后在新会话实际注入 149 字节，匹配失败复发后自动停用。[可复现示例与证据](docs/LEARNING-RESULTS.md)
+
 发布与验证记录见 [发布记录](https://github.com/Missher12/Missher-MSE-Learning/blob/main/PUBLICATION.md) 和 [验证记录](https://github.com/Missher12/Missher-MSE-Learning/blob/main/VALIDATION.md)。
 
 <details>
