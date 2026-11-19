@@ -31,7 +31,7 @@ const warning = { id: 'mem_warning', version: 3, mode: 'guard' }
 const userRule = { id: 'mem_rule', version: 1, mode: 'method' }
 const v2 = (...samples) => replayAdaptivePolicy({ schema: 'mse-adaptive-recall-v2',
   entryId: candidate.id, version: candidate.version, firstSession: 'source', firstQuery: 'original',
-  features: ['api', 'opcheck'], excludedFeatures: ['chart'], samples })
+  features: ['api', 'path', 'acceptance', 'opcheck'], excludedFeatures: ['chart'], samples })
 const full = ({ session, query, features, expected, observed = expected ? candidate : incumbent,
   baselineOffers = [incumbent, userRule, warning], candidateOffers, baselineBytes = 600,
   candidateBytes = expected ? 700 : 600, matched = expected, canAdd = true,
@@ -46,8 +46,8 @@ const full = ({ session, query, features, expected, observed = expected ? candid
 
 test('v2 promotion needs two independent positive gains and two complete, non-regressing controls',()=>{
  const approved=v2(
-  full({session:'positive-1',query:'positive-query-1',features:['api','opcheck'],expected:true}),
-  full({session:'positive-2',query:'positive-query-2',features:['api','opcheck'],expected:true}),
+  full({session:'positive-1',query:'positive-query-1',features:['api','path','acceptance','opcheck'],expected:true}),
+  full({session:'positive-2',query:'positive-query-2',features:['api','path','acceptance','opcheck'],expected:true}),
   full({session:'control-1',query:'control-query-1',features:['chart','opdraw'],expected:false,
     baselineOffers:[incumbent,userRule,warning]}),
   full({session:'control-2',query:'control-query-2',features:['chart','opdraw'],expected:false,
@@ -58,15 +58,15 @@ test('v2 promotion needs two independent positive gains and two complete, non-re
  assert.deepEqual(approved.removedMethods,['mem_incumbent'])
  assert.equal(approved.maxCandidateBytes,700)
  assert.equal(v2(
-  full({session:'positive-1',query:'positive-query-1',features:['api','opcheck'],expected:true}),
-  full({session:'positive-1',query:'positive-query-2',features:['api','opcheck'],expected:true}),
+  full({session:'positive-1',query:'positive-query-1',features:['api','path','acceptance','opcheck'],expected:true}),
+  full({session:'positive-1',query:'positive-query-2',features:['api','path','acceptance','opcheck'],expected:true}),
   full({session:'control-1',query:'control-query-1',features:['chart','opdraw'],expected:false,
     baselineOffers:[incumbent,userRule,warning]}),
   full({session:'control-2',query:'control-query-2',features:['chart','opdraw'],expected:false,
     baselineOffers:[incumbent,userRule,warning]})).independentGains,1)
  const repeatedEvidence=v2(
-  full({session:'positive-1',query:'positive-query-1',features:['api','opcheck'],expected:true}),
-  full({session:'positive-1',query:'positive-query-1',features:['api','opcheck'],expected:true}),
+  full({session:'positive-1',query:'positive-query-1',features:['api','path','acceptance','opcheck'],expected:true}),
+  full({session:'positive-1',query:'positive-query-1',features:['api','path','acceptance','opcheck'],expected:true}),
   full({session:'control-1',query:'control-query-1',features:['chart','opdraw'],expected:false,
     baselineOffers:[incumbent,userRule,warning]}),
   full({session:'control-2',query:'control-query-2',features:['chart','opdraw'],expected:false,
@@ -74,21 +74,21 @@ test('v2 promotion needs two independent positive gains and two complete, non-re
  assert.equal(repeatedEvidence.independentGains,1)
  assert.equal(repeatedEvidence.repeats,1)
  assert.equal(repeatedEvidence.approved,false, 'replay never counts the repeated turn as a second gain')
- const droppedRule=full({session:'positive-2',query:'positive-query-2',features:['api','opcheck'],expected:true,
+ const droppedRule=full({session:'positive-2',query:'positive-query-2',features:['api','path','acceptance','opcheck'],expected:true,
   candidateOffers:[candidate,warning]})
  assert.equal(v2(
-  full({session:'positive-1',query:'positive-query-1',features:['api','opcheck'],expected:true}),
+  full({session:'positive-1',query:'positive-query-1',features:['api','path','acceptance','opcheck'],expected:true}),
   droppedRule,
   full({session:'control-1',query:'control-query-1',features:['chart','opdraw'],expected:false,
     baselineOffers:[incumbent,userRule,warning]}),
   full({session:'control-2',query:'control-query-2',features:['chart','opdraw'],expected:false,
     baselineOffers:[incumbent,userRule,warning]})).approved,false)
- const falseOffer=full({session:'bad',query:'bad-query',features:['api','opcheck'],expected:false,
+ const falseOffer=full({session:'bad',query:'bad-query',features:['api','path','acceptance','opcheck'],expected:false,
   observed:incumbent, candidateOffers:[candidate,userRule,warning], candidateBytes:700,
   matched:true, result:'negative'})
  assert.equal(v2(
-  full({session:'positive-1',query:'positive-query-1',features:['api','opcheck'],expected:true}),
-  full({session:'positive-2',query:'positive-query-2',features:['api','opcheck'],expected:true}),
+  full({session:'positive-1',query:'positive-query-1',features:['api','path','acceptance','opcheck'],expected:true}),
+  full({session:'positive-2',query:'positive-query-2',features:['api','path','acceptance','opcheck'],expected:true}),
   full({session:'control-1',query:'control-query-1',features:['chart','opdraw'],expected:false,
     baselineOffers:[incumbent,userRule,warning]}),
   full({session:'control-2',query:'control-query-2',features:['chart','opdraw'],expected:false,
@@ -97,7 +97,24 @@ test('v2 promotion needs two independent positive gains and two complete, non-re
   expected:false, observed:incumbent, baselineOffers:[incumbent,userRule,warning],
   candidateOffers:[userRule,warning], candidateBytes:400})
  assert.equal(v2(
-  full({session:'positive-1',query:'positive-query-1',features:['api','opcheck'],expected:true}),
-  full({session:'positive-2',query:'positive-query-2',features:['api','opcheck'],expected:true}),
+  full({session:'positive-1',query:'positive-query-1',features:['api','path','acceptance','opcheck'],expected:true}),
+  full({session:'positive-2',query:'positive-query-2',features:['api','path','acceptance','opcheck'],expected:true}),
   lostControl).reason,'offer_or_objective_regression')
+})
+
+test('v2 replay records the same real target turn as a candidate miss when its condition does not match', () => {
+ const miss = full({session:'miss-session',query:'miss-query',features:['api','path','opcheck'],
+  expected:true,matched:false,candidateOffers:[incumbent,userRule,warning],result:'holdout_miss'})
+ const report = v2(
+  miss,
+  full({session:'positive-1',query:'positive-query-1',features:['api','path','acceptance','opcheck'],expected:true}),
+  full({session:'positive-2',query:'positive-query-2',features:['api','path','acceptance','opcheck'],expected:true}),
+  full({session:'control-1',query:'control-query-1',features:['chart','opdraw'],expected:false,
+    baselineOffers:[incumbent,userRule,warning]}),
+  full({session:'control-2',query:'control-query-2',features:['chart','opdraw'],expected:false,
+    observed:{id:'mem_other',version:4},baselineOffers:[userRule,warning]}))
+ assert.equal(report.candidate.misses,1)
+ assert.equal(report.independentGains,2)
+ assert.equal(report.incomplete,0)
+ assert.ok(report.evidenceKeys.includes(miss.turnKey))
 })

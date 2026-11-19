@@ -45,12 +45,13 @@ import { compareRecallWithUserRulePriority } from './recall-user-rule-priority.m
 import { RECALL_QUALIFICATION } from './recall-qualification.mjs'
 import { addAdaptiveCandidate, competeAdaptiveCandidate, adaptivePolicyMatches, adaptiveQueryFeatures,
   adaptiveQueryKey, adaptiveTaskFeatures, narrowAdaptivePolicy,
-  synthesizeAdaptiveTaskPolicy } from './adaptive-recall.mjs'
+  synthesizeAdaptiveTaskCandidates } from './adaptive-recall.mjs'
 import { developmentCheckMatchesVerification, developmentCheckIdForCommand, pythonCommandSpec,
   pythonReceiptCommandSpec, pythonBOMLessonEvidenceSupported, pythonReceiptLessonBirthProofFor,
   pythonReceiptLessonEvidenceSupported, isKnownNativeCheckerId }
   from './checker.mjs'
 import { replayAdaptivePolicy } from './adaptive-replay.mjs'
+import { selectRound } from './adaptive-selection.mjs'
 import { localDayKey } from './time.mjs'
 import { projectActivity } from './activity.mjs'
 
@@ -141,7 +142,8 @@ function adaptiveComparisonProjection(doc, baseline, challenger, matched, additi
 function adaptiveSampleProjection(policy, probe, comparison, signal, observedEntry = signal) {
   const features = adaptiveFeaturesFor(policy, probe)
   return { features, baselineHasTarget: comparison.baselineHasTarget,
-    canAdd: comparison.canAdd, expected: signal.kind === 'holdout',
+    canAdd: comparison.canAdd,
+    expected: signal.kind === 'holdout' || signal.kind === 'holdout_miss',
     ...(policy.schema === 'mse-adaptive-recall-v2' ? {
       matched: comparison.matched, baselineOffers: comparison.baselineOffers,
       candidateOffers: comparison.candidateOffers, protectedOffers: comparison.protectedOffers,
@@ -218,9 +220,21 @@ function adaptiveDiscoveryAllowed(existing, generated) {
   if (generated?.schema !== 'mse-adaptive-recall-v2') return false
   const sameFeatures = policy => policy.features.length === generated.features.length
     && policy.features.every((id, index) => id === generated.features[index])
-  return existing.every(policy => policy.schema === 'mse-adaptive-recall-v1'
-    && (policy.mode === 'observing'
-      || policy.mode === 'isolated' && !sameFeatures(policy)))
+  const legacy = existing.filter(policy => policy.schema === 'mse-adaptive-recall-v1')
+  if (!legacy.every(policy => policy.mode === 'observing'
+    || policy.mode === 'isolated' && !sameFeatures(policy))) return false
+  const peers = existing.filter(policy => policy.schema === 'mse-adaptive-recall-v2')
+  if (peers.length === 0) return true
+  if (peers.length !== 1) return false
+  const peer = peers[0]
+  const sameDiscovery = peer.scope === generated.scope
+    && peer.qualification === generated.qualification && peer.entryId === generated.entryId
+    && peer.version === generated.version && peer.objective === generated.objective
+    && peer.firstSession === generated.firstSession && peer.firstQuery === generated.firstQuery
+    && peer.familyGeneration === 0 && peer.parentId === null && peer.mode === 'observing'
+  const shared = peer.features.filter(id => generated.features.includes(id))
+  return sameDiscovery && Math.abs(peer.features.length - generated.features.length) === 1
+    && shared.length === Math.min(peer.features.length, generated.features.length)
 }
 function adaptiveEditionAdmitted(entry, sourceAdmit) {
   const origins = editionSources(entry)
@@ -229,7 +243,7 @@ function adaptiveEditionAdmitted(entry, sourceAdmit) {
 function adaptivePolicySourcesAdmitted(doc, policy, sourceAdmit) {
   const target = adaptivePolicyTarget(doc, policy)
   if (!target || !adaptiveEditionAdmitted(target, sourceAdmit)) return false
-  const evidence = policy.samples.filter(sample => ['discovery_hit', 'holdout_hit',
+  const evidence = policy.samples.filter(sample => ['discovery_hit', 'holdout_hit', 'holdout_miss',
     'negative_control', 'negative'].includes(sample.result))
   return evidence.length > 0 && evidence.every(sample => {
     if (sourceAdmit.byDigest) return sourceAdmit.byDigest(sample.session)
@@ -237,6 +251,71 @@ function adaptivePolicySourcesAdmitted(doc, policy, sourceAdmit) {
     return typeof fact?.sessionId === 'string' && fact.sessionId !== ''
       && sessionKeyOf(fact.sessionId) === sample.session && sourceAdmit(fact.sessionId) === true
   })
+}
+function adaptiveCohortKey(policy) {
+  return JSON.stringify([policy.scope, policy.qualification, policy.entryId, policy.version,
+    policy.objective, policy.firstSession, policy.firstQuery, policy.familyGeneration,
+    policy.parentId])
+}
+function selectAdaptiveRounds(doc, { turnKey, scope, sourceAdmit, materialAdmit, decision, now }) {
+  const groups = new Map()
+  for (const policy of doc.recallStrategy.adaptive.policies) {
+    const target = adaptivePolicyTarget(doc, policy)
+    if (policy.schema !== 'mse-adaptive-recall-v2' || policy.scope !== scope
+      || policy.qualification !== RECALL_QUALIFICATION.id
+      || !['observing', 'approved'].includes(policy.mode) || target === null
+      || target.status === 'needs_revision'
+      || !adaptivePolicySourcesAdmitted(doc, policy, sourceAdmit)) continue
+    const key = adaptiveCohortKey(policy)
+    const rows = groups.get(key) ?? []
+    rows.push(policy)
+    groups.set(key, rows)
+  }
+  for (const policies of groups.values()) {
+    const touched = policies.some(policy => policy.samples.some(sample => sample.turnKey === turnKey
+      && ['holdout_hit', 'holdout_miss', 'negative_control', 'negative', 'recurrence',
+        'checker_failure'].includes(sample.result)))
+    if (!touched) continue
+    const eligiblePolicies = policies.filter(policy => {
+      const target = adaptivePolicyTarget(doc, policy)
+      return target !== null && materialAdmit(strategyMethodMaterial(target)) === true
+    })
+    if (eligiblePolicies.length === 0) continue
+    const candidates = eligiblePolicies.map(policy => ({ id: policy.id, policy,
+      replay: replayAdaptivePolicy(policy) }))
+    const incumbent = eligiblePolicies.find(policy => policy.mode === 'approved')
+    const round = selectRound(candidates, { incumbentId: incumbent?.id ?? null })
+    if (round.reason === 'incomparable_evidence') {
+      for (const policy of eligiblePolicies) if (policy.id !== incumbent?.id) {
+        decision(policy.id, policy.entryId, policy.version, 'rejected', 'incomparable_evidence')
+      }
+      continue
+    }
+    const winner = eligiblePolicies.find(policy => policy.id === round.winnerId)
+    if (winner === undefined) continue
+    const winnerCandidate = candidates.find(candidate => candidate.id === winner.id)
+    if (winner.mode !== 'approved' && (winner.positives < 3 || winner.negativeControls < 2
+      || winnerCandidate?.replay.approved !== true)) continue
+    for (const prior of eligiblePolicies) if (prior.mode === 'approved' && prior.id !== winner.id) {
+      prior.mode = 'observing'
+      prior.reason = prior.negativeControls >= 2
+        ? 'awaiting_independent_holdout' : 'awaiting_negative_control'
+      prior.updatedAt = now
+    }
+    if (winner.mode !== 'approved') {
+      winner.mode = 'approved'
+      winner.generation = ++doc.recallStrategy.adaptive.generation
+      winner.reason = 'holdout_approved'
+      winner.updatedAt = now
+      decision(winner.id, winner.entryId, winner.version, 'approved', 'independent_same_objective')
+    }
+    for (const candidate of candidates) {
+      if (candidate.id !== winner.id && round.decisions.find(row => row.policyId === candidate.id)?.admissible) {
+        decision(candidate.id, candidate.policy.entryId, candidate.policy.version,
+          'rejected', 'round_not_selected')
+      }
+    }
+  }
 }
 function findAdaptiveCapsule(doc, probe, problemId, signature, sessionId) {
   if (problemId === null || problemId === undefined) return null
@@ -510,7 +589,8 @@ function settleAdaptiveRecall(doc, { turnKey, sessionId, outcome, receipt, allow
       decision(policyId, signal.entryId, signal.version, 'unknown', 'policy_stale')
       continue
     }
-    const nativeSignal = checkedControl === null && ['discovery', 'holdout', 'negative', 'negative_control', 'recurrence']
+    const nativeSignal = checkedControl === null && ['discovery', 'holdout', 'holdout_miss', 'negative',
+      'negative_control', 'recurrence']
       .includes(signal.kind)
     const capsule = nativeSignal ? findAdaptiveCapsule(doc, probe, signal.problemId,
       signal.signature, sessionId) : null
@@ -553,27 +633,27 @@ function settleAdaptiveRecall(doc, { turnKey, sessionId, outcome, receipt, allow
         decision(policyId, signal.entryId, signal.version, 'rejected', 'already_tracked')
         continue
       }
-      const generated = synthesizeAdaptiveTaskPolicy({ scope: probe.scope,
+      const generated = synthesizeAdaptiveTaskCandidates({ scope: probe.scope,
         qualification: RECALL_QUALIFICATION.id, entry: target, taskFeatures: probe.taskFeatures,
         turnKey, session: probe.session, queryKey: probe.taskQuery ?? probe.query, now })
-      if (generated === null || generated.id !== policyId
-        || generated.features.length !== signal.features.length
-        || generated.features.some((id, index) => id !== signal.features[index])) {
+      const candidate = generated.find(row => row.id === policyId)
+      if (candidate === undefined || candidate.features.length !== signal.features.length
+        || candidate.features.some((id, index) => id !== signal.features[index])) {
         decision(policyId, signal.entryId, signal.version, 'feature_refused', 'insufficient_safe_features')
         continue
       }
       const existing = adaptive.policies.filter(row => row.scope === probe.scope
         && row.entryId === signal.entryId && row.version === signal.version)
-      if (!adaptiveDiscoveryAllowed(existing, generated)) {
+      if (!adaptiveDiscoveryAllowed(existing, candidate)) {
         decision(policyId, signal.entryId, signal.version, 'rejected', 'already_tracked')
         continue
       }
-      generated.samples[0].reason = 'unique_native_method_match'
       if (adaptive.policies.length >= ADAPTIVE_RECALL_POLICY_LIMIT) {
         decision(policyId, signal.entryId, signal.version, 'rejected', 'candidate_not_additive')
         continue
       }
-      adaptive.policies.push(generated)
+      candidate.samples[0].reason = 'unique_native_method_match'
+      adaptive.policies.push(candidate)
       decision(policyId, signal.entryId, signal.version, 'created', 'unique_native_method_match')
       continue
     }
@@ -608,7 +688,13 @@ function settleAdaptiveRecall(doc, { turnKey, sessionId, outcome, receipt, allow
       const recurrence = methodFeedback.some(row => row.entryId === policy.entryId
         && row.version === policy.version && row.kind === 'recurrence' && row.voided !== true)
       const active = probe.activePolicies.includes(policy.id)
-      if (!recurrence || !active || policy.mode !== 'approved' || !exact) {
+      const candidateTriggered = probe.shadowPolicies.includes(policy.id)
+        && adaptivePolicyMatches(policy, adaptiveFeaturesFor(policy, probe))
+        && probe.comparisons.some(row => row.policyId === policy.id && row.canAdd
+          && !row.baselineHasTarget)
+        && (receipt?.offered ?? []).some(row => row.id === policy.entryId
+          && row.version === policy.version && row.mode === 'method')
+      if (!recurrence || !(active && policy.mode === 'approved' || candidateTriggered) || !exact) {
         decision(policyId, signal.entryId, signal.version, 'unknown', 'policy_stale')
         continue
       }
@@ -692,15 +778,33 @@ function settleAdaptiveRecall(doc, { turnKey, sessionId, outcome, receipt, allow
       policy.reason = policy.negativeControls >= 2
         ? 'awaiting_independent_holdout' : 'awaiting_negative_control'
       decision(policy.id, policy.entryId, policy.version, 'holdout_hit', 'independent_same_objective')
-      const replay = replayAdaptivePolicy(policy)
-      if (policy.schema === 'mse-adaptive-recall-v2' && policy.positives >= 3
-        && policy.negativeControls >= 2 && replay.approved === true
-        && adaptivePolicySourcesAdmitted(doc, policy, sourceAdmit)) {
-        policy.mode = 'approved'
-        policy.generation = ++adaptive.generation
-        policy.reason = 'holdout_approved'
-        decision(policy.id, policy.entryId, policy.version, 'approved', 'independent_same_objective')
+      continue
+    }
+
+    if (signal.kind === 'holdout_miss') {
+      const control = probe.controlPolicies.includes(policy.id)
+      const comparison = probe.comparisons.find(row => row.policyId === policy.id)
+      const taskQuery = adaptiveQueryFor(policy, probe)
+      const independent = policy.samples.every(row => row.session !== probe.session
+        && row.query !== taskQuery)
+      const features = adaptiveFeaturesFor(policy, probe)
+      if (policy.schema !== 'mse-adaptive-recall-v2' || !control || !exact || !independent
+        || comparison?.canAdd !== true || comparison.baselineHasTarget
+        || adaptivePolicyMatches(policy, features) || policy.mode === 'isolated'
+        || comparison.matched !== false
+        || !comparison.baselineOffers.every(row => comparison.candidateOffers.some(item =>
+          recallOfferKey(item) === recallOfferKey(row)))
+        || comparison.baselineBytes !== comparison.candidateBytes) {
+        decision(policyId, policy.entryId, policy.version, 'rejected', 'same_session_or_query')
+        continue
       }
+      policy.updatedAt = now
+      policy.samples = [...policy.samples, { turnKey, session: probe.session,
+        query: adaptiveQueryFor(policy, probe), result: 'holdout_miss',
+        reason: 'condition_missed_same_objective', at: now,
+        replay: adaptiveSampleProjection(policy, probe, comparison, signal, matches[0]) }].slice(-8)
+      decision(policy.id, policy.entryId, policy.version, 'holdout_miss',
+        'condition_missed_same_objective')
       continue
     }
 
@@ -733,7 +837,7 @@ function settleAdaptiveRecall(doc, { turnKey, sessionId, outcome, receipt, allow
       }
       if (!control || !competing || !independent || !noLoss || comparison?.canAdd !== true
         || repeatsControl || comparison.baselineHasTarget || adaptivePolicyMatches(policy, features)
-        || policy.mode !== 'observing') {
+        || !['observing', 'approved'].includes(policy.mode)) {
         decision(policyId, policy.entryId, policy.version, 'rejected', 'same_session_or_query')
         continue
       }
@@ -747,18 +851,10 @@ function settleAdaptiveRecall(doc, { turnKey, sessionId, outcome, receipt, allow
         ? 'awaiting_negative_control' : 'awaiting_independent_holdout'
       decision(policy.id, policy.entryId, policy.version, 'negative_control',
         'independent_unmatched_objective')
-      const replay = replayAdaptivePolicy(policy)
-      if (policy.schema === 'mse-adaptive-recall-v2' && policy.positives >= 3
-        && policy.negativeControls >= 2 && replay.approved === true
-        && adaptivePolicySourcesAdmitted(doc, policy, sourceAdmit)) {
-        policy.mode = 'approved'
-        policy.generation = ++adaptive.generation
-        policy.reason = 'holdout_approved'
-        decision(policy.id, policy.entryId, policy.version, 'approved',
-          'independent_unmatched_objective')
-      }
     }
   }
+  selectAdaptiveRounds(doc, { turnKey, scope: probe.scope, sourceAdmit,
+    materialAdmit: text => materialAdmit(text), decision, now })
   adaptive.probes = adaptive.probes.filter(row => row.turnKey !== turnKey)
 }
 // Natural-correction extraction contract (unchanged): the model SUGGESTS, the engine verifies.
@@ -2281,7 +2377,9 @@ export class RebuildEngine {
                 || this.#materialOk(strategyMethodMaterial(candidate), null) !== true
                 || !adaptivePolicySourcesAdmitted(doc, policy, adaptiveSourceAdmit)) continue
               if (candidate.id === unique.id && candidate.version === unique.version) {
-                if (probe.activePolicies.includes(policyId)) {
+                const sameMethodOffered = probe.offered.some(row => row.id === policy.entryId
+                  && row.version === policy.version && row.mode === 'method')
+                if (probe.activePolicies.includes(policyId) || sameMethodOffered) {
                   stageAdaptiveSignal(probe, { policyId, kind: 'recurrence', entryId: policy.entryId,
                     version: policy.version, objective: policy.objective, problemId: out.id,
                     signature: capsule.signature, features: policy.features,
@@ -2303,17 +2401,21 @@ export class RebuildEngine {
             }
             for (const policyId of probe.controlPolicies) {
               const policy = adaptive.policies.find(row => row.id === policyId
-                && row.mode === 'observing' && row.scope === strategyScope
+                && ['observing', 'approved'].includes(row.mode) && row.scope === strategyScope
                 && row.qualification === RECALL_QUALIFICATION.id)
               if (policy === undefined || adaptivePolicyMatches(policy, adaptiveFeaturesFor(policy, probe))
-                || unique.id === policy.entryId && unique.version === policy.version) continue
+                || policy.mode === 'isolated') continue
               const candidate = adaptivePolicyTarget(doc, policy)
               if (candidate === null || this.#materialOk(strategyMethodMaterial(candidate), null) !== true
                 || !adaptivePolicySourcesAdmitted(doc, policy, adaptiveSourceAdmit)) continue
-              stageAdaptiveSignal(probe, { policyId, kind: 'negative_control', entryId: policy.entryId,
+              const sameObjective = unique.id === policy.entryId && unique.version === policy.version
+              const comparison = probe.comparisons.find(row => row.policyId === policyId)
+              if (sameObjective && (comparison?.canAdd !== true || comparison.baselineHasTarget)) continue
+              stageAdaptiveSignal(probe, { policyId, kind: sameObjective ? 'holdout_miss' : 'negative_control', entryId: policy.entryId,
                 version: policy.version, objective: policy.objective, problemId: out.id,
                 signature: capsule.signature, features: policy.features,
-                reason: 'independent_unmatched_objective', at: observedAt })
+                reason: sameObjective ? 'condition_missed_same_objective'
+                  : 'independent_unmatched_objective', at: observedAt })
             }
 
             const alreadyOffered = probe.offered.some(offer => offer.id === unique.id
@@ -2321,23 +2423,37 @@ export class RebuildEngine {
             const fixedTracked = doc.recallStrategy.rows.some(row => row.turnKey === turnKey
               && row.scope === strategyScope && row.id === unique.id && row.version === unique.version
               && ['shadow', 'matched', 'active', 'approved', 'isolated'].includes(row.mode))
-            const generated = synthesizeAdaptiveTaskPolicy({ scope: strategyScope,
+            const generated = synthesizeAdaptiveTaskCandidates({ scope: strategyScope,
               qualification: RECALL_QUALIFICATION.id, entry: unique,
               taskFeatures: probe.taskFeatures, turnKey, session: probe.session,
               queryKey: probe.taskQuery ?? probe.query, now: observedAt })
             const existing = adaptive.policies.filter(row => row.scope === strategyScope
               && row.entryId === unique.id && row.version === unique.version)
-            if (!baselineExplains && !alreadyOffered && !fixedTracked
-              && adaptiveDiscoveryAllowed(existing, generated)) {
-              if (generated === null) {
+            if (!baselineExplains && !alreadyOffered && !fixedTracked) {
+              if (generated.length === 0) {
                 adaptiveDecision(adaptive, { turnKey, scope: strategyScope, policyId: null,
                   entryId: unique.id, version: unique.version, result: 'feature_refused',
                   reason: 'insufficient_safe_features', at: observedAt })
               } else {
-                const staged = stageAdaptiveSignal(probe, { policyId: generated.id, kind: 'discovery',
-                  entryId: unique.id, version: unique.version, objective: generated.objective,
-                  problemId: out.id, signature: capsule.signature, features: generated.features,
-                  reason: 'unique_native_method_match', at: observedAt })
+                let staged = false
+                for (const candidate of generated) {
+                  if (!adaptiveDiscoveryAllowed(existing, candidate)) {
+                    adaptiveDecision(adaptive, { turnKey, scope: strategyScope, policyId: candidate.id,
+                      entryId: unique.id, version: unique.version, result: 'rejected',
+                      reason: 'already_tracked', at: observedAt })
+                    continue
+                  }
+                  if (adaptive.policies.length >= ADAPTIVE_RECALL_POLICY_LIMIT) {
+                    adaptiveDecision(adaptive, { turnKey, scope: strategyScope, policyId: candidate.id,
+                      entryId: unique.id, version: unique.version, result: 'rejected',
+                      reason: 'candidate_not_additive', at: observedAt })
+                    continue
+                  }
+                  staged = stageAdaptiveSignal(probe, { policyId: candidate.id, kind: 'discovery',
+                    entryId: unique.id, version: unique.version, objective: candidate.objective,
+                    problemId: out.id, signature: capsule.signature, features: candidate.features,
+                    reason: 'unique_native_method_match', at: observedAt }) || staged
+                }
                 if (staged) {
                   const legacyIds = new Set(existing.filter(policy =>
                     policy.schema === 'mse-adaptive-recall-v1' && policy.mode === 'observing')
@@ -2860,7 +2976,7 @@ export class RebuildEngine {
             const policyFeatures = policy.schema === 'mse-adaptive-recall-v2'
               ? taskFeatures : queryFeatures
             const matches = adaptivePolicyMatches(policy, policyFeatures)
-            const incumbent = selected
+            const incumbent = policy.schema === 'mse-adaptive-recall-v2' ? adaptiveBaseline : selected
             const baselineHasTarget = incumbent.offered.some(row => row.id === policy.entryId
               && row.version === policy.version && row.mode === 'method')
             const comparison = policy.schema === 'mse-adaptive-recall-v2'
@@ -2876,7 +2992,8 @@ export class RebuildEngine {
                 : { policyId: policy.id, baselineHasTarget, canAdd: comparison.ok })
             }
             if (!matches) {
-              if (policy.mode === 'observing' && comparison.ok && controlPolicies.length < 8) {
+              if (['observing', 'approved'].includes(policy.mode)
+                && comparison.ok && controlPolicies.length < 8) {
                 controlPolicies.push(policy.id)
               }
               continue
@@ -2884,7 +3001,12 @@ export class RebuildEngine {
             if (!comparison.ok) continue
             if (policy.mode === 'approved') {
               if (activePolicies.length === 0) {
-                selected = comparison.selection
+                const actual = incumbent === selected ? comparison
+                  : competeAdaptiveCandidate(selected, entry, doc.entries, { maxBytes: this.maxContextBytes,
+                    now, guardAdmit: text => this.#materialOk(text, null), prompt,
+                    protectedOffers: legacyProtected })
+                if (!actual.ok) continue
+                selected = actual.selection
                 activePolicies.push(policy.id)
                 if (policy.schema === 'mse-adaptive-recall-v1') {
                   legacyProtected.push({ id: policy.entryId, version: policy.version, mode: 'method' })

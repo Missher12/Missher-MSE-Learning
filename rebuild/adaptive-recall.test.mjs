@@ -183,3 +183,33 @@ test('task features pair an operation with its object and borrow only related po
   assert.ok(!explicit.includes('plugin') && !explicit.includes('version'),
     'unrelated older task context is ignored when the current request is explicit')
 })
+
+test('RRSI discovery offers one full condition and only one one-topic method-overlap alternative', () => {
+  const entry = method({ applicability: 'API 路径解析失败时',
+    instruction: '先检查 API 路径权限，再重试' })
+  const args = { scope: hex('d'), qualification: hex('e'), entry,
+    taskFeatures: ['api', 'path', 'acceptance', 'opcheck'],
+    turnKey: hex('2'), session: hex('f'), queryKey: hex('1'), now: 10 }
+  const candidates = adaptive.synthesizeAdaptiveTaskCandidates(args)
+  assert.equal(candidates.length, 2)
+  assert.deepEqual(candidates.map(row => row.features), [
+    ['api', 'path', 'acceptance', 'opcheck'],
+    ['api', 'path', 'opcheck'],
+  ])
+  assert.ok(candidates.every(row => row.entryId === entry.id && row.version === entry.version
+    && row.scope === args.scope && row.qualification === args.qualification
+    && row.firstSession === candidates[0].firstSession && row.firstQuery === candidates[0].firstQuery
+    && row.samples[0].turnKey === args.turnKey))
+  assert.notEqual(candidates[0].id, candidates[1].id)
+  assert.notEqual(candidates[0].familyId, candidates[1].familyId,
+    'each alternative keeps its own bounded counterexample lineage')
+
+  const oneTopic = adaptive.synthesizeAdaptiveTaskCandidates({ ...args,
+    taskFeatures: ['api', 'opdebug'] })
+  assert.equal(oneTopic.length, 1, 'a single concrete topic keeps the existing one-candidate path')
+  const multipleChanges = adaptive.synthesizeAdaptiveTaskCandidates({ ...args,
+    taskFeatures: ['api', 'path', 'acceptance', 'opcheck'],
+    entry: method({ applicability: 'API 请求失败时', instruction: '先检查 API 状态后重试' }) })
+  assert.equal(multipleChanges.length, 1,
+    'an alternative is refused when it would drop more than one necessary topic')
+})

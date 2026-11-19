@@ -1,5 +1,6 @@
 /** Offline replay over bounded feature and offer projections; no store, model call, or clock. */
 import { adaptivePolicyMatches } from './adaptive-recall.mjs'
+import { judge } from './adaptive-selection.mjs'
 
 const key = row => `${row.id}\u0000${row.version}\u0000${row.mode}`
 const sameOffers = (left, right) => left.length === right.length
@@ -56,10 +57,12 @@ function replayV2(policy) {
   const removed = new Set()
   const checkedObjectives = new Set()
   const controlObjectives = new Set()
+  const evidenceKeys = []
   let evaluated = 0, independentGains = 0, independentControls = 0, regressions = 0,
     repeats = 0, incomplete = 0, maxCandidateBytes = 0
   for (const sample of policy.samples ?? []) {
-    if (!['holdout_hit', 'negative_control', 'negative'].includes(sample.result)) continue
+    if (!['holdout_hit', 'holdout_miss', 'negative_control', 'negative'].includes(sample.result)) continue
+    if (typeof sample.turnKey === 'string') evidenceKeys.push(sample.turnKey)
     const row = sample.replay
     const checkedControl = row?.nativeCheckEvent !== undefined
     const complete = row && Array.isArray(row.features)
@@ -82,7 +85,10 @@ function replayV2(policy) {
       && typeof sample.session === 'string' && typeof sample.query === 'string'
       && row.observedEntry !== null && typeof row.observedEntry === 'object'
       && typeof row.observedEntry.id === 'string' && Number.isSafeInteger(row.observedEntry.version)
-      && row.expected === (sample.result === 'holdout_hit')
+      && row.expected === ['holdout_hit', 'holdout_miss'].includes(sample.result)
+      && (sample.result !== 'holdout_miss' || (!row.matched && row.canAdd
+        && !row.baselineHasTarget && sameOffers(row.baselineOffers, row.candidateOffers)
+        && row.observedEntry.id === policy.entryId && row.observedEntry.version === policy.version))
       && (!checkedControl || (sample.result === 'negative_control'
         && typeof row.nativeCheckEvent === 'string' && /^[a-f0-9]{64}$/u.test(row.nativeCheckEvent)
         && row.observedEntry.id !== policy.entryId && row.canAdd && !row.matched
@@ -103,7 +109,8 @@ function replayV2(policy) {
     if (baselineObjective && !candidateObjective || row.candidateBytes > 768
       || !row.matched && (!sameOffers(row.baselineOffers, row.candidateOffers)
         || row.baselineBytes !== row.candidateBytes)
-      || row.expected && (!row.matched || !row.canAdd || baselineTarget || !candidateTarget
+      || sample.result === 'holdout_miss' && (row.matched || baselineTarget || candidateTarget)
+      || sample.result === 'holdout_hit' && (!row.expected || !row.matched || !row.canAdd || baselineTarget || !candidateTarget
         || !candidateObjective || row.observedEntry.id !== policy.entryId
         || row.observedEntry.version !== policy.version)
       || !row.expected && row.matched && candidateTarget) regressions++
@@ -123,16 +130,15 @@ function replayV2(policy) {
     } else {
       if (baselineTarget) incumbent.falseOffers++
       if (candidateTarget) candidate.falseOffers++
-      if (!row.matched && !baselineTarget && row.canAdd && !candidateTarget
+      if (sample.result === 'negative_control' && !row.matched && !baselineTarget && row.canAdd && !candidateTarget
         && (!baselineObjective || candidateObjective)) independentControls++
     }
   }
-  const reason = regressions ? 'offer_or_objective_regression' : incomplete ? 'incomplete_replay'
-    : independentGains < 2 ? 'need_two_independent_gains'
-      : independentControls < 2 ? 'need_two_independent_controls' : 'strict_gain'
-  return { approved: reason === 'strict_gain', reason, evaluated, independentGains,
-    independentControls, regressions, repeats, incomplete, incumbent, candidate,
-    removedMethods: [...removed].sort(), maxCandidateBytes }
+  const report = { evaluated, independentGains, independentControls, regressions, repeats, incomplete,
+    incumbent, candidate, removedMethods: [...removed].sort(), maxCandidateBytes,
+    evidenceKeys: [...new Set(evidenceKeys)].sort() }
+  const decision = judge({ id: policy.id ?? 'adaptive-candidate', policy, replay: report })
+  return { ...report, approved: decision.admissible, reason: decision.reason }
 }
 
 export function replayAdaptivePolicy(policy) {

@@ -219,7 +219,8 @@ function boundedTaskCondition(taskFeatures) {
 
 /** Freeze a task-aware v2 condition; child revisions only add an exclusion after a counterexample. */
 export function synthesizeAdaptiveTaskPolicy({ scope, qualification, entry, taskFeatures,
-  turnKey, session, queryKey, now, parent = null, excludeFeature = null }) {
+  turnKey, session, queryKey, now, parent = null, excludeFeature = null,
+  candidateFamilyId = null }) {
   const base = parent === null ? boundedTaskCondition(taskFeatures) : [...parent.features]
   if (base === null || typeof entry?.lesson?.problemId !== 'string') return null
   const excludedFeatures = parent === null ? [] : [...parent.excludedFeatures]
@@ -232,7 +233,8 @@ export function synthesizeAdaptiveTaskPolicy({ scope, qualification, entry, task
   const objective = entry.lesson.problemId
   const familyGeneration = parent === null ? 0 : parent.familyGeneration + 1
   if (familyGeneration > 2) return null
-  const familyId = parent?.familyId ?? hash(JSON.stringify({ scope, qualification,
+  // Keep the original full-condition identity byte-for-byte stable for pending v1.3.16 signals.
+  const familyId = parent?.familyId ?? candidateFamilyId ?? hash(JSON.stringify({ scope, qualification,
     entryId: entry.id, version: entry.version, objective, firstQuery: queryKey }))
   const identity = { schema: 'mse-adaptive-recall-v2', scope, qualification,
     entryId: entry.id, version: entry.version, objective, features: base,
@@ -243,6 +245,29 @@ export function synthesizeAdaptiveTaskPolicy({ scope, qualification, entry, task
   return { id, ...identity, mode: 'observing', generation: 0, positives: 1,
     negativeControls: 0, rejections: 0, firstSession: session, firstQuery: queryKey,
     reason: 'awaiting_independent_holdout', createdAt: now, updatedAt: now, samples: [sample] }
+}
+
+/** Full task condition plus one method-overlap alternative with one topic removed. */
+export function synthesizeAdaptiveTaskCandidates(args) {
+  const full = synthesizeAdaptiveTaskPolicy(args)
+  if (full === null) return []
+  const topics = full.features.filter(id => !taskOperationIds.has(id)
+    && !GENERIC_TASK_OBJECTS.has(id))
+  const operation = full.features.find(id => taskOperationIds.has(id))
+  const methodTopics = new Set(adaptiveEntryFeatures(args.entry))
+  const common = topics.filter(id => methodTopics.has(id))
+  if (topics.length < 2 || common.length === 0 || topics.length - common.length !== 1) return [full]
+  const alternativeFeatures = [...common, operation]
+  const candidateFamilyId = hash(JSON.stringify({ scope: args.scope,
+    qualification: args.qualification, entryId: args.entry.id, version: args.entry.version,
+    objective: args.entry.lesson.problemId, firstQuery: args.queryKey, features: alternativeFeatures }))
+  const alternative = synthesizeAdaptiveTaskPolicy({ ...args, taskFeatures: alternativeFeatures,
+    candidateFamilyId })
+  if (alternative === null || alternative.id === full.id
+    || alternative.features.length !== full.features.length - 1
+    || full.features.filter(id => !alternative.features.includes(id)).length !== 1
+    || full.features.some(id => taskOperationIds.has(id) && !alternative.features.includes(id))) return [full]
+  return [full, alternative]
 }
 
 /** At most two immutable children, each excluding a distinct concrete object from a real failure. */

@@ -196,6 +196,126 @@ test('adaptive discovery needs two independent gains and two feasible full-offer
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+test('RRSI compares same-turn hits and misses and activates one winner independent of settlement order', () => {
+  function run(reversePending) {
+    const { root, engine, targetY, targetZ, targetW, fail, prepare, settle } = buildEngine()
+    try {
+      const turn = (session, id, prompt, failure) => {
+        prepare(session, id, prompt)
+        fail(session, id, `${session}-failure`, failure)
+        if (reversePending) engine.store.transaction(doc => {
+          const probe = doc.recallStrategy.adaptive.probes.find(row => row.turnKey
+            === createHash('sha256').update(JSON.stringify([session, id])).digest('hex'))
+          probe.pending.reverse()
+          return true
+        })
+        settle(session, id)
+      }
+      turn('rrsi-discovery', 'd', '请审核 API 记录并核对失败原因。', failureY)
+      let policies = engine.store.read().recallStrategy.adaptive.policies
+      assert.equal(policies.length, 2)
+      assert.deepEqual(policies.map(row => row.features).sort((a, b) => a.length - b.length), [
+        ['api', 'opcheck'], ['api', 'record', 'opcheck'],
+      ])
+      assert.ok(policies.every(row => row.entryId === targetY.id && row.version === targetY.version
+        && row.mode === 'observing' && row.samples.length === 1
+        && row.samples[0].result === 'discovery_hit'))
+
+      turn('rrsi-hit-one', 'h1', '请复核 API 记录并核对失败原因。', failureY)
+      turn('rrsi-hit-two', 'h2', '麻烦检查 API 记录后排查这次失败。', failureY)
+      turn('rrsi-miss', 'm1', '请核对 API 字段版本，并分析失败。', failureY)
+      turn('rrsi-control-one', 'c1', '绘制图表并调整配色。', failureZ)
+      turn('rrsi-control-two', 'c2', '配置项合并发生冲突，请定位问题。', failureW)
+
+      policies = engine.store.read().recallStrategy.adaptive.policies
+      const winner = policies.find(row => row.mode === 'approved')
+      const waiting = policies.find(row => row.mode === 'observing')
+      assert.ok(winner, 'one qualified candidate becomes active')
+      assert.ok(waiting, 'the other candidate remains available for later rounds')
+      const winnerReplay = engine.statusView().recallStrategy.adaptive.recent
+        .find(row => row.id === winner.id).replay
+      const waitingReplay = engine.statusView().recallStrategy.adaptive.recent
+        .find(row => row.id === waiting.id).replay
+      assert.equal(winnerReplay.independentGains, 3)
+      assert.equal(winnerReplay.independentControls, 2)
+      assert.equal(waitingReplay.independentGains, 2)
+      assert.equal(waitingReplay.independentControls, 2)
+      assert.equal(waitingReplay.candidate.misses, 1)
+      assert.deepEqual(winnerReplay.evidenceKeys, waitingReplay.evidenceKeys)
+      assert.equal(winner.id, policies.find(row => row.features.length === 2).id,
+        'the narrower overlap wins because it recovers the additional real target turn')
+      const active = prepare('rrsi-live', 'live', '请检查 API 路径记录，核对失败原因。')
+      assert.ok(active.offered.some(row => row.id === targetY.id && row.mode === 'method'))
+      assert.ok(active.bytes <= 768 && active.offered.filter(row => row.mode === 'method').length <= 2
+        && active.offered.filter(row => row.mode === 'guard').length <= 1)
+      return { winnerFeatures: winner.features, hits: winnerReplay.candidate.hits,
+        misses: winnerReplay.candidate.misses, controls: winnerReplay.independentControls }
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }
+  assert.deepEqual(run(false), run(true))
+})
+
+test('a broader candidate is isolated by a real false trigger while the nonmatching condition stays observing', () => {
+  const { root, engine, targetY, targetZ, fail, prepare, settle } = buildEngine()
+  try {
+    prepare('wide-discovery', 'd', '请审核 API 记录并核对失败原因。')
+    fail('wide-discovery', 'd', 'wide-discovery-failure', failureY)
+    settle('wide-discovery', 'd')
+    const initial = engine.store.read().recallStrategy.adaptive.policies
+    assert.equal(initial.length, 2)
+    const broader = initial.find(row => row.features.length === 2)
+    const narrower = initial.find(row => row.features.length === 3)
+
+    const turn = prepare('wide-counterexample', 'c', '请核对 API 字段版本，并分析失败。')
+    assert.ok(!turn.offered.some(row => row.id === targetY.id), 'candidate remains shadow-only')
+    fail('wide-counterexample', 'c', 'wide-chart-failure', failureZ)
+    const pending = engine.store.read().recallStrategy.adaptive.probes
+      .find(row => row.turnKey === turn.turnKey).pending
+    assert.ok(pending.some(row => row.policyId === broader.id && row.kind === 'negative'))
+    assert.ok(pending.some(row => row.policyId === narrower.id && row.kind === 'negative_control'))
+    settle('wide-counterexample', 'c')
+
+    const rows = engine.store.read().recallStrategy.adaptive.policies
+    assert.equal(rows.find(row => row.id === broader.id).mode, 'isolated')
+    assert.equal(rows.find(row => row.id === broader.id).reason, 'competing_method_failure')
+    assert.equal(rows.find(row => row.id === broader.id).samples.at(-1).replay.observedEntry.id, targetZ.id)
+    assert.equal(rows.find(row => row.id === narrower.id).mode, 'observing',
+      'the condition that did not match the real counterexample remains available')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('adaptive candidates remain isolated to their frozen project scope', () => {
+  const { root, engine, targetY, fail, prepare, settle, registered } = buildEngine({
+    projectKey: 'rrsi-scope-a' })
+  try {
+    prepare('scope-seed', 'd', '请审核 API 记录并核对失败原因。')
+    fail('scope-seed', 'd', 'scope-seed-failure', failureY)
+    settle('scope-seed', 'd')
+    const ids = engine.store.read().recallStrategy.adaptive.policies.map(row => row.id)
+    assert.equal(ids.length, 2)
+    engine.store.transaction(doc => {
+      for (const row of doc.recallStrategy.adaptive.policies) if (ids.includes(row.id)) {
+        row.mode = 'approved'
+        row.generation = ++doc.recallStrategy.adaptive.generation
+        row.reason = 'holdout_approved'
+      }
+      return true
+    })
+    registered.add('scope-b-session')
+    const other = engine.prepare({ sessionId: 'scope-b-session', turnId: 'other',
+      projectKey: 'rrsi-scope-b', prompt: '请审核 API 记录并核对失败原因。',
+      strategyEligible: true }, true)
+    assert.ok(!other.offered.some(row => row.id === targetY.id && row.mode === 'method'))
+    const otherProbe = engine.store.read().recallStrategy.adaptive.probes
+      .find(row => row.turnKey === other.turnKey)
+    assert.deepEqual(otherProbe.activePolicies, [])
+    assert.deepEqual(otherProbe.shadowPolicies, [])
+
+    const same = prepare('scope-a-session', 'same', '请审核 API 记录并核对失败原因。')
+    assert.ok(same.offered.some(row => row.id === targetY.id && row.mode === 'method'))
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
 test('a triggered adaptive method that uniquely fails on a different objective isolates only its strategy', () => {
   const { root, engine, targetX, targetY, fail, prepare, settle } = buildEngine()
   try {

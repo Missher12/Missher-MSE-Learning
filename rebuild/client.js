@@ -113,7 +113,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     rsiPersisted: '最近持久化决定', rsiRuntime: '最近运行记录', rsiNone: '暂无记录',
     rsiStageAdmission: '来源检查', rsiStageProbe: '探针', rsiStageToolResult: '工具结果',
     rsiStagePending: '待结算', rsiStageSettled: '回合结算',
-    rsiResultCreated: '已建立策略', rsiResultHoldout: '独立命中', rsiResultControl: '负向对照',
+    rsiResultCreated: '已建立策略', rsiResultHoldout: '独立命中', rsiResultMiss: '同题漏配',
+    rsiResultControl: '负向对照',
     rsiResultApproved: '已批准', rsiResultRejected: '已拒绝', rsiResultIsolated: '已隔离',
     rsiResultUnknown: '未知', rsiResultFeatureRefused: '特征不足',
     rsiReasonProbeCreated: '已记录真实探针', rsiReasonFailureAdmitted: '失败证据已接纳',
@@ -212,7 +213,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     rsiPersisted: 'Recent saved decisions', rsiRuntime: 'Recent runtime events', rsiNone: 'No records',
     rsiStageAdmission: 'Source check', rsiStageProbe: 'Probe', rsiStageToolResult: 'Tool result',
     rsiStagePending: 'Pending', rsiStageSettled: 'Settled', rsiResultCreated: 'Policy created',
-    rsiResultHoldout: 'Independent hit', rsiResultControl: 'Negative control', rsiResultApproved: 'Approved',
+    rsiResultHoldout: 'Independent hit', rsiResultMiss: 'Same objective missed',
+    rsiResultControl: 'Negative control', rsiResultApproved: 'Approved',
     rsiResultRejected: 'Rejected', rsiResultIsolated: 'Isolated', rsiResultUnknown: 'Unknown',
     rsiResultFeatureRefused: 'Insufficient features', rsiReasonProbeCreated: 'Real probe recorded',
     rsiReasonFailureAdmitted: 'Failure evidence accepted', rsiReasonFailureDuplicate: 'Duplicate failure evidence',
@@ -513,6 +515,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
   const RSI_STAGE_ZH = { admission: zh.rsiStageAdmission, probe: zh.rsiStageProbe,
     tool_result: zh.rsiStageToolResult, pending: zh.rsiStagePending, settled: zh.rsiStageSettled }
   const RSI_RESULT_ZH = { created: zh.rsiResultCreated, holdout_hit: zh.rsiResultHoldout,
+    holdout_miss: zh.rsiResultMiss,
     negative_control: zh.rsiResultControl, approved: zh.rsiResultApproved,
     rejected: zh.rsiResultRejected, isolated: zh.rsiResultIsolated,
     unknown: zh.rsiResultUnknown, feature_refused: zh.rsiResultFeatureRefused }
@@ -536,6 +539,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     baseline_explains_failure: zh.rsiReasonBaselineExplains, stale_probe: zh.rsiReasonStaleProbe,
     probe_capacity: zh.rsiReasonProbeCapacity,
     independent_unmatched_objective: zh.rsiReasonUnmatchedObjective,
+    condition_missed_same_objective: '条件未命中同一目标',
+    incomparable_evidence: '候选历史不一致', round_not_selected: '本轮选择了其他候选',
     awaiting_negative_control: zh.rsiReasonAwaitingControl, strategy_disabled: zh.rsiReasonStrategyDisabled,
     revision_limit: zh.rsiReasonRevisionLimit, same_mechanism_rejected: zh.rsiReasonSameMechanism,
     counterexample_child: zh.rsiReasonCounterexampleChild }
@@ -546,6 +551,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     pending_signal: 'Awaiting settlement', no_pending_signal: 'No pending signal', storage_unavailable: 'Memory unavailable',
     no_adaptive_decision: 'No adaptive decision', unknown_outcome: 'Outcome unknown',
     unique_native_method_match: 'Unique native failure match', independent_same_objective: 'Independent same-objective hit',
+    condition_missed_same_objective: 'Same objective missed by this condition',
+    incomparable_evidence: 'Candidate histories differ', round_not_selected: 'Another candidate won this round',
     same_session_or_query: 'Repeated session or query', competing_method_failure: 'Another method explains the failure',
     same_signature_recurrence: 'Same failure recurred', native_checker_failure: 'Native check failed',
     cancelled_or_unknown: 'Cancelled or unknown result', source_revoked: 'Source permission revoked',
@@ -842,6 +849,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const stageLabels = locale === 'en' ? { admission: en.rsiStageAdmission, probe: en.rsiStageProbe,
       tool_result: en.rsiStageToolResult, pending: en.rsiStagePending, settled: en.rsiStageSettled } : RSI_STAGE_ZH
     const resultLabels = locale === 'en' ? { created: en.rsiResultCreated, holdout_hit: en.rsiResultHoldout,
+      holdout_miss: en.rsiResultMiss,
       negative_control: en.rsiResultControl, approved: en.rsiResultApproved, rejected: en.rsiResultRejected,
       isolated: en.rsiResultIsolated, unknown: en.rsiResultUnknown,
       feature_refused: en.rsiResultFeatureRefused } : RSI_RESULT_ZH

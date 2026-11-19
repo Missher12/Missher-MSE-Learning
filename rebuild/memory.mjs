@@ -65,13 +65,14 @@ const ADAPTIVE_POLICY_MODES = ['observing', 'approved', 'isolated']
 const ADAPTIVE_POLICY_REASONS = ['awaiting_independent_holdout', 'holdout_approved',
   'awaiting_negative_control', 'competing_method_failure', 'native_recurrence',
   'native_checker_failure', 'counterexample_child']
-const ADAPTIVE_SAMPLE_RESULTS = ['discovery_hit', 'holdout_hit', 'negative', 'recurrence',
+const ADAPTIVE_SAMPLE_RESULTS = ['discovery_hit', 'holdout_hit', 'holdout_miss', 'negative', 'recurrence',
   'checker_failure', 'negative_control', 'unknown']
 const ADAPTIVE_SAMPLE_REASONS = ['unique_native_method_match', 'independent_same_objective',
+  'condition_missed_same_objective',
   'same_session_or_query', 'competing_method_failure', 'same_signature_recurrence',
   'native_checker_failure', 'cancelled_or_unknown', 'source_revoked', 'material_revoked',
   'policy_stale', 'independent_unmatched_objective', 'strategy_disabled', 'counterexample_child']
-const ADAPTIVE_DECISION_RESULTS = ['created', 'holdout_hit', 'negative_control', 'approved',
+const ADAPTIVE_DECISION_RESULTS = ['created', 'holdout_hit', 'holdout_miss', 'negative_control', 'approved',
   'rejected', 'isolated', 'unknown', 'feature_refused']
 const ADAPTIVE_DECISION_REASONS = ['unique_native_method_match', 'independent_same_objective',
   'same_session_or_query', 'competing_method_failure', 'same_signature_recurrence',
@@ -79,7 +80,8 @@ const ADAPTIVE_DECISION_REASONS = ['unique_native_method_match', 'independent_sa
   'policy_stale', 'insufficient_safe_features', 'already_tracked', 'candidate_not_additive',
   'ambiguous_native_failure', 'baseline_explains_failure', 'stale_probe', 'probe_capacity',
   'independent_unmatched_objective', 'awaiting_negative_control', 'strategy_disabled',
-  'revision_limit', 'same_mechanism_rejected', 'counterexample_child']
+  'revision_limit', 'same_mechanism_rejected', 'counterexample_child',
+  'condition_missed_same_objective', 'incomparable_evidence', 'round_not_selected']
 const safeAdaptiveFeature = value => typeof value === 'string' && /^[a-z][a-z0-9]{0,15}$/u.test(value)
 const ADAPTIVE_TASK_OPERATIONS = new Set(ADAPTIVE_TASK_OPERATION_IDS)
 const ADAPTIVE_GENERIC_TASK_FEATURES = new Set(['null', 'empty', 'error', 'log', 'value', 'result', 'problem'])
@@ -600,7 +602,7 @@ const adaptivePolicyValid = row => isPlainObject(row)
   && Array.isArray(row.samples) && row.samples.length >= 1 && row.samples.length <= 8
   && row.samples.every(sample => adaptiveSampleValid(sample)
     && (row.schema !== 'mse-adaptive-recall-v2'
-      || !['holdout_hit', 'negative_control', 'negative'].includes(sample.result)
+      || !['holdout_hit', 'holdout_miss', 'negative_control', 'negative'].includes(sample.result)
       || sample.replay !== undefined && adaptiveReplayProjectionValid(sample.replay)))
   && new Set(row.samples.map(sample => sample.turnKey)).size === row.samples.length
   && Buffer.byteLength(JSON.stringify(row), 'utf8') <= ADAPTIVE_POLICY_ROW_BYTES
@@ -623,7 +625,7 @@ const adaptiveSignalValid = row => isPlainObject(row)
   && Object.keys(row).every(key => ['policyId', 'kind', 'entryId', 'version', 'objective',
     'problemId', 'signature', 'features', 'reason', 'at'].includes(key))
   && hex64(row.policyId)
-  && ['discovery', 'holdout', 'negative', 'negative_control', 'recurrence', 'checker_failure'].includes(row.kind)
+  && ['discovery', 'holdout', 'holdout_miss', 'negative', 'negative_control', 'recurrence', 'checker_failure'].includes(row.kind)
   && entryHex(row.entryId) && Number.isSafeInteger(row.version) && row.version >= 1
   && hex64(row.objective)
   && (row.problemId === null || hex64(row.problemId))
