@@ -9,6 +9,7 @@ import { RebuildEngine } from './engine.mjs'
 import { selectRecall } from './recall.mjs'
 import { archiveVersion } from './evolution.mjs'
 import { RECALL_QUALIFICATION } from './recall-qualification.mjs'
+import { RECALL_TOKEN_UNIT } from './recall-budget.mjs'
 
 const PROBES = join(tmpdir(), 'mse-recall-strategy-tests')
 mkdirSync(PROBES, { recursive: true })
@@ -120,11 +121,46 @@ test('an admitted candidate-only method is shadowed; an exact same-turn native f
     assert.equal(approved.generation, 1)
     assert.ok(approved.rows.some(row => row.id === targetId && row.mode === 'approved'
       && row.reason === 'same_turn_native_failure_match'))
+    engine.setRecallBudget({ unit: 'bytes', limit: 512 })
     const nextTurn = prepare(engine, 'admitted', '2')
     assert.ok(nextTurn.offered.some(row => row.id === targetId && row.mode === 'method'),
       'candidate injection begins only after the next prepare')
+    assert.ok(engine.store.read().recallStrategy.rows.some(row => row.turnKey === nextTurn.turnKey
+      && row.id === targetId && row.mode === 'active'),
+    'an approved method used under an explicit byte cap gets an active audit row')
     assert.ok(engine.store.read().receipts.find(row => row.turnKey === nextTurn.turnKey)
       .offered.some(row => row.id === targetId), 'only the approved next turn includes the method receipt')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('the current Token budget cannot approve a fixed strategy after one failure', () => {
+  const { engine, root, targetId, failure } = seedEngine()
+  try {
+    engine.setRecallBudget({ unit: RECALL_TOKEN_UNIT, limit: 512 })
+    prepare(engine, 'token-single-failure', '1')
+    fail(engine, 'token-single-failure', '1', 'token-single-failure-event', failure)
+    settle(engine, 'token-single-failure', '1')
+    const rows = engine.store.read().recallStrategy.rows
+    assert.equal(rows.some(row => row.id === targetId && row.mode === 'approved'), false)
+    const later = prepare(engine, 'token-no-single-promotion', '2')
+    assert.ok(!later.offered.some(row => row.id === targetId),
+      'one current-budget failure cannot make the fixed candidate visible')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('an explicit byte budget cannot create a fixed-strategy approval after one failure', () => {
+  const { engine, root, targetId, failure } = seedEngine()
+  try {
+    engine.setRecallBudget({ unit: 'bytes', limit: 512 })
+    prepare(engine, 'byte-single-failure', '1')
+    fail(engine, 'byte-single-failure', '1', 'byte-single-failure-event', failure)
+    settle(engine, 'byte-single-failure', '1')
+    const rows = engine.store.read().recallStrategy.rows
+    assert.equal(rows.some(row => row.id === targetId && ['shadow', 'approved'].includes(row.mode)), false,
+      'an explicit byte cap follows the same fixed-candidate approval gate as Token')
+    const later = prepare(engine, 'byte-no-single-promotion', '2')
+    assert.ok(!later.offered.some(row => row.id === targetId),
+      'one explicit-byte failure cannot make the fixed candidate visible')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

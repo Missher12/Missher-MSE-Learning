@@ -7130,7 +7130,8 @@ test('OW7 terminal marker code spans are accepted locally and a separate trailin
 
 test('RSI real pre-step: two scoped approvals, exact rollback, and a late old-version failure', async () => {
   const dir = root()
-  const w = extWiring(dir, [])
+  const w = extWiring(dir, [], { modelProvider: 'demo', modelId: 'm1', wakeIntervalMs: 60_000,
+    maxContextBytes: 768, maxContextTokens: null })
   try {
     const session = w.mk('rsi-real-entry', dir)
     const seedProblem = (label, toolName, errorText) => {
@@ -7176,6 +7177,9 @@ test('RSI real pre-step: two scoped approvals, exact rollback, and a late old-ve
 
     const preStep = async (turn, text) => {
       await w.emit('session/event', session, { type: 'turn/start', data: { turn } })
+      // Fixed approval training is a historical profileless behavior. A normal wake rereads the
+      // current settings; restore that old runtime state at each real pre-step in this fixture.
+      w.plugin.engine.recallBudget = null
       const [decision] = await w.emit('agent/pre-step', {
         agent: { session }, step: 1, turn,
         messages: [{ id: `rsi-user-${turn}`, role: 'user', source: { kind: 'user' },

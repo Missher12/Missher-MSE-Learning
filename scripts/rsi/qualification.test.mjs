@@ -15,7 +15,8 @@ test('a release with the same selector must still establish a gain on its curren
       cpSync(source,join(copy,path),{recursive:true,filter:item=>{
         if(path!=='rebuild') return true
         const rel=relative(source,item)
-        return rel!=='.probes'&&!rel.startsWith(`.probes${sep}`)
+        const probeDirectories=['.probes', '.probes-mid-turn']
+        return !probeDirectories.some(name=>rel===name||rel.startsWith(`${name}${sep}`))
       }})
     }
     assert.equal(verifyRecallQualification(copy).ok,true)

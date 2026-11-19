@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import {
   chmodSync, existsSync, fstatSync, fsyncSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
-  rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync,
+  realpathSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync,
 } from 'node:fs'
 import { once } from 'node:events'
 import { spawn } from 'node:child_process'
@@ -270,24 +270,227 @@ test('a stale lock is removed only for a confirmed dead PID and a stable lock id
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('an uncertain leftover stale-lock reaper claim fails closed without touching either lock', () => {
+test('a stale legacy reaper marker is recovered only alongside a confirmed dead lock owner', () => {
   const root = temporaryRoot()
   const store = new MemoryStore({ stateRoot: root })
   store.transaction(doc => { doc.sentinel = 'preserve'; return true })
   const lock = join(root, '.memory-v1.lock')
   const reaper = `${lock}.reap`
   const stale = JSON.stringify({ pid: 2147483647, token: 'dead-owner' })
-  const claim = 'uncertain-reaper-owner'
+  const claim = 'legacy-ownerless-reaper-marker'
   writeFileSync(lock, stale, { mode: 0o600 })
   writeFileSync(reaper, claim, { mode: 0o600 })
   const old = new Date(Date.now() - 10 * 60_000)
   utimesSync(lock, old, old)
+  utimesSync(reaper, old, old)
   try {
-    assert.throws(() => store.transaction(doc => { doc.mustNotCommit = true; return true }),
-      error => error.code === 'lock_busy')
-    assert.equal(readFileSync(lock, 'utf8'), stale)
-    assert.equal(readFileSync(reaper, 'utf8'), claim)
+    assert.doesNotThrow(() => store.transaction(doc => { doc.recovered = true; return true }))
+    assert.equal(existsSync(reaper), false)
     assert.equal(store.read().sentinel, 'preserve')
-    assert.equal(store.read().mustNotCommit, undefined)
+    assert.equal(store.read().recovered, true)
   } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('concurrent stale reapers cannot delete each other’s claim or committed lock', async () => {
+  const root = temporaryRoot()
+  const store = new MemoryStore({ stateRoot: root })
+  store.transaction(doc => { doc.sentinel = 'preserve'; return true })
+  const lock = join(root, '.memory-v1.lock')
+  const legacyReaper = `${lock}.reap`
+  const deadOwner = 2147483647
+  writeFileSync(lock, JSON.stringify({ pid: deadOwner, token: 'dead-main-lock' }), { mode: 0o600 })
+  writeFileSync(legacyReaper, 'stale-legacy-claim', { mode: 0o600 })
+  const old = new Date(Date.now() - 10 * 60_000)
+  utimesSync(lock, old, old)
+  utimesSync(legacyReaper, old, old)
+  const canonicalLock = realpathSync(lock)
+  const canonicalLegacyReaper = realpathSync(legacyReaper)
+
+  const moduleUrl = pathToFileURL(join(process.cwd(), 'rebuild/memory.mjs')).href
+  const launch = (label, pausePath, unlinkRelease, commitRelease, property) => {
+    const script = `import fs from 'node:fs'; import {syncBuiltinESMExports} from 'node:module'; const original=fs.unlinkSync.bind(fs); const wait=path=>{ while(!fs.existsSync(path)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,20) }; fs.unlinkSync=(path,...args)=>{ if(String(path)===${JSON.stringify(pausePath)}) { fs.writeSync(1,${JSON.stringify(`${label}_UNLINK_PAUSED\\n`)}); wait(${JSON.stringify(unlinkRelease)}); } return original(path,...args) }; syncBuiltinESMExports(); const {MemoryStore}=await import(${JSON.stringify(moduleUrl)}); const store=new MemoryStore({stateRoot:${JSON.stringify(root)}}); try { store.transaction(doc=>{doc[${JSON.stringify(property)}]=true;fs.writeSync(1,${JSON.stringify(`${label}_LOCK_HELD\\n`)});wait(${JSON.stringify(commitRelease)});return true}); fs.writeSync(1,'COMMITTED\\n') } catch(error) { fs.writeSync(1,'ERROR:'+error.code+'\\n'); process.exitCode=1 }`
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script],
+      { stdio: ['ignore', 'pipe', 'pipe'] })
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.output = ''
+    child.errors = ''
+    child.stdout.on('data', chunk => { child.output += chunk })
+    child.stderr.on('data', chunk => { child.errors += chunk })
+    return child
+  }
+  const waitFor = async (child, predicate, label) => {
+    const until = Date.now() + 5000
+    while (!predicate(child.output) && child.exitCode === null && Date.now() < until) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.ok(predicate(child.output) || child.exitCode !== null,
+      `${label} timed out; stdout=${child.output} stderr=${child.errors}`)
+  }
+  const waitExit = child => child.exitCode !== null
+    ? Promise.resolve([child.exitCode, child.signalCode]) : once(child, 'exit')
+  const signal = path => writeFileSync(path, 'continue')
+  const firstUnlinkRelease = join(root, 'release-first-unlink')
+  const firstCommitRelease = join(root, 'release-first-commit')
+  const secondUnlinkRelease = join(root, 'release-second-unlink')
+  const secondCommitRelease = join(root, 'release-second-commit')
+  const first = launch('FIRST', canonicalLegacyReaper, firstUnlinkRelease,
+    firstCommitRelease, 'firstWriter')
+  let second
+  try {
+    await waitFor(first, output => output.includes('FIRST_UNLINK_PAUSED'), 'first reaper')
+    second = launch('SECOND', canonicalLock, secondUnlinkRelease,
+      secondCommitRelease, 'secondWriter')
+    await waitFor(second, output => output.includes('SECOND_UNLINK_PAUSED')
+      || output.includes('ERROR:') || output.includes('COMMITTED'), 'second reaper')
+
+    if (second.output.includes('SECOND_UNLINK_PAUSED')) {
+      // Reproduce the reported interleaving: both contenders read the old claim and lock,
+      // then the first installs its lease while the second is paused before unlinking.
+      signal(firstUnlinkRelease)
+      await waitFor(first, output => output.includes('FIRST_LOCK_HELD'), 'first transaction')
+      signal(secondUnlinkRelease)
+      await waitFor(second, output => output.includes('SECOND_LOCK_HELD')
+        || output.includes('ERROR:'), 'second transaction')
+      assert.ok(second.output.includes('SECOND_LOCK_HELD'),
+        `second should reach its transaction after the stale lock deletion; ${second.output} ${second.errors}`)
+      signal(secondCommitRelease)
+      const [secondCode] = await waitExit(second)
+      assert.equal(secondCode, 0, `${second.output} ${second.errors}`)
+      signal(firstCommitRelease)
+      const [firstCode] = await waitExit(first)
+      assert.equal(firstCode, 0, first.errors)
+    } else {
+      assert.match(second.output, /ERROR:lock_busy/, second.errors)
+      const [secondCode] = await waitExit(second)
+      assert.notEqual(secondCode, 0)
+      signal(firstUnlinkRelease)
+      await waitFor(first, output => output.includes('FIRST_LOCK_HELD')
+        || output.includes('ERROR:'), 'first transaction')
+      assert.ok(first.output.includes('FIRST_LOCK_HELD'),
+        `first should own the stale lock after reaping; ${first.output} ${first.errors}`)
+      signal(firstCommitRelease)
+      const [firstCode] = await waitExit(first)
+      assert.equal(firstCode, 0, first.errors)
+    }
+
+    assert.doesNotMatch(second.output, /SECOND_UNLINK_PAUSED/,
+      `a concurrent process must fail before unlinking a lock protected by another reaper; ${second.output}`)
+    const result = store.read()
+    assert.equal(result.sentinel, 'preserve')
+    assert.equal(result.firstWriter, true)
+    assert.equal(result.secondWriter, undefined)
+  } finally {
+    for (const child of [first, second]) {
+      if (child === undefined) continue
+      if (child.exitCode === null) {
+        for (const path of [firstUnlinkRelease, firstCommitRelease,
+          secondUnlinkRelease, secondCommitRelease]) signal(path)
+        child.kill('SIGKILL')
+      }
+    }
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a direct lock acquisition yields during the stale-reaper replacement gap', async () => {
+  const root = temporaryRoot()
+  const store = new MemoryStore({ stateRoot: root })
+  store.transaction(doc => { doc.sentinel = 'preserve'; return true })
+  const lock = join(root, '.memory-v1.lock')
+  const deadOwner = 2147483647
+  writeFileSync(lock, JSON.stringify({ pid: deadOwner, token: 'dead-main-lock' }), { mode: 0o600 })
+  const old = new Date(Date.now() - 10 * 60_000)
+  utimesSync(lock, old, old)
+  const canonicalLock = realpathSync(lock)
+  const releasePath = join(root, 'release-direct-acquire')
+  const moduleUrl = pathToFileURL(join(process.cwd(), 'rebuild/memory.mjs')).href
+  const script = `import fs from 'node:fs'; import {syncBuiltinESMExports} from 'node:module'; const original=fs.unlinkSync.bind(fs); fs.unlinkSync=(path,...args)=>{ if(String(path)===${JSON.stringify(canonicalLock)}) { const result=original(path,...args); fs.writeSync(1,'STALE_LOCK_REMOVED\\n'); while(!fs.existsSync(${JSON.stringify(releasePath)})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,20); return result } return original(path,...args) }; syncBuiltinESMExports(); const {MemoryStore}=await import(${JSON.stringify(moduleUrl)}); const store=new MemoryStore({stateRoot:${JSON.stringify(root)}}); store.transaction(doc=>{doc.reaperWriter=true;return true})`
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script],
+    { stdio: ['ignore', 'pipe', 'pipe'] })
+  child.stdout.setEncoding('utf8')
+  child.stderr.setEncoding('utf8')
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', chunk => { stdout += chunk })
+  child.stderr.on('data', chunk => { stderr += chunk })
+  const waitForMarker = async () => {
+    const until = Date.now() + 5000
+    while (!stdout.includes('STALE_LOCK_REMOVED') && child.exitCode === null && Date.now() < until) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.ok(stdout.includes('STALE_LOCK_REMOVED'), `reaper pause timed out: ${stdout} ${stderr}`)
+  }
+  try {
+    await waitForMarker()
+    assert.throws(() => store.transaction(doc => { doc.directWriter = true; return true }),
+      error => error.code === 'lock_busy')
+    assert.equal(store.read().directWriter, undefined)
+    writeFileSync(releasePath, 'continue')
+    const [code] = child.exitCode !== null ? [child.exitCode]
+      : await Promise.race([once(child, 'exit'), new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('stale reaper replacement timeout')), 5000))])
+    assert.equal(code, 0, stderr)
+    assert.equal(store.read().sentinel, 'preserve')
+    assert.equal(store.read().reaperWriter, true)
+  } finally {
+    writeFileSync(releasePath, 'continue')
+    if (child.exitCode === null) child.kill('SIGKILL')
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('a crashed cross-process reaper claim is recoverable, while a live owner is never stolen', async () => {
+  const root = temporaryRoot()
+  const store = new MemoryStore({ stateRoot: root })
+  store.transaction(doc => { doc.sentinel = 'preserve'; return true })
+  const lock = join(root, '.memory-v1.lock')
+  const reaperPrefix = '.memory-v1.lock.reap-'
+  const deadOwner = 2147483647
+  writeFileSync(lock, JSON.stringify({ pid: deadOwner, token: 'dead-main-lock' }), { mode: 0o600 })
+  const old = new Date(Date.now() - 10 * 60_000)
+  utimesSync(lock, old, old)
+  const moduleUrl = pathToFileURL(join(process.cwd(), 'rebuild/memory.mjs')).href
+  const script = `import { writeSync } from 'node:fs'; import { MemoryStore } from ${JSON.stringify(moduleUrl)}; const nativeKill=process.kill.bind(process); process.kill=(pid,signal)=>{ if(pid===${deadOwner}&&signal===0){ writeSync(1,'REAPER_HELD\\n'); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,120000); return true } return nativeKill(pid,signal) }; const store=new MemoryStore({stateRoot:${JSON.stringify(root)}}); store.transaction(doc=>{doc.childWriter=true;return true})`
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script],
+    { stdio: ['ignore', 'pipe', 'pipe'] })
+  child.stdout.setEncoding('utf8')
+  child.stderr.setEncoding('utf8')
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', chunk => { stdout += chunk })
+  child.stderr.on('data', chunk => { stderr += chunk })
+  const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('reaper claim timeout')), 4000))
+  try {
+    await Promise.race([new Promise((resolve, reject) => {
+      const poll = () => stdout.includes('REAPER_HELD') ? resolve() : setTimeout(poll, 10)
+      poll()
+      child.once('error', reject)
+      child.once('exit', code => reject(new Error(`reaper exited before holding claim: ${code}`)))
+    }), timeout])
+    const reaper = readdirSync(root).find(name => name.startsWith(`${reaperPrefix}${child.pid}-`))
+    assert.ok(reaper, 'the live reaper owns a unique visible ticket')
+    const owner = JSON.parse(readFileSync(join(root, reaper), 'utf8'))
+    assert.equal(owner.pid, child.pid, 'the new claim records its owning process')
+    assert.throws(() => store.transaction(doc => { doc.parentWriter = true; return true }),
+      error => error.code === 'lock_busy')
+    assert.equal(readFileSync(lock, 'utf8'), JSON.stringify({ pid: deadOwner, token: 'dead-main-lock' }))
+    assert.equal(store.read().sentinel, 'preserve')
+
+    child.kill('SIGKILL')
+    const [code, signal] = await Promise.race([once(child, 'exit'), timeout])
+    assert.notEqual(code, 0)
+    assert.ok(signal !== null || code !== 0)
+    assert.doesNotThrow(() => store.transaction(doc => { doc.recoveredWriter = true; return true }), stderr)
+    const result = store.read()
+    assert.equal(result.sentinel, 'preserve')
+    assert.equal(result.childWriter, undefined, 'the killed writer never committed partial data')
+    assert.equal(result.parentWriter, undefined, 'the live reaper lock blocked the concurrent writer')
+    assert.equal(result.recoveredWriter, true)
+    assert.equal(readdirSync(root).some(name => name.startsWith(reaperPrefix)), false,
+      'the next safe reaper removes the dead process ticket')
+  } finally {
+    if (child.exitCode === null) child.kill('SIGKILL')
+    rmSync(root, { recursive: true, force: true })
+  }
 })

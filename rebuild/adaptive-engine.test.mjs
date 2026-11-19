@@ -200,26 +200,31 @@ test('adaptive discovery needs two independent gains and two feasible full-offer
 
 test('token-profile RSI keeps its evidence separate from a legacy byte observer', () => {
   const fixture = buildEngine()
-  const { root, engine, prepare, fail, settle, targetX } = fixture
+  const { root, engine, prepare, fail, settle, targetX, targetY, targetZ } = fixture
   try {
     const seed = (session, turnId, prompt, callId) => {
       prepare(session, turnId, prompt)
       fail(session, turnId, callId, failureX)
       settle(session, turnId)
     }
-    seed('legacy-byte-observer', 'old', 'API 调用遇到阻塞，请定位原因', 'legacy-byte-failure')
+    const sharedSession = 'budget-switch-session'
+    seed(sharedSession, 'old-byte-turn', 'API 调用遇到阻塞，请定位原因', 'legacy-byte-failure')
     const legacy = engine.store.read().recallStrategy.adaptive.policies.find(row => row.entryId === targetX.id)
     assert.equal(legacy.mode, 'observing')
     assert.equal(legacy.budget, undefined, 'the old policy keeps its original byte evidence shape')
 
     engine.setRecallBudget({ unit: RECALL_TOKEN_UNIT, limit: 512 })
-    seed('token-discovery', 'new', 'API 调用遇到阻塞，请定位原因', 'token-discovery-failure')
+    seed(sharedSession, 'new-token-turn', 'API 调用遇到阻塞，请定位原因', 'token-discovery-failure')
     let policies = engine.store.read().recallStrategy.adaptive.policies
     assert.equal(policies.length, 2, 'a profileless byte observer does not block a distinct token policy')
     const tokenPolicy = policies.find(row => row.budget?.unit === RECALL_TOKEN_UNIT)
     assert.ok(tokenPolicy)
     assert.equal(tokenPolicy.mode, 'observing')
     assert.notEqual(tokenPolicy.id, legacy.id)
+    const seedReadiness = engine.statusView().recallStrategy.adaptive.recent
+      .find(row => row.id === tokenPolicy.id).readiness
+    assert.equal(seedReadiness.independentGains, 0, 'the new Token cohort starts without byte-profile gains')
+    assert.equal(seedReadiness.independentControls, 0, 'the new Token cohort starts without byte-profile controls')
 
     const holdout = prepare('token-holdout', 'positive', 'API 请求仍然阻塞，麻烦定位原因')
     const probe = engine.store.read().recallStrategy.adaptive.probes
@@ -236,6 +241,39 @@ test('token-profile RSI keeps its evidence separate from a legacy byte observer'
     assert.equal(updated.samples.at(-1).replay.budget.limit, 512)
     assert.equal(engine.statusView().recallStrategy.adaptive.recent
       .find(row => row.id === tokenPolicy.id).replay.independentGains, 1)
+
+    const holdout2 = prepare('token-holdout-2', 'positive', 'API 调用返回错误，帮我排查原因')
+    assert.ok(!holdout2.offered.some(row => row.id === targetX.id), 'the second Token gain remains a shadow holdout')
+    assert.ok(!holdout2.offered.some(row => row.id === targetX.id), 'the second Token gain remains a shadow holdout')
+    fail('token-holdout-2', 'positive', 'token-positive-failure-2', failureX)
+    settle('token-holdout-2', 'positive')
+    const control = prepare('token-control-1', 'control', '绘制图表并调整配色')
+    assert.ok(engine.store.read().recallStrategy.adaptive.probes
+      .find(row => row.turnKey === control.turnKey).controlPolicies.includes(tokenPolicy.id))
+    fail('token-control-1', 'control', 'token-control-failure-1', failureZ)
+    settle('token-control-1', 'control')
+    const control2 = prepare('token-control-2', 'control', '输出路径解析失败，请定位问题')
+    assert.ok(engine.store.read().recallStrategy.adaptive.probes
+      .find(row => row.turnKey === control2.turnKey).controlPolicies.includes(tokenPolicy.id))
+    fail('token-control-2', 'control', 'token-control-failure-2', failureY)
+    settle('token-control-2', 'control')
+    let currentTokenPolicy = engine.store.read().recallStrategy.adaptive.policies
+      .find(row => row.id === tokenPolicy.id)
+    assert.equal(currentTokenPolicy.mode, 'approved',
+      'a fresh Token cohort still needs its own two gains and two independent controls')
+    const tokenReplaySamples = currentTokenPolicy.samples.filter(sample => sample.replay !== undefined)
+    assert.ok(tokenReplaySamples.length > 0
+      && tokenReplaySamples.every(sample => sample.replay.budget?.unit === RECALL_TOKEN_UNIT),
+    'all comparable promotion evidence belongs to the Token budget group')
+
+    const regression = prepare('token-regression', 'active', 'API 请求返回错误，请定位原因')
+    assert.ok(regression.offered.some(row => row.id === targetX.id && row.mode === 'method'))
+    fail('token-regression', 'active', 'token-regression-failure', failureX)
+    settle('token-regression', 'active')
+    currentTokenPolicy = engine.store.read().recallStrategy.adaptive.policies
+      .find(row => row.id === tokenPolicy.id)
+    assert.equal(currentTokenPolicy.mode, 'isolated', 'a Token-profile regression disables that exact cohort')
+    assert.equal(currentTokenPolicy.reason, 'native_recurrence')
     assert.doesNotThrow(() => validateDoc(engine.store.read()))
   } finally { rmSync(root, { recursive: true, force: true }) }
 })

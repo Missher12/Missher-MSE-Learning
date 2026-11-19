@@ -215,6 +215,9 @@ export function apply(ctx, config = {}) {
   const rsiTraceRows = []
   const rsiProbeTurns = new Map()
   const traceHash = value => createHash('sha256').update(value).digest('hex')
+  const midTurnMessageHash = message => traceHash(JSON.stringify({
+    role: message?.role ?? null, source: message?.source ?? null, content: message?.content ?? null,
+  }))
   const traceTurnKey = (sessionId, turnId) => traceHash(JSON.stringify([String(sessionId), String(turnId)]))
   const traceShortId = value => typeof value !== 'string' ? null
     : /^mem_[a-f0-9]{24}$/u.test(value) ? value.slice(4, 12)
@@ -1034,19 +1037,24 @@ export function apply(ctx, config = {}) {
     if (reportMiss) engine.noteCollectionSkip(selected.reason ?? 'mid_turn_recall_budget_rejected')
     return null
   }
-  const deliverSupplement = (decision, state, selected) => {
+  const deliverSupplement = (decision, state, selected, session, step) => {
     if (!recallFits(selected, remainingRecall(state))) return
-    const recorded = engine.recordMidTurnInjection({ sessionId: state.sessionId,
-      turnId: state.turnId, offered: selected.offered })
-    if (recorded.ok !== true) return
+    if (!Number.isSafeInteger(session?.seq) || state.pendingInjections.length >= 8) return
+    const message = createUserMessage({
+      content: [{ type: 'text', text: `${RECALL_INJECTION_PREFIX}${selected.context}` }],
+      source: mseMessageSource('instructions') })
+    state.pendingInjections.push({ queuedAfterSeq: session.seq, step,
+      messageHash: midTurnMessageHash(message),
+      offered: selected.offered.map(({ id, version, mode }) => ({ id, version, mode })),
+      bytes: selected.bytes,
+      ...(Number.isSafeInteger(selected.contextTokens) ? { contextTokens: selected.contextTokens } : {}),
+      budget: state.budget === null ? null : { ...state.budget } })
     if (state.budget?.unit === RECALL_TOKEN_UNIT) state.usedTokens += selected.contextTokens
     else state.usedBytes += selected.bytes
     state.methodCount += selected.offered.filter(row => row.mode === 'method').length
     state.guardCount += selected.offered.filter(row => row.mode === 'guard').length
     state.offered.push(...selected.offered)
-    decision.messages = [...decision.messages, createUserMessage({
-      content: [{ type: 'text', text: `${RECALL_INJECTION_PREFIX}${selected.context}` }],
-      source: mseMessageSource('instructions') })]
+    decision.messages = [...decision.messages, message]
   }
   const rememberStage = (state, key) => {
     if (state.checkedStages.has(key) || state.checkedStages.size >= STAGE_RECALL_LIMIT) return false
@@ -1059,6 +1067,44 @@ export function apply(ctx, config = {}) {
     if (turn === undefined) return null
     const state = midTurnStates.get(midTurnKey(sessionId, turn))
     return state !== undefined && nativeTurnIsActive(session, Number(turn), state.startSeq) ? state : null
+  }
+  const confirmMidTurnInjections = (session, event, sessionId) => {
+    if (sessionId === undefined || !Number.isSafeInteger(event?.seq)
+      || typeof session?.eventAt !== 'function') return
+    const persisted = session.eventAt(event.seq)
+    if (persisted?.seq !== event.seq || persisted.type !== event.type) return
+    const turn = foregroundTurns.get(sessionId)
+    if (turn === undefined) return
+    const state = midTurnStates.get(midTurnKey(sessionId, turn))
+    if (state === undefined || !nativeTurnIsActive(session, Number(turn), state.startSeq)) return
+    if (persisted.type === 'user/message') {
+      const message = persisted.data
+      const source = message?.source
+      if (message?.role !== 'user' || source?.kind !== 'plugin:mse-learning'
+        || source?.form !== 'instructions' || Object.keys(source).length !== 2) return
+      const messageHash = midTurnMessageHash(message)
+      const queued = state.pendingInjections.find(row => row.messageSeq === undefined
+        && row.queuedAfterSeq < persisted.seq && row.messageHash === messageHash)
+      if (queued !== undefined) queued.messageSeq = persisted.seq
+      return
+    }
+    if (!['assistant/message', 'assistant/attempt'].includes(persisted.type)) return
+    const { turn: eventTurn, step } = persisted.data ?? {}
+    if (eventTurn !== Number(state.turnId) || !Number.isSafeInteger(step)) return
+    for (const queued of [...state.pendingInjections]) {
+      if (queued.step !== step || !Number.isSafeInteger(queued.messageSeq)
+        || queued.messageSeq >= persisted.seq) continue
+      const result = safeStoreAction('mid_turn_recall_state_unavailable', () => engine.recordMidTurnInjection({
+        sessionId: state.sessionId, turnId: state.turnId, offered: queued.offered,
+        step, messageSeq: queued.messageSeq, promptSeq: persisted.seq,
+        promptHash: queued.messageHash, bytes: queued.bytes, contextTokens: queued.contextTokens,
+        budget: queued.budget,
+      }))
+      if (result !== null) {
+        const index = state.pendingInjections.indexOf(queued)
+        if (index >= 0) state.pendingInjections.splice(index, 1)
+      }
+    }
   }
   const captureActivePlan = (session, todos) => {
     const state = activeStageState(session)
@@ -1126,15 +1172,18 @@ export function apply(ctx, config = {}) {
       }
       // A dispatched write was paused for this exact selection. Deliver it first,
       // then offer the same turn's result-driven and current-plan reminders.
-      for (const { selection } of state.deferredStages.splice(0)) deliverSupplement(decision, state, selection)
+      for (const { selection } of state.deferredStages.splice(0)) {
+        deliverSupplement(decision, state, selection, session, payload.step)
+      }
       const triggers = state.pendingCategories.splice(0)
       if (triggers.length > 0) {
         const prompt = midTurnRecallPrompt(state.taskLabels, triggers)
-        deliverSupplement(decision, state, selectSupplement(session, state, prompt, { reportMiss: true }))
+        deliverSupplement(decision, state, selectSupplement(session, state, prompt, { reportMiss: true }),
+          session, payload.step)
       }
       for (const [key, prompt] of state.plannedStages) {
         if (rememberStage(state, key)) {
-          deliverSupplement(decision, state, selectSupplement(session, state, prompt))
+          deliverSupplement(decision, state, selectSupplement(session, state, prompt), session, payload.step)
         }
       }
       state.plannedStages.clear()
@@ -1348,6 +1397,7 @@ export function apply(ctx, config = {}) {
         failureScheduled: false, failurePendingCallId: null,
         operationCounts: new Map(), operationEvents: new Set(), operationTriggered: new Set(),
         pendingCategories: [], checkedStages: new Set(), plannedStages: new Map(), deferredStages: [],
+        pendingInjections: [],
       })
     }
     if (prepared.context !== '') {
@@ -1531,10 +1581,11 @@ export function apply(ctx, config = {}) {
       || observation?.kind !== 'present' || !relTarget.toLowerCase().endsWith('.json')
       || relTarget.includes('..') || jsonWrites.size >= 32) return
     relTarget = relTarget.replace(/^[.][\\/]/, '')
+    const writeCall = callEventLocationOf(exec.rootCallId ?? exec.callId, session)
     const turn = turnOfCall(session, exec.rootCallId ?? exec.callId)
-    if (turn === null) return
+    if (turn === null || writeCall === null) return
     jsonWrites.set(exec.token, { sessionId, turnId: String(turn), file: relTarget, cwd,
-      callId: exec.rootCallId ?? exec.callId })
+      callId: exec.rootCallId ?? exec.callId, callSeq: writeCall.seq })
   }))
 
   // ── trusted tool facts (rc.4 result shape; precedence cancelled→timeout→error→exit) ─────────
@@ -1678,7 +1729,8 @@ export function apply(ctx, config = {}) {
       if (roots === null || !attribution(sessionId, roots) || !isAbsolutePath(cwd)
         || !pathInside(cwd, roots.map(root => root.path))) return pythonUnknown('workspace_unavailable')
       const offers = safeStoreAction('checker_state_unavailable', () =>
-        engine.developmentRelevantOffers({ sessionId, turnId: call.turnId, command: call.command }), 'read') ?? []
+        engine.developmentRelevantOffers({ sessionId, turnId: call.turnId, command: call.command,
+          callSeq: call.callSeq }), 'read') ?? []
       if (offers.length !== 1) return pythonUnknown('no_unique_offer')
       const key = `${sessionId}\u0000${call.turnId}`
       if (!pairedDevelopmentCapacity(pendingDevelopmentChecks, key, call.callId)) {
@@ -1741,6 +1793,7 @@ export function apply(ctx, config = {}) {
         || !pathInside(cwd, roots.map(root => root.path))) return pythonUnknown('workspace_unavailable')
       const offers = safeStoreAction('checker_state_unavailable', () => engine.developmentRelevantOffers({
         sessionId, turnId: call.turnId, checkId: PYTHON_RECEIPT_CHECK, command: call.command,
+        callSeq: call.callSeq,
       }), 'read') ?? []
       if (offers.length !== 1) return pythonUnknown('no_unique_offer')
       const key = `${sessionId}\u0000${call.turnId}`
@@ -1825,7 +1878,7 @@ export function apply(ctx, config = {}) {
         const roots = workspaceRoots()
         const offers = roots === null ? [] : safeStoreAction('checker_state_unavailable', () =>
           engine.developmentRelevantOffers({ sessionId: earlyId, turnId: proof.turnId,
-            checkId: proof.checkId, command: proof.command }), 'read') ?? []
+            checkId: proof.checkId, command: proof.command, callSeq: proof.callSeq }), 'read') ?? []
         if (roots !== null && attribution(earlyId, roots) && offers.length === 1
           && offers[0].id === proof.entryId && offers[0].version === proof.entryVersion
           && pairedDevelopmentCapacity(pendingDevelopmentChecks, `${earlyId}\u0000${proof.turnId}`,
@@ -1870,7 +1923,7 @@ export function apply(ctx, config = {}) {
             const key = `${earlyId}\u0000${call.turnId}`
             const offers = safeStoreAction('checker_state_unavailable', () =>
               engine.developmentRelevantOffers({ sessionId: earlyId, turnId: call.turnId,
-                command: call.command }), 'read') ?? []
+                command: call.command, callSeq: call.callSeq }), 'read') ?? []
             if (offers.length === 1 && pairedDevelopmentCapacity(pendingDevelopmentChecks, key,
               call.callId)) {
               if (!pendingDevelopmentChecks.has(key)) pendingDevelopmentChecks.set(key, [])
@@ -1894,7 +1947,8 @@ export function apply(ctx, config = {}) {
       if (result?.isError !== true) {
         const key = `${write.sessionId}\u0000${write.turnId}`
         if (!pendingChecks.has(key)) pendingChecks.set(key, [])
-        pendingChecks.get(key).push({ file: write.file, cwd: write.cwd, callId: write.callId })
+        pendingChecks.get(key).push({ file: write.file, cwd: write.cwd, callId: write.callId,
+          callSeq: write.callSeq })
       }
     }
     const session = exec?.agent?.session
@@ -1957,15 +2011,16 @@ export function apply(ctx, config = {}) {
       return
     }
     turnHasFailure.set(`${sessionId}\u0000${turnId}`, true)
+    const callId = exec.rootCallId ?? exec.callId
+    const located = callEventLocationOf(callId, session)
     const observed = safeStoreAction('tool_state_unavailable', () => engine.observeToolFailure({ sessionId, turnId,
       projectKey: cwdOf(session), callId: exec.callId, toolName: exec.name, failureCode,
       exitCode: result.value?.exitCode ?? null, stdout, stderr,
-      error: errorText === '' ? null : errorText, command: commandText === '' ? null : commandText }))
+      error: errorText === '' ? null : errorText, command: commandText === '' ? null : commandText,
+      callSeq: located?.seq ?? null }))
     if (observed?.ok === true && observed.duplicate !== true) {
       const key = midTurnKey(sessionId, turnId)
       const state = midTurnStates.get(key)
-      const callId = exec.rootCallId ?? exec.callId
-      const located = callEventLocationOf(callId, session)
       const nativeCall = located?.event
       const category = classifyMidTurnFailure(failureCode, outputText)
       if (state !== undefined && !state.failureScheduled && state.failurePendingCallId === null
@@ -2231,6 +2286,7 @@ export function apply(ctx, config = {}) {
 
   disposers.push(ctx.on('session/event', (session, event) => {
     const sessionId = sessionIdOf(session)
+    confirmMidTurnInjections(session, event, sessionId)
     if (!disposed && event?.type === 'todo/write') captureActivePlan(session, event.data?.todos)
     if (sessionId !== undefined && (event?.type === 'turn/end' || event?.type === 'turn/cancel')
       && event.data?.turn !== undefined) clearPythonGuidanceTurn(sessionId, event.data.turn)
@@ -2308,7 +2364,7 @@ export function apply(ctx, config = {}) {
         if (![PYTHON_VERIFIER_CHECK, PYTHON_RECEIPT_CHECK].includes(check.checkId)) return true
         const offers = safeStoreAction('checker_state_unavailable', () =>
           engine.developmentRelevantOffers({ sessionId, turnId: String(turn),
-            checkId: check.checkId, command: check.command }), 'read') ?? []
+            checkId: check.checkId, command: check.command, callSeq: check.callSeq }), 'read') ?? []
         return offers.length === 1 && offers[0].id === check.entryId
           && offers[0].version === check.entryVersion
       })
@@ -2326,7 +2382,7 @@ export function apply(ctx, config = {}) {
       safeStoreAction('checker_state_unavailable', () => engine.recordCheck({
         checkId: check.checkId, passed: check.passed, evidence: check.summary, summary: check.summary,
         sessionId, turnId: String(turn), entryId: check.entryId, entryVersion: check.entryVersion,
-        sourceRequired: true,
+        sourceRequired: true, sourceCallSeq: check.callSeq,
         ...(reason === 'completed' && !failed ? { nativeResult: {
           callSeq: check.callSeq, resultSeq: check.resultSeq, command: check.command,
         } } : {}),
@@ -2336,12 +2392,13 @@ export function apply(ctx, config = {}) {
       const report = runChecker('json-file-parses-v1', { file: check.file, root: check.cwd })
       if (report.status === 'not_applicable') continue
       const offers = safeStoreAction('checker_state_unavailable', () =>
-        engine.jsonRelevantOffers({ sessionId, turnId: String(turn) }), 'read') ?? []
+        engine.jsonRelevantOffers({ sessionId, turnId: String(turn), callSeq: check.callSeq }), 'read') ?? []
       if (offers.length > 0) {
         safeStoreAction('checker_state_unavailable', () => engine.recordCheck({
           checkId: report.checkId, passed: report.status === 'pass',
           evidence: { reason: report.reason, bytes: report.bytes ?? null, file: check.file },
           sessionId, turnId: String(turn), entryId: offers[0].id, entryVersion: offers[0].version,
+          sourceCallSeq: check.callSeq,
           eventId: `fs-check:${check.callId}:${check.file}` }))
       }
       if (report.status === 'fail' || checkSeen === null) {

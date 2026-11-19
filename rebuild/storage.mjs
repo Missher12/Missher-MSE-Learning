@@ -2,9 +2,9 @@
 import { randomUUID } from 'node:crypto'
 import {
   chmodSync, closeSync, constants, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync,
-  openSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync,
+  openSync, readSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { gzipSync, gunzipSync } from 'node:zlib'
 import { LearningError, MAX_STORE_BYTES, check } from '../src/store.mjs'
 
@@ -377,11 +377,14 @@ function staleOwnerIdentity(lockPath) {
   return after
 }
 
-function writeOwnedLock(lockPath, fd) {
+function writeOwnedLock(lockPath, fd, ownReaperPath = null) {
   const identity = fstatSync(fd)
   const token = randomUUID()
   try {
     writeFileSync(fd, JSON.stringify({ pid: process.pid, token, at: Date.now() }))
+    // A normal acquirer can land in the short gap after a stale lock is removed and before
+    // its reaper installs the replacement. It must yield if that reaper ticket is still live.
+    ensureNoOtherLiveReaperClaims(lockPath, ownReaperPath)
     // The lease is ephemeral process metadata; exclusive creation plus the complete synchronous
     // write and identity checks provide mutual exclusion. User data is synced in commitMemoryFile.
     return { fd, identity, token }
@@ -389,43 +392,113 @@ function writeOwnedLock(lockPath, fd) {
     try { closeSync(fd) } catch {}
     const current = lockIdentity(lockPath)
     if (current !== null && sameIdentity(identity, current)) { try { unlinkSync(lockPath) } catch {} }
-    throw learningError(ioCode(error))
+    throw isMemoryStorageError(error) ? error : learningError(ioCode(error))
   }
 }
 
-function acquireReaperClaim(path) {
+function processIsDead(pid) {
+  try { process.kill(pid, 0); return false }
+  catch (error) { return error?.code === 'ESRCH' }
+}
+
+function recoverAbandonedReaperClaim(path, lockPath) {
+  let before
+  let contents
+  try {
+    before = lstatSync(path)
+    if (!before.isFile() || before.isSymbolicLink() || before.size > LOCK_MAX_BYTES) return false
+    contents = readBoundedMemoryFile(path, LOCK_MAX_BYTES)
+  } catch { return false }
+  let owner = null
+  try { owner = JSON.parse(contents) } catch { /* legacy claims had no owner record */ }
+  if (Number.isSafeInteger(owner?.pid) && owner.pid > 0 && typeof owner.token === 'string') {
+    if (!processIsDead(owner.pid)) return false
+  } else {
+    // Older builds left an ownerless claim. Only clear it after it is stale AND the associated
+    // lock itself names a confirmed-dead process; elapsed time alone never reaps either file.
+    if (Date.now() - before.mtimeMs < LOCK_MAX_AGE_MS || staleOwnerIdentity(lockPath) === null) return false
+  }
+  const current = lockIdentity(path)
+  let confirmed
+  try { confirmed = readBoundedMemoryFile(path, LOCK_MAX_BYTES) } catch { return false }
+  if (current === null || !sameIdentity(before, current) || before.mtimeMs !== current.mtimeMs
+    || before.size !== current.size || confirmed !== contents) return false
+  try { unlinkSync(path); return true } catch { return false }
+}
+
+function ensureNoOtherLiveReaperClaims(lockPath, ownPath) {
+  const directory = dirname(lockPath)
+  const prefix = `${basename(lockPath)}.reap-`
+  let names
+  try { names = readdirSync(directory) }
+  catch (error) { throw learningError(ioCode(error)) }
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue
+    const match = /^(\d+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u
+      .exec(name.slice(prefix.length))
+    if (match === null) throw learningError('lock_busy')
+    const claimPath = join(directory, name)
+    if (claimPath === ownPath) continue
+    const identity = lockIdentity(claimPath)
+    if (identity === null) continue
+    if (!identity.isFile() || identity.isSymbolicLink()) throw learningError('lock_busy')
+    const pid = Number(match[1])
+    if (!Number.isSafeInteger(pid) || pid < 1) throw learningError('lock_busy')
+    if (!processIsDead(pid)) throw learningError('lock_busy')
+    // Unique names are never adopted by another process, so a confirmed-dead ticket is safe
+    // to remove; no live reaper can have its claim stolen through this path.
+    try { unlinkSync(claimPath) }
+    catch (error) { if (error?.code !== 'ENOENT') throw learningError(ioCode(error)) }
+  }
+}
+
+function acquireReaperClaim(lockPath) {
+  const path = `${lockPath}.reap-${process.pid}-${randomUUID()}`
   const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0)
   let fd
   try { fd = openSync(path, flags, 0o600) }
   catch (error) {
     if (error?.code === 'EEXIST' || error?.code === 'ELOOP') throw learningError('lock_busy')
-    throw learningError(ioCode(error))
+    else throw learningError(ioCode(error))
   }
-  try { return { fd, identity: fstatSync(fd) } }
-  catch {
+  let identity
+  try {
+    identity = fstatSync(fd)
+    const token = randomUUID()
+    writeFileSync(fd, JSON.stringify({ pid: process.pid, token, at: Date.now() }))
+    return { path, fd, identity, token }
+  } catch {
     try { closeSync(fd) } catch {}
+    const current = lockIdentity(path)
+    try { if (identity !== undefined && current !== null && sameIdentity(identity, current)) unlinkSync(path) }
+    catch { /* no cleanup can be confirmed */ }
     throw learningError('lock_busy')
   }
 }
 
-function releaseReaperClaim(path, claim) {
+function releaseReaperClaim(claim) {
   try { closeSync(claim.fd) } catch {}
-  const current = lockIdentity(path)
+  const current = lockIdentity(claim.path)
   if (current !== null && sameIdentity(claim.identity, current)) {
-    try { unlinkSync(path) } catch {}
+    try { unlinkSync(claim.path) } catch {}
   }
 }
 
 function acquireAfterStaleLock(lockPath, flags) {
-  const reaperPath = join(dirname(lockPath), MEMORY_REAPER_NAME)
-  const claim = acquireReaperClaim(reaperPath)
+  const claim = acquireReaperClaim(lockPath)
   try {
+    ensureNoOtherLiveReaperClaims(lockPath, claim.path)
+    const legacyReaperPath = join(dirname(lockPath), MEMORY_REAPER_NAME)
+    if (lockIdentity(legacyReaperPath) !== null
+      && !recoverAbandonedReaperClaim(legacyReaperPath, lockPath)) throw learningError('lock_busy')
+    ensureNoOtherLiveReaperClaims(lockPath, claim.path)
     const stale = staleOwnerIdentity(lockPath)
     const current = lockIdentity(lockPath)
     if (stale === null || current === null || !sameIdentity(stale, current)
       || stale.mtimeMs !== current.mtimeMs || stale.size !== current.size) {
       throw learningError('lock_busy')
     }
+    ensureNoOtherLiveReaperClaims(lockPath, claim.path)
     try { unlinkSync(lockPath) }
     catch (error) { throw learningError(ioCode(error)) }
     let fd
@@ -434,8 +507,8 @@ function acquireAfterStaleLock(lockPath, flags) {
       if (error?.code === 'EEXIST' || error?.code === 'ELOOP') throw learningError('lock_busy')
       throw learningError(ioCode(error))
     }
-    return writeOwnedLock(lockPath, fd)
-  } finally { releaseReaperClaim(reaperPath, claim) }
+    return writeOwnedLock(lockPath, fd, claim.path)
+  } finally { releaseReaperClaim(claim) }
 }
 
 function acquireLock(lockPath) {

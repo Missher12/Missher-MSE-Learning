@@ -2,7 +2,7 @@
 
 ![MSE Learning · 持久学习（品牌插画）](docs/images/cover-v2.webp)
 
-MSE learns reusable corrections and failure lessons for DSH. **1.4.5** looks up relevant experience when a task becomes active in the plan. Native writes and replacements also check saved user rules before changing gradients, colors, layout, typography, motion, or project configuration. When a new rule fits the budget, the first edit waits for the next model step to receive the reminder.
+MSE learns reusable corrections and failure lessons for DSH. **1.4.6** looks up relevant experience when a task becomes active in the plan. Native writes and replacements also check saved user rules before changing gradients, colors, layout, typography, motion, or project configuration. When a new rule fits the budget, the first edit waits for the next model step to receive the reminder.
 
 Opening and mid-turn recall share **512 estimated tokens** by default, configurable from 128 to 1024, with up to two methods and one warning. Smaller legacy byte settings remain in effect until a token limit is chosen. Recall policies activate or roll back based on observed evidence.
 

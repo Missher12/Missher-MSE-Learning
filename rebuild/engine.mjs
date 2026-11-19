@@ -33,7 +33,8 @@ import { observeInState, abstainInState, linkCandidateInState,
   from '../src/problems.mjs'
 import { MemoryStore, importOldLessons, entryIdFor, digestOf, memoryOf, ROLLBACK, ENTRY_LIMIT, nativeCheckPairValid,
   boundedUnits, upgradeDocFormat, noCommit, RECALL_STRATEGY_LIMIT, ADAPTIVE_RECALL_POLICY_LIMIT,
-  ADAPTIVE_RECALL_PROBE_LIMIT, ADAPTIVE_RECALL_DECISION_LIMIT } from './memory.mjs'
+  ADAPTIVE_RECALL_PROBE_LIMIT, ADAPTIVE_RECALL_DECISION_LIMIT, MID_TURN_RECEIPT_LIMIT }
+  from './memory.mjs'
 import { isMemoryStorageError, encodeMemoryDocument } from './storage.mjs'
 export { pathInside } from './paths.mjs'
 import { mechanismKey, resolveMethodVersion, versionWindow, ensureMethodStats, archiveVersion,
@@ -177,6 +178,26 @@ const methodMatchesNativeFailure = (doc, offer, problemId, signature) => {
   return target !== null && (target.record.lesson?.problemId === problemId
     || (target.kind === 'current' && target.record.problemSignature === signature))
 }
+const midTurnReceiptsForCall = (doc, turnKey, callSeq) => Number.isSafeInteger(callSeq)
+  ? doc.midTurnReceipts.filter(row => row.turnKey === turnKey && row.promptSeq < callSeq) : []
+const offeredInMidTurn = (rows, id, version) => rows.some(row => row.offered.some(offer =>
+  offer.id === id && offer.version === version && offer.mode === 'method'))
+const feedbackSeenForTurn = (doc, turnKey, id, version, kind) =>
+  doc.receipts.some(row => row.turnKey === turnKey && row.methodFeedback?.some(item =>
+    item.entryId === id && item.version === version && item.kind === kind))
+  || doc.midTurnReceipts.some(row => row.turnKey === turnKey && row.methodFeedback?.some(item =>
+    item.entryId === id && item.version === version && item.kind === kind))
+const turnOfferAttribution = (doc, turnKey, openingReceipt, midReceipts, id, version) => {
+  const openingOffer = openingReceipt?.offered?.find(row => row.id === id
+    && (version === null || row.version === version))
+  if (openingOffer !== undefined) return methodAttribution(doc, openingReceipt, id, version)
+  const mid = midReceipts.find(row => row.offered.some(offer => offer.id === id
+    && (version === null || offer.version === version)))
+  if (mid === undefined) return { admitted: false, reason: 'version_not_injected_this_turn' }
+  const fact = doc.turnFacts.find(row => row.turnKey === turnKey)
+  return methodAttribution(doc, { turnKey, offered: mid.offered, settled: fact?.outcome != null,
+    outcome: fact?.outcome ?? null }, id, version)
+}
 const adaptivePolicyTarget = (doc, policy) => {
   const entry = doc.entries.find(row => row.id === policy?.entryId && row.version === policy?.version)
   return entry?.type === 'lesson' && entry.status !== 'retired'
@@ -266,9 +287,10 @@ function adaptivePolicySourcesAdmitted(doc, policy, sourceAdmit) {
   })
 }
 function adaptiveCohortKey(policy) {
+  const budget = policy.budget ?? { unit: 'bytes', limit: 768 }
   return JSON.stringify([policy.scope, policy.qualification, policy.entryId, policy.version,
-    policy.objective, policy.firstSession, policy.firstQuery, policy.familyGeneration,
-    policy.parentId])
+    policy.objective, budget.unit, budget.limit, policy.firstSession, policy.firstQuery,
+    policy.familyGeneration, policy.parentId])
 }
 function selectAdaptiveRounds(doc, { turnKey, scope, sourceAdmit, materialAdmit, decision, now }) {
   const groups = new Map()
@@ -445,7 +467,7 @@ function appendRecallStrategyRows(doc, additions) {
   return true
 }
 
-function settleRecallStrategy(doc, { turnKey, sessionId, outcome, receipt,
+function settleRecallStrategy(doc, { turnKey, sessionId, outcome, receipt, midTurnReceipts = [],
   allowStrategy = true, reconfirmMatched = () => true }) {
   const state = doc.recallStrategy
   const session = sessionKeyOf(sessionId)
@@ -466,13 +488,15 @@ function settleRecallStrategy(doc, { turnKey, sessionId, outcome, receipt,
       row.reason = 'same_turn_native_failure_match'
     }
 
-    const active = current.filter(row => row.mode === 'active' && receipt?.offered?.some(offer =>
+    const actualOffers = [...(receipt?.offered ?? []), ...midTurnReceipts.flatMap(row => row.offered)]
+    const feedbackRows = [...(receipt?.methodFeedback ?? []),
+      ...midTurnReceipts.flatMap(row => row.methodFeedback ?? [])]
+    const active = current.filter(row => row.mode === 'active' && actualOffers.some(offer =>
       offer.id === row.id && offer.version === row.version && offer.mode === 'method'))
     for (const row of active) {
-      const feedback = receipt.methodFeedback ?? []
-      const recurrence = feedback.some(item => item.entryId === row.id && item.version === row.version
+      const recurrence = feedbackRows.some(item => item.entryId === row.id && item.version === row.version
         && item.kind === 'recurrence' && item.voided !== true)
-      const checkerFailure = hasNativeCheckerFailure(feedback, row.id, row.version)
+      const checkerFailure = hasNativeCheckerFailure(feedbackRows, row.id, row.version)
       if (!recurrence && !checkerFailure) continue
       if (state.rows.some(item => item.mode === 'isolated'
         && recallStrategyIdentity(item) === recallStrategyIdentity(row))) continue
@@ -2349,7 +2373,8 @@ export class RebuildEngine {
 
   /** One trusted tool failure: the host classifies, failure-evidence scrubs and bounds. */
   observeToolFailure({ sessionId, turnId, projectKey, environmentId = null, callId, toolName,
-    failureCode, exitCode = null, stdout = null, stderr = null, error = null, command = null, at = null }) {
+    failureCode, exitCode = null, stdout = null, stderr = null, error = null, command = null,
+    callSeq = null, at = null }) {
     check(typeof callId === 'string' && callId.length > 0 && callId.length <= 512, 'invalid_event')
     const observedAt = at ?? this.now()
     // MSE21-FIX1: the observation's OWN session/turn ride into the capsule — the capsule is
@@ -2377,12 +2402,14 @@ export class RebuildEngine {
       this.#fact(doc, turnKeyOf(sessionId, turnId), sessionId).failures += 1
       const turnKey = turnKeyOf(sessionId, turnId)
       const receipt = doc.receipts.find(row => row.turnKey === turnKey)
+      const midTurnReceipts = midTurnReceiptsForCall(doc, turnKey, callSeq)
       const turnFact = doc.turnFacts.find(row => row.turnKey === turnKey)
       const strategyScope = strategyScopeOf(scopeOf(projectKey), environmentOf(environmentId))
       if (out.ok && out.duplicate !== true && capsule !== null && typeof out.id === 'string'
         && !this.#blockedNow(doc) && this.#sourceOk(sessionId) && receipt?.settled !== true
         && (turnFact?.outcome === null || turnFact?.outcome === undefined)) {
-        const baselineExplains = (receipt?.offered ?? []).some(offer =>
+        const baselineExplains = [...(receipt?.offered ?? []),
+          ...midTurnReceipts.flatMap(row => row.offered)].some(offer =>
           methodMatchesNativeFailure(doc, offer, out.id, capsule.signature))
         const adaptive = doc.recallStrategy.adaptive
         const probe = adaptive.probes.find(row => row.turnKey === turnKey
@@ -2409,12 +2436,14 @@ export class RebuildEngine {
               if (candidate.id === unique.id && candidate.version === unique.version) {
                 const sameMethodOffered = probe.offered.some(row => row.id === policy.entryId
                   && row.version === policy.version && row.mode === 'method')
-                if (probe.activePolicies.includes(policyId) || sameMethodOffered) {
+                  || offeredInMidTurn(midTurnReceipts, policy.entryId, policy.version)
+                if (sameMethodOffered && (probe.activePolicies.includes(policyId)
+                  || policy.mode === 'approved')) {
                   stageAdaptiveSignal(probe, { policyId, kind: 'recurrence', entryId: policy.entryId,
                     version: policy.version, objective: policy.objective, problemId: out.id,
                     signature: capsule.signature, features: policy.features,
                     reason: 'same_signature_recurrence', at: observedAt })
-                } else if (policy.mode === 'observing'
+                } else if (!sameMethodOffered && policy.mode === 'observing'
                   && !probe.offered.some(row => row.id === policy.entryId
                     && row.version === policy.version && row.mode === 'method')) {
                   stageAdaptiveSignal(probe, { policyId, kind: 'holdout', entryId: policy.entryId,
@@ -2450,6 +2479,7 @@ export class RebuildEngine {
 
             const alreadyOffered = probe.offered.some(offer => offer.id === unique.id
               && offer.version === unique.version && offer.mode === 'method')
+              || offeredInMidTurn(midTurnReceipts, unique.id, unique.version)
             const fixedTracked = doc.recallStrategy.rows.some(row => row.turnKey === turnKey
               && row.scope === strategyScope && row.id === unique.id && row.version === unique.version
               && ['shadow', 'matched', 'active', 'approved', 'isolated'].includes(row.mode))
@@ -2507,7 +2537,7 @@ export class RebuildEngine {
             || row.session !== sessionKeyOf(sessionId)
             || row.qualification !== RECALL_QUALIFICATION.id) continue
           if (receipt?.offered?.some(offer => offer.id === row.id && offer.version === row.version
-            && offer.mode === 'method')) continue
+            && offer.mode === 'method') || offeredInMidTurn(midTurnReceipts, row.id, row.version)) continue
           const target = resolveMethodVersion(doc, row.id, row.version)
           if (target?.kind !== 'current' || target.record.lesson === null
             || target.record.lesson === undefined) continue
@@ -2532,38 +2562,40 @@ export class RebuildEngine {
       // count; the origin attribution on the entry stays untouched.
       if (out.ok && out.duplicate !== true && capsule !== null && out.problem !== undefined) {
         const currentReceipt = doc.receipts.find(row => row.turnKey === turnKey)
-        if (currentReceipt !== undefined) {
-          const feedback = currentReceipt.methodFeedback ?? (currentReceipt.methodFeedback = [])
-          for (const offered of currentReceipt.offered) {
-            // REVIEW-FIX2: the SAME attribution judgment as the checker entries. A cancelled
-            // terminal refuses method credit even on the FIRST late tool failure (there is no
-            // feedback row to rely on); guard/partial/missing editions are never credited.
-            const attribution = methodAttribution(doc, currentReceipt, offered.id, offered.version)
-            if (!attribution.admitted) continue
-            const target = attribution.target
-            const entry = doc.entries.find(row => row.id === offered.id)
-            if (entry === undefined || entry.status === 'retired' || entry.type !== 'lesson') continue
-            const view = target.kind === 'current' ? entry : target.record
-            const attributed = (target.kind === 'current' && entry.problemSignature !== null
-              && entry.problemSignature === capsule.signature) || view.lesson?.problemId === out.id
-            if (!attributed) continue
-            // ONE recurrence per (entry, version) per turn: the receipt is the persistent proof.
-            if (feedback.some(row => row.entryId === offered.id && row.version === offered.version
-              && row.kind === 'recurrence')) continue
-            // The shared window rule: unknown historical counters can only start since_upgrade.
-            creditWindow(target, observedAt).recurrences += 1
-            if (target.kind === 'current') {
-              entry.recurrences += 1
-              entry.status = 'needs_revision'
-              entry.updatedAt = observedAt
-            } else {
-              // A late matched failure settles the ARCHIVED edition only — the current edition is
-              // untouched apart from the family total.
-              target.record.status = 'needs_revision'
-              target.record.reason = 'matched_recurrence_late'
-              entry.recurrences += 1
-            }
-            feedback.push({ entryId: offered.id, version: offered.version, kind: 'recurrence',
+        const actualOffers = [...(currentReceipt?.offered ?? []),
+          ...midTurnReceipts.flatMap(row => row.offered)]
+        for (const offered of actualOffers) {
+          // Only a tool call after the confirmed prompt sequence can use a mid-turn offer. Opening
+          // receipt behavior stays unchanged; an earlier trigger failure cannot charge the later
+          // supplemental advice.
+          const attribution = turnOfferAttribution(doc, turnKey, currentReceipt, midTurnReceipts,
+            offered.id, offered.version)
+          if (!attribution.admitted) continue
+          const target = attribution.target
+          const entry = doc.entries.find(row => row.id === offered.id)
+          if (entry === undefined || entry.status === 'retired' || entry.type !== 'lesson') continue
+          const view = target.kind === 'current' ? entry : target.record
+          const attributed = (target.kind === 'current' && entry.problemSignature !== null
+            && entry.problemSignature === capsule.signature) || view.lesson?.problemId === out.id
+          if (!attributed || feedbackSeenForTurn(doc, turnKey, offered.id, offered.version, 'recurrence')) continue
+          // The shared window rule: unknown historical counters can only start since_upgrade.
+          creditWindow(target, observedAt).recurrences += 1
+          if (target.kind === 'current') {
+            entry.recurrences += 1
+            entry.status = 'needs_revision'
+            entry.updatedAt = observedAt
+          } else {
+            target.record.status = 'needs_revision'
+            target.record.reason = 'matched_recurrence_late'
+            entry.recurrences += 1
+          }
+          const feedbackReceipt = currentReceipt?.offered?.some(row => row.id === offered.id
+            && row.version === offered.version) ? currentReceipt
+            : midTurnReceipts.find(row => row.offered.some(row => row.id === offered.id
+              && row.version === offered.version))
+          if (feedbackReceipt !== undefined) {
+            ;(feedbackReceipt.methodFeedback ?? (feedbackReceipt.methodFeedback = [])).push({
+              entryId: offered.id, version: offered.version, kind: 'recurrence',
               checkId: null, at: observedAt })
           }
         }
@@ -2584,7 +2616,8 @@ export class RebuildEngine {
   /** A checker event is deduplicated by eventId and bound to ONE injected version. It never
    *  credits or condemns every lesson of a turn wholesale. */
   recordCheck({ checkId, passed, evidence = null, sessionId, turnId, entryId = null,
-    entryVersion = null, eventId = null, summary = null, sourceRequired = false, nativeResult = null }) {
+    entryVersion = null, eventId = null, summary = null, sourceRequired = false, nativeResult = null,
+    sourceCallSeq = nativeResult?.callSeq ?? null }) {
     check(typeof checkId === 'string' && checkId.length > 0 && checkId.length <= 128
       && typeof passed === 'boolean' && typeof eventId === 'string' && eventId.length > 0
       && eventId.length <= 512, 'invalid_check')
@@ -2635,8 +2668,22 @@ export class RebuildEngine {
         return { ok: true, duplicate: true, reason: 'checker_event_already_counted' }
       }
       const receipt = doc.receipts.find(row => row.turnKey === turnKey)
-      if (receipt === undefined) return { ok: true, settled: false, reason: 'no_injection_this_turn' }
       if (entryId === null) return { ok: false, code: 'entry_binding_required' }
+      const midTurnReceipts = midTurnReceiptsForCall(doc, turnKey, sourceCallSeq)
+      const attribution = turnOfferAttribution(doc, turnKey, receipt, midTurnReceipts,
+        entryId, entryVersion)
+      const attributedVersion = attribution.offered?.version ?? entryVersion
+      const feedbackReceipt = receipt?.offered?.some(row => row.id === entryId
+        && row.version === attributedVersion) ? receipt
+        : midTurnReceipts.find(row => row.offered.some(offer => offer.id === entryId
+          && offer.version === attributedVersion))
+      if (feedbackReceipt === undefined && receipt === undefined) {
+        const offeredLater = doc.midTurnReceipts.some(row => row.turnKey === turnKey
+          && row.offered.some(offer => offer.id === entryId
+            && (entryVersion === null || offer.version === entryVersion)))
+        if (offeredLater) return { ok: false, code: 'version_not_injected_this_turn' }
+        return { ok: true, settled: false, reason: 'no_injection_this_turn' }
+      }
       // The event stays a REAL audit fact even when it may not credit a method.
       const auditCheck = (version, nativePair = null) => {
         if (doc.checkEvents.length > 126) doc.checkEvents = doc.checkEvents.slice(-126)
@@ -2646,7 +2693,6 @@ export class RebuildEngine {
       }
       // REVIEW-FIX2: ONE shared admission judgment (cancelled/guard/missing/partial) instead of
       // a per-entry-point chain; the checker keeps its own audit row and (entry,version) dedupe.
-      const attribution = methodAttribution(doc, receipt, entryId, entryVersion)
       if (attribution.admitted !== true) {
         switch (attribution.reason) {
           case 'version_not_injected_this_turn':
@@ -2748,11 +2794,10 @@ export class RebuildEngine {
         }
       }
       const kind = passed ? 'check_pass' : 'check_fail'
-      const feedback = receipt.methodFeedback ?? (receipt.methodFeedback = [])
+      const feedback = feedbackReceipt.methodFeedback ?? (feedbackReceipt.methodFeedback = [])
       // ONE result of each kind per (entry, version) per turn — the receipt survives checkEvents
       // rotation and is therefore the real proof the result was already counted.
-      if (feedback.some(row => row.entryId === entryId && row.version === offered.version
-        && row.kind === kind)) {
+      if (feedbackSeenForTurn(doc, turnKey, entryId, offered.version, kind)) {
         return { ok: true, duplicate: true, reason: 'method_feedback_already_counted' }
       }
       const evidenceHash = digestOf({ checkId, evidence, at: this.now() })
@@ -2824,7 +2869,7 @@ export class RebuildEngine {
         : developmentCheckIdForCommand(command) === checkId
           && developmentCheckIdForCommand(declared) === checkId
           && developmentCheckMatchesVerification(declared, command))
-      const paired = passed && sourceRequired && target.kind === 'current' && !receipt.settled
+      const paired = passed && sourceRequired && target.kind === 'current' && receipt?.settled !== true
         && nativeCheckPairValid(nativePair) && structuredDevelopmentPass(checkId, summary) && exactContract
       auditCheck(offered.version, paired ? nativePair : null)
       return { ok: true, settled: true, outcome: passed ? 'check_passed' : 'needs_revision',
@@ -2834,16 +2879,19 @@ export class RebuildEngine {
 
   /** The lesson versions injected in THIS turn that objectively relate to a JSON artifact —
    *  the only rows a JSON checker may credit or blame. Never all offers, never rules. */
-  jsonRelevantOffers({ sessionId, turnId }) {
+  jsonRelevantOffers({ sessionId, turnId, callSeq = null }) {
     const turnKey = turnKeyOf(sessionId, turnId)
     const doc = this.store.read()
     const receipt = doc.receipts.find(row => row.turnKey === turnKey)
-    if (receipt === undefined) return []
+    const midTurnReceipts = midTurnReceiptsForCall(doc, turnKey, callSeq)
+    const offers = [...(receipt?.offered ?? []), ...midTurnReceipts.flatMap(row => row.offered)]
+    const unique = [...new Map(offers.map(offer => [`${offer.id}\u0000${offer.version}`, offer])).values()]
     // REVIEW-FIX2: the SAME shared admission judgment as recordCheck/tool feedback (cancelled,
     // guard, missing, partial). The relevance is judged over the EDITION THAT WAS ACTUALLY
     // OFFERED, never over whatever the entry happens to be now.
-    return receipt.offered.filter(offer => {
-      const attribution = methodAttribution(doc, receipt, offer.id, offer.version)
+    return unique.filter(offer => {
+      const attribution = turnOfferAttribution(doc, turnKey, receipt, midTurnReceipts,
+        offer.id, offer.version)
       if (attribution.admitted !== true) return false
       const target = attribution.target
       const view = target.record
@@ -2858,7 +2906,7 @@ export class RebuildEngine {
   }
 
   /** Offers for one supported check and exact lesson version, never guards/rules. */
-  developmentRelevantOffers({ sessionId, turnId, checkId, command }) {
+  developmentRelevantOffers({ sessionId, turnId, checkId, command, callSeq = null }) {
     const observedCheck = typeof checkId === 'string' ? checkId
       : typeof command === 'string' ? developmentCheckIdForCommand(command) : undefined
     if (typeof observedCheck !== 'string'
@@ -2867,10 +2915,13 @@ export class RebuildEngine {
     const turnKey = turnKeyOf(sessionId, turnId)
     const doc = this.store.read()
     const receipt = doc.receipts.find(row => row.turnKey === turnKey)
-    if (receipt === undefined) return []
-    const matches = receipt.offered.filter(offer => {
+    const midTurnReceipts = midTurnReceiptsForCall(doc, turnKey, callSeq)
+    const offers = [...(receipt?.offered ?? []), ...midTurnReceipts.flatMap(row => row.offered)]
+    const unique = [...new Map(offers.map(offer => [`${offer.id}\u0000${offer.version}`, offer])).values()]
+    const matches = unique.filter(offer => {
       if (offer.mode === 'guard') return false
-      const attribution = methodAttribution(doc, receipt, offer.id, offer.version)
+      const attribution = turnOfferAttribution(doc, turnKey, receipt, midTurnReceipts,
+        offer.id, offer.version)
       if (attribution.admitted !== true || attribution.target?.record?.type !== 'lesson') return false
       if (observedCheck === 'python-json-loader-v1'
         && (attribution.target.kind !== 'current'
@@ -2955,22 +3006,46 @@ export class RebuildEngine {
     }
   }
 
-  /** Count a late injection without changing the original request receipt or adaptive probe. */
-  recordMidTurnInjection({ sessionId, turnId, offered }) {
+  /** Persist a late injection only after the native log confirms it reached a model attempt. */
+  recordMidTurnInjection({ sessionId, turnId, offered, step, messageSeq, promptSeq, promptHash,
+    bytes = 0, contextTokens, budget = null }) {
     if (!Array.isArray(offered) || offered.length === 0 || offered.length > 3
+      || !Number.isSafeInteger(step) || step < 1
+      || !Number.isSafeInteger(messageSeq) || messageSeq < 0
+      || !Number.isSafeInteger(promptSeq) || promptSeq <= messageSeq
+      || !hex64(promptHash) || !Number.isSafeInteger(bytes) || bytes < 0
+      || (contextTokens !== undefined && (!Number.isSafeInteger(contextTokens) || contextTokens < 0))
       || !this.#sourceOk(sessionId)) return { ok: false, injected: 0 }
     const turnKey = turnKeyOf(sessionId, turnId)
     try {
       return this.store.transaction(doc => {
+        const receiptId = digestOf(['mid-turn-injection', turnKey, step, messageSeq, promptSeq,
+          promptHash, offered, budget])
+        if (doc.midTurnReceipts.some(row => row.id === receiptId)) {
+          return { ok: true, duplicate: true, injected: 0, receiptId }
+        }
         if (doc.receipts.some(row => row.turnKey === turnKey && row.settled === true)
           || doc.turnFacts.some(row => row.turnKey === turnKey && row.outcome !== null
-            && row.outcome !== undefined)) return { ok: false, injected: 0 }
+            && row.outcome !== undefined && row.outcome !== 'cancelled')) return { ok: false, injected: 0 }
+        if (doc.turnFacts.some(row => row.turnKey === turnKey && row.outcome === 'cancelled')) {
+          return { ok: false, injected: 0 }
+        }
         const entries = offered.map(offer => ['method', 'guard'].includes(offer?.mode)
           ? doc.entries.find(row => row.id === offer.id && row.version === offer.version
             && row.status !== 'retired') : undefined)
         // A prepared stage reminder can become stale between the tool guard and pre-step.
         // Count none when the whole message can no longer be delivered.
         if (entries.some(entry => entry === undefined)) return noCommit({ ok: false, injected: 0 })
+        const budgetFields = budget === null ? {} : { budgetUnit: budget.unit,
+          budgetLimit: budget.limit,
+          ...(budget.unit === RECALL_TOKEN_UNIT && contextTokens !== undefined ? { contextTokens } : {}) }
+        const row = { id: receiptId, turnKey, at: this.now(), step, messageSeq, promptSeq,
+          promptHash, bytes, ...budgetFields,
+          offered: offered.map(({ id, version, mode }) => ({ id, version, mode })) }
+        if (doc.midTurnReceipts.length >= MID_TURN_RECEIPT_LIMIT) {
+          doc.midTurnReceipts = doc.midTurnReceipts.slice(-(MID_TURN_RECEIPT_LIMIT - 1))
+        }
+        doc.midTurnReceipts.push(row)
         for (const [index, entry] of entries.entries()) {
           const offer = offered[index]
           entry.injected += 1
@@ -2979,7 +3054,7 @@ export class RebuildEngine {
             ensureMethodStats(entry, this.now()).injected += 1
           }
         }
-        return { ok: true, injected: entries.length }
+        return { ok: true, injected: entries.length, receiptId }
       })
     } catch (error) {
       if (!storageFailure(error)) throw error
@@ -3053,11 +3128,21 @@ export class RebuildEngine {
             && eligible.every(row => approvedStrategyMethod(strategy.rows, strategyScope, row)
               && !isolatedStrategyMethod(strategy.rows, strategyScope, row))
           if (configuredBudget !== null) {
-            // Historical approvals remain usable only when the candidate still fits the current
-            // selector and preserves every baseline guard/rule. They create no new cross-budget
-            // approval evidence.
-            if (allApproved) selected = candidate
+            // Any explicit profile can use a prior fixed approval, with an active row for exact
+            // current-budget attribution. Only the legacy profileless path may create a shadow.
+            if (allApproved) {
+              const rows = eligible.map(row => ({ turnKey, scope: strategyScope,
+                session: sessionKeyOf(sessionId), qualification: RECALL_QUALIFICATION.id,
+                id: row.id, version: row.version, mode: 'active', generation: strategy.generation,
+                reason: 'candidate_difference' }))
+              if (appendRecallStrategyRows(doc, rows)) {
+                strategyWriteAttempted = true
+                selected = candidate
+              }
+            }
           } else {
+            // Keep the historical byte-profile shadow path intact. Each approval stays in its
+            // own budget group; the 512-token profile above only uses already approved methods.
             const mode = allApproved ? 'active' : 'shadow'
             const tracked = allApproved ? eligible : unapproved
             if (tracked.length > 0) {
@@ -3243,23 +3328,14 @@ export class RebuildEngine {
         }
         const strategyOutcome = fact.outcome === outcome ? fact.outcome : null
         const receipt = doc.receipts.find(row => row.id === turnKey)
+        const midTurnReceipts = doc.midTurnReceipts.filter(row => row.turnKey === turnKey)
         const allowStrategy = !this.#blockedNow(doc)
         const reconfirmMatched = row => matchedMethodStillAdmitted(doc, row, { turnKey, sessionId,
           sourceAdmit: id => this.#sourceOk(id), materialAdmit: text => this.#materialOk(text, null) })
-        if (receipt === undefined) {
-          settleRecallStrategy(doc, { turnKey, sessionId, outcome: strategyOutcome, receipt,
-            allowStrategy, reconfirmMatched })
-          settleAdaptiveRecall(doc, { turnKey, sessionId, outcome: strategyOutcome, receipt,
-            allowStrategy, sourceAdmit: this.#adaptiveSourceGuard(),
-            materialAdmit: text => this.#materialOk(text, null), now: this.now() })
-          return { ok: true, settledFact: true }
-        }
-        if (receipt.settled === true) return { ok: true, duplicate: true }
-        // A CANCELLED turn is evidence about the turn, never about a method: the recurrence that a
-        // real tool failure recorded inside it is rolled back with its receipt proof (the host
-        // already drops the turn's pending checkers the same way).
-        if (outcome === 'cancelled' && Array.isArray(receipt.methodFeedback)) {
-          for (const row of receipt.methodFeedback.filter(item => item.kind === 'recurrence')) {
+        if (strategyOutcome === 'cancelled') {
+          const feedbackRows = [...(receipt?.methodFeedback ?? []),
+            ...midTurnReceipts.flatMap(row => row.methodFeedback ?? [])]
+          for (const row of feedbackRows.filter(item => item.kind === 'recurrence' && item.voided !== true)) {
             const target = resolveMethodVersion(doc, row.entryId, row.version)
             if (target === null) continue
             const current = doc.entries.find(entry => entry.id === row.entryId)
@@ -3277,16 +3353,24 @@ export class RebuildEngine {
               }
               if (current !== undefined) current.recurrences = Math.max(0, current.recurrences - 1)
             }
-            // The proof row is KEPT (voided): the same turn can never be counted a second time
-            // after this rollback, and the real event stays auditable.
+            // Keep the proof but void it so replay and later cancellation cannot charge twice.
             row.voided = true
           }
         }
+        if (receipt === undefined) {
+          settleRecallStrategy(doc, { turnKey, sessionId, outcome: strategyOutcome, receipt, midTurnReceipts,
+            allowStrategy, reconfirmMatched })
+          settleAdaptiveRecall(doc, { turnKey, sessionId, outcome: strategyOutcome, receipt,
+            allowStrategy, sourceAdmit: this.#adaptiveSourceGuard(),
+            materialAdmit: text => this.#materialOk(text, null), now: this.now() })
+          return { ok: true, settledFact: true }
+        }
+        if (receipt.settled === true) return { ok: true, duplicate: true }
         receipt.settled = true
         receipt.outcome = outcome
         receipt.evidenceHash = evidenceHash
         receipt.source = hex64(routeId ?? '') ? { routeId } : null
-        settleRecallStrategy(doc, { turnKey, sessionId, outcome: strategyOutcome, receipt,
+        settleRecallStrategy(doc, { turnKey, sessionId, outcome: strategyOutcome, receipt, midTurnReceipts,
           allowStrategy, reconfirmMatched })
         settleAdaptiveRecall(doc, { turnKey, sessionId, outcome: strategyOutcome, receipt,
           allowStrategy, sourceAdmit: this.#adaptiveSourceGuard(),

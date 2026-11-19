@@ -7,6 +7,7 @@ import { Session } from '@deepseek-ai/dsh-session'
 import { Context } from '@deepseek-ai/cordis'
 import { createToolResultMessage } from '@deepseek-ai/dsh-llm'
 import { RebuildEngine } from './engine.mjs'
+import { validateDoc } from './memory.mjs'
 import { MID_TURN_FAILURE_FIXTURE_IDS, MID_TURN_OPERATION_FIXTURE_IDS,
   classifyMidTurnFailure, midTurnOperation } from './mid-turn-recall.mjs'
 import bundle from './root.mjs'
@@ -74,8 +75,15 @@ test('R23 native rc.4 failure recalls one matching lesson before the next entere
     engine.store.transaction(doc => { doc.entries.push(base, json); return true })
     const emit = (type, ...args) => ctx.emit(type, ...args)
     const send = async (step, messages) => {
-      return await ctx.waterfall('agent/pre-step', { agent: { session }, step, turn: 1, messages },
+      const decision = await ctx.waterfall('agent/pre-step', { agent: { session }, step, turn: 1, messages },
         async () => ({ kind: 'enter', messages }))
+      if (decision?.kind === 'enter') {
+        await emit('session/event', session, session.append('step/start', { turn: 1, step }))
+        for (const message of decision.messages) {
+          await emit('session/event', session, session.append('user/message', message, { surfaceOp: 'append' }))
+        }
+      }
+      return decision
     }
     const user = { id: 'native-user-1', role: 'user', source: { kind: 'user' },
       content: [{ type: 'text', text: '请更新 README 并运行 Node 测试，整理失败项' }] }
@@ -127,7 +135,8 @@ test('R23 native rc.4 failure recalls one matching lesson before the next entere
       'the failure follow-up includes its own message prefix in the shared turn estimate')
     assert.deepEqual(engine.store.read().receipts.at(-1), receiptAfterFailure,
       'mid-turn recall must not change receipt outcome or efficacy attribution')
-    assert.equal(engine.store.read().entries.find(row => row.id === json.id).injected, 1)
+    assert.equal(engine.store.read().entries.find(row => row.id === json.id).injected, 0,
+      'adding advice to the local decision is not counted before the host admits the model request')
     const probe = engine.store.read().recallStrategy.adaptive.probes.find(row => row.turnKey === turnKey)
     assert.ok(probe, 'the first step created the ordinary RRSI probe')
     assert.equal(probe.offered.some(row => row.id === json.id), false,
@@ -154,6 +163,11 @@ test('R23 native rc.4 failure recalls one matching lesson before the next entere
       await emit('session/event', session, resultEvent)
     }
     await check(2, 'repeat-after-failure-1')
+    assert.equal(engine.store.read().entries.find(row => row.id === json.id).injected, 1,
+      'the persisted user/message and same-step assistant settlement confirm actual prompt delivery')
+    const supplemental = engine.store.read().midTurnReceipts.find(row => row.turnKey === turnKey)
+    assert.ok(supplemental?.offered.some(row => row.id === json.id && row.version === 1))
+    assert.ok(supplemental.messageSeq < supplemental.promptSeq)
     const thirdStep = await send(3, [user])
     assert.equal(midTurnQueries.length, 1, 'one successful stage is not a repetition')
     await check(3, 'repeat-after-failure-2')
@@ -167,6 +181,109 @@ test('R23 native rc.4 failure recalls one matching lesson before the next entere
       'an exhausted budget returns a readable local reason')
     assert.ok(thirdStep.kind === 'enter')
   } finally { fiber.dispose() }
+})
+
+function engineWithMidTurnMethod(sessionId, { openingReceipt = false } = {}) {
+  const stateRoot = root()
+  const engine = new RebuildEngine({ stateRoot, now: () => 1_800_000_000_000 })
+  engine.setSourceGuard(id => id === sessionId, () => [sessionId])
+  const failure = { toolName: 'bash', failureCode: 'tool_nonzero_exit', exitCode: 1,
+    stderr: 'Error: JSON parser rejected a trailing comma', command: 'python3 scripts/check_json.py ./bad.json' }
+  const seeded = engine.observeToolFailure({ sessionId, turnId: '1', projectKey: null,
+    callId: 'pre-prompt-trigger', ...failure, callSeq: 10 })
+  const problem = engine.store.read().problemLoop.problems.find(row => row.id === seeded.id)
+  const entry = lesson({ id: '999999999999999999999999',
+    instruction: '解析 JSON 前先删除尾随逗号，再运行 JSON.parse 验收',
+    applicability: 'JSON 解析失败时', failurePattern: 'JSON parser rejected a trailing comma',
+    check: 'JSON.parse' })
+  entry.lesson.problemId = seeded.id
+  entry.problemSignature = problem.signature
+  engine.store.transaction(doc => { doc.entries.push(entry); return true })
+  if (openingReceipt) engine.prepare({ sessionId, turnId: '1', projectKey: null,
+    prompt: '修复 JSON 解析错误' })
+  return { root: stateRoot, engine, entry, failure }
+}
+
+const confirmMidTurnMethod = (engine, sessionId, entry) => engine.recordMidTurnInjection({
+  sessionId, turnId: '1', offered: [{ id: entry.id, version: entry.version, mode: 'method' }],
+  step: 2, messageSeq: 20, promptSeq: 21, promptHash: 'a'.repeat(64), bytes: 100,
+  contextTokens: 30, budget: { unit: RECALL_TOKEN_UNIT, limit: 512 },
+})
+
+test('mid-turn objective checks require a post-prompt call sequence and work without an opening receipt', () => {
+  const sessionId = 'mse-midturn-check-attribution'
+  const { root: stateRoot, engine, entry } = engineWithMidTurnMethod(sessionId)
+  try {
+    const recorded = confirmMidTurnMethod(engine, sessionId, entry)
+    assert.equal(recorded.ok, true)
+    assert.equal(engine.store.read().receipts.length, 0, 'the supplemental ledger stays separate')
+    assert.equal(engine.jsonRelevantOffers({ sessionId, turnId: '1', callSeq: 10 }).length, 0,
+      'the failure that triggered the later prompt is before its prompt sequence')
+    assert.deepEqual(engine.jsonRelevantOffers({ sessionId, turnId: '1', callSeq: 30 }),
+      [{ id: entry.id, version: 1 }])
+
+    const beforeEarlyCheck = structuredClone(engine.store.read().entries.find(row => row.id === entry.id).methodStats)
+    const early = engine.recordCheck({ checkId: 'json-file-parses-v1', passed: true,
+      sessionId, turnId: '1', entryId: entry.id, entryVersion: 1, sourceCallSeq: 10,
+      eventId: 'midturn-pre-prompt-check' })
+    assert.equal(early.code, 'version_not_injected_this_turn')
+    assert.deepEqual(engine.store.read().entries.find(row => row.id === entry.id).methodStats, beforeEarlyCheck,
+      'a pre-prompt check cannot change objective feedback')
+
+    const checked = engine.recordCheck({ checkId: 'json-file-parses-v1', passed: true,
+      sessionId, turnId: '1', entryId: entry.id, entryVersion: 1, sourceCallSeq: 30,
+      eventId: 'midturn-post-prompt-check' })
+    assert.equal(checked.outcome, 'check_passed')
+    const doc = engine.store.read()
+    assert.equal(doc.entries.find(row => row.id === entry.id).methodStats.checkPasses, 1)
+    assert.ok(doc.midTurnReceipts[0].methodFeedback.some(row => row.kind === 'check_pass'))
+    assert.doesNotThrow(() => validateDoc(doc))
+  } finally { rmSync(stateRoot, { recursive: true, force: true }) }
+})
+
+test('a pre-prompt trigger failure is not a recurrence; later same-turn failure is rolled back on cancellation', () => {
+  const sessionId = 'mse-midturn-cancel-attribution'
+  const { root: stateRoot, engine, entry, failure } = engineWithMidTurnMethod(sessionId)
+  try {
+    confirmMidTurnMethod(engine, sessionId, entry)
+    assert.equal(engine.store.read().entries.find(row => row.id === entry.id).recurrences, 0,
+      'the earlier trigger failure does not get replayed as an injected-version failure')
+    engine.observeToolFailure({ sessionId, turnId: '1', projectKey: null,
+      callId: 'post-prompt-recurrence', ...failure, callSeq: 30 })
+    assert.equal(engine.store.read().entries.find(row => row.id === entry.id).recurrences, 1)
+    engine.complete({ sessionId, turnId: '1', outcome: 'cancelled', evidence: 'cancelled turn' })
+    const doc = engine.store.read()
+    assert.equal(doc.entries.find(row => row.id === entry.id).recurrences, 0)
+    assert.equal(doc.entries.find(row => row.id === entry.id).status, 'pending')
+    assert.equal(doc.midTurnReceipts[0].methodFeedback[0].voided, true)
+    assert.doesNotThrow(() => validateDoc(doc))
+  } finally { rmSync(stateRoot, { recursive: true, force: true }) }
+})
+
+test('a late cancellation cannot undo an already settled failed turn, with or without an opening receipt', () => {
+  for (const openingReceipt of [false, true]) {
+    const sessionId = `mse-midturn-late-cancel-${openingReceipt}`
+    const { root: stateRoot, engine, entry, failure } = engineWithMidTurnMethod(sessionId,
+      { openingReceipt })
+    try {
+      confirmMidTurnMethod(engine, sessionId, entry)
+      engine.observeToolFailure({ sessionId, turnId: '1', projectKey: null,
+        callId: `settled-failure-${openingReceipt}`, ...failure, callSeq: 30 })
+      assert.equal(engine.store.read().entries.find(row => row.id === entry.id).recurrences, 1)
+      engine.complete({ sessionId, turnId: '1', outcome: 'failed', evidence: 'failed first' })
+      const late = engine.complete({ sessionId, turnId: '1', outcome: 'cancelled', evidence: 'late cancel' })
+      const doc = engine.store.read()
+      assert.equal(doc.turnFacts.find(row => row.turnKey === doc.midTurnReceipts[0].turnKey).outcome,
+        'failed', 'the first terminal outcome remains authoritative')
+      assert.equal(doc.entries.find(row => row.id === entry.id).recurrences, 1,
+        'a late cancellation cannot roll back an already charged recurrence')
+      const feedback = [...(doc.receipts.find(row => row.turnKey === doc.midTurnReceipts[0].turnKey)
+        ?.methodFeedback ?? []), ...(doc.midTurnReceipts[0].methodFeedback ?? [])]
+      assert.ok(feedback.some(row => row.kind === 'recurrence' && row.voided !== true),
+        'the original failure evidence remains live')
+      if (openingReceipt) assert.equal(late.duplicate, true)
+    } finally { rmSync(stateRoot, { recursive: true, force: true }) }
+  }
 })
 
 async function makeNativeHost(sessionIds) {
@@ -187,8 +304,21 @@ async function makeNativeHost(sessionIds) {
   const fiber = ctx.registry.plugin(bundle, {})
   await fiber
   const emit = (type, ...args) => ctx.emit(type, ...args)
-  const enter = (session, turn, step, messages) => ctx.waterfall('agent/pre-step',
-    { agent: { session }, turn, step, messages }, async () => ({ kind: 'enter', messages }))
+  const enter = async (session, turn, step, messages) => {
+    const decision = await ctx.waterfall('agent/pre-step',
+      { agent: { session }, turn, step, messages }, async () => ({ kind: 'enter', messages }))
+    if (decision?.kind === 'enter') {
+      await emit('session/event', session, session.append('step/start', { turn, step }))
+      for (const message of decision.messages) {
+        await emit('session/event', session, session.append('user/message', message, { surfaceOp: 'append' }))
+      }
+    }
+    return decision
+  }
+  const settlePrompt = async (session, turn, step) => {
+    const event = session.append('assistant/attempt', { turn, step })
+    await emit('session/event', session, event)
+  }
   const start = async (session, turn, text) => {
     await emit('session/event', session, session.append('turn/start', { turn }))
     const message = { id: `${session.id}-user-${turn}`, role: 'user', source: { kind: 'user' },
@@ -224,7 +354,7 @@ async function makeNativeHost(sessionIds) {
       arguments: args, agent: { session }, signal: new AbortController().signal }
     return { exec, denial: toolGuards.map(handler => handler(exec)).find(value => value !== undefined) }
   }
-  return { dir, sessions, ctx, fiber, engine: ctx.get('mseRebuild').engine, emit, enter, start,
+  return { dir, sessions, ctx, fiber, engine: ctx.get('mseRebuild').engine, emit, enter, settlePrompt, start,
     nativeTool, proposeEdit }
 }
 
@@ -277,6 +407,7 @@ test('a direct style edit waits for its saved rule without counting the reminder
     assert.equal(host.engine.store.read().turnFacts.find(row => row.sessionId === id)?.failures, 0)
     const next = await host.enter(session, 1, 2, [])
     assert.equal(includesAdvice(next, rule), true, 'the model sees the rule before it can retry')
+    await host.settlePrompt(session, 1, 2)
     assert.equal(host.engine.store.read().entries.find(entry => entry.instruction === rule).injected, 1)
     const retry = await host.proposeEdit(session, { turn: 1, step: 2, callId: 'next-style-write',
       path, fileText: content })
@@ -409,6 +540,7 @@ test('a second objectively repeated test stage queues one query and can use the 
       'operation retrieval uses only fixed task/category labels')
     assert.ok(offeredText(third).includes('two consecutive suite validation passes'),
       'the repeat-specific lesson is recalled at the next model step')
+    await host.settlePrompt(session, 3, 3)
     assert.ok(receiptBefore.contextTokens + selectionTokens[0] <= 512,
       'the repeated-operation follow-up consumes only the remaining turn budget')
     assert.deepEqual(host.engine.store.read().receipts.at(-1), receiptBefore,

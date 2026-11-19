@@ -89,6 +89,7 @@ const ADAPTIVE_TASK_OPERATIONS = new Set(ADAPTIVE_TASK_OPERATION_IDS)
 const ADAPTIVE_GENERIC_TASK_FEATURES = new Set(['null', 'empty', 'error', 'log', 'value', 'result', 'problem'])
 export const ENTRY_LIMIT = 256
 export const RECEIPT_LIMIT = 256
+export const MID_TURN_RECEIPT_LIMIT = 256
 export const REQUEST_LIMIT = REQUEST_AUDIT_LIMIT
 export const FACT_LIMIT = 256
 const hash = text => createHash('sha256').update(text).digest('hex')
@@ -278,6 +279,38 @@ const receiptValid = row => isPlainObject(row)
   && (row.source === null || (isPlainObject(row.source) && hex64(row.source.routeId)))
   // EVOLUTION016: per-turn feedback identity. Old receipts have NO array and keep loading; a
   // 4-offer turn can carry at most 12 (entry,version,kind) rows.
+  && (row.methodFeedback === undefined
+    || (Array.isArray(row.methodFeedback) && row.methodFeedback.length <= METHOD_FEEDBACK_LIMIT
+      && row.methodFeedback.every(methodFeedbackValid)
+      && new Set(row.methodFeedback.map(x => `${x.entryId}\u0000${x.version}\u0000${x.kind}`)).size
+        === row.methodFeedback.length))
+
+const midTurnReceiptValid = row => isPlainObject(row)
+  && Object.keys(row).every(key => ['id', 'turnKey', 'at', 'step', 'messageSeq', 'promptSeq',
+    'promptHash', 'bytes', 'contextTokens', 'budgetUnit', 'budgetLimit', 'offered',
+    'methodFeedback'].includes(key))
+  && hex64(row.id) && hex64(row.turnKey) && Number.isFinite(row.at)
+  && Number.isSafeInteger(row.step) && row.step >= 1
+  && Number.isSafeInteger(row.messageSeq) && row.messageSeq >= 0
+  && Number.isSafeInteger(row.promptSeq) && row.promptSeq > row.messageSeq
+  && hex64(row.promptHash)
+  && Number.isSafeInteger(row.bytes) && row.bytes >= 0 && row.bytes <= MAX_RECALL_LINE_BYTES * MAX_RECALL_TOTAL
+  && (row.budgetUnit === undefined
+    ? row.contextTokens === undefined && row.budgetLimit === undefined && row.bytes <= 1536
+    : row.budgetUnit === RECALL_TOKEN_UNIT
+      ? Number.isSafeInteger(row.budgetLimit) && row.budgetLimit >= 128 && row.budgetLimit <= 1024
+        && Number.isSafeInteger(row.contextTokens) && row.contextTokens >= 0
+        && row.contextTokens <= row.budgetLimit
+      : row.budgetUnit === 'bytes' && row.contextTokens === undefined
+        && Number.isSafeInteger(row.budgetLimit) && row.budgetLimit >= 128 && row.budgetLimit < 768
+        && row.bytes <= row.budgetLimit)
+  && Array.isArray(row.offered) && row.offered.length > 0 && row.offered.length <= 3
+  && row.offered.every(x => isPlainObject(x) && entryHex(x.id) && Number.isSafeInteger(x.version)
+    && x.version >= 1 && ['method', 'guard'].includes(x.mode)
+    && Object.keys(x).every(key => ['id', 'version', 'mode'].includes(key)))
+  && row.offered.filter(x => x.mode === 'method').length <= 2
+  && row.offered.filter(x => x.mode === 'guard').length <= 1
+  && new Set(row.offered.map(x => `${x.id}\u0000${x.version}\u0000${x.mode}`)).size === row.offered.length
   && (row.methodFeedback === undefined
     || (Array.isArray(row.methodFeedback) && row.methodFeedback.length <= METHOD_FEEDBACK_LIMIT
       && row.methodFeedback.every(methodFeedbackValid)
@@ -751,7 +784,7 @@ const recallStrategyValid = state => isPlainObject(state)
 const defaultRecallStrategy = () => ({ generation: 0, rows: [], adaptive: defaultAdaptiveRecall() })
 
 export function createDoc() {
-  return { format: MEMORY_FORMAT, updatedAt: 0, entries: [], receipts: [], requests: [], turnFacts: [],
+  return { format: MEMORY_FORMAT, updatedAt: 0, entries: [], receipts: [], midTurnReceipts: [], requests: [], turnFacts: [],
     materials: [], checkEvents: [], routes: [], corrections: [], methodHistory: [],
     recallStrategy: defaultRecallStrategy(),
     controls: { userPaused: false },
@@ -765,6 +798,12 @@ export function validateDoc(doc) {
     throw new LearningError('invalid_memory')
   }
   if (!Array.isArray(doc.receipts) || doc.receipts.length > RECEIPT_LIMIT || !doc.receipts.every(receiptValid)) {
+    throw new LearningError('invalid_memory')
+  }
+  if (doc.midTurnReceipts === undefined) doc.midTurnReceipts = []
+  if (!Array.isArray(doc.midTurnReceipts) || doc.midTurnReceipts.length > MID_TURN_RECEIPT_LIMIT
+    || !doc.midTurnReceipts.every(midTurnReceiptValid)
+    || new Set(doc.midTurnReceipts.map(row => row.id)).size !== doc.midTurnReceipts.length) {
     throw new LearningError('invalid_memory')
   }
   if (!Array.isArray(doc.turnFacts) || doc.turnFacts.length > FACT_LIMIT || !doc.turnFacts.every(factValid)) {
