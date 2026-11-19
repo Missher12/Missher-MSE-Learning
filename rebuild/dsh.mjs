@@ -437,6 +437,7 @@ export function apply(ctx, config = {}) {
   }
   let dailyHour = 23
   let wakeMs = 10 * 60_000
+  let wakeTimer = null
   const refreshSettings = () => {
     const provider = setting('modelProvider', null)
     const model = setting('modelId', null)
@@ -457,7 +458,11 @@ export function apply(ctx, config = {}) {
     engine.setSettingsEnabled(setting('enabled', true) === true
       && setting('reflectionEnabled', true) !== false)
     if (Number.isSafeInteger(setting('dailyHour', null))) dailyHour = setting('dailyHour', 23)
-    if (Number.isSafeInteger(setting('wakeIntervalMs', null))) wakeMs = setting('wakeIntervalMs', 600_000)
+    const interval = setting('wakeIntervalMs', 600_000)
+    if (Number.isSafeInteger(interval) && interval >= 60_000 && interval <= 3_600_000 && interval !== wakeMs) {
+      wakeMs = interval
+      if (wakeTimer !== null) scheduleWake()
+    }
     const bytes = setting('maxContextBytes', null)
     if (Number.isSafeInteger(bytes) && bytes >= 128 && bytes <= 1536) engine.maxContextBytes = bytes
   }
@@ -2093,9 +2098,16 @@ export function apply(ctx, config = {}) {
     }
   }
 
-  const timer = setInterval(() => { void wake().catch(() => {}) }, wakeMs)
-  timer.unref?.()
-  disposers.push(() => clearInterval(timer))
+  function scheduleWake() {
+    if (wakeTimer !== null) clearInterval(wakeTimer)
+    wakeTimer = setInterval(() => { void wake().catch(() => {}) }, wakeMs)
+    wakeTimer.unref?.()
+  }
+  scheduleWake()
+  disposers.push(() => { clearInterval(wakeTimer); wakeTimer = null })
+  disposers.push(ctx.on('loader/volatile-update', () => {
+    if (!disposed) refreshSettings()
+  }))
 
   if (typeof ctx.inject === 'function') {
     const commandFiber = ctx.inject(['commands'], commandCtx => commandCtx.commands.register({

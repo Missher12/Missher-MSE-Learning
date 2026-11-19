@@ -2,7 +2,7 @@
 
 ![MSE Learning · 持久学习（品牌插画）](docs/images/cover-v2.webp)
 
-MSE learns reusable corrections and failure lessons for DSH. **1.4.0** can propose up to two recall policies from a grounded miss and replay them on the same cases. A winner activates after two independent gains, two independent controls, and zero critical regressions. Matching objective failures trigger automatic rollback.
+MSE learns reusable corrections and failure lessons for DSH. In **1.4.2**, Self-evolution keeps the tabs in view, groups common settings, and puts detail in expandable rows. Recall policies activate or roll back based on observed evidence.
 
 Checks run one restricted snapshot through a native tool and require Python plus a host sandbox reporting full read-only enforcement. Exit code 0, hard-coded success, cancellation, stale versions, and unpaired results do not establish a pass. Other Python scripts and business contracts remain unverified.
 

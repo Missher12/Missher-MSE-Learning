@@ -92,6 +92,30 @@ test('C2 unexpected background wake errors remain observable without escaping in
   } finally { w.plugin.dispose() }
 })
 
+test('live idle interval changes replace the timer without dispatching background work', async t => {
+  const scheduled = []
+  const cleared = []
+  t.mock.method(globalThis, 'setInterval', (_callback, delay) => {
+    const timer = { delay, unref() {} }
+    scheduled.push(timer)
+    return timer
+  })
+  t.mock.method(globalThis, 'clearInterval', timer => cleared.push(timer))
+  let interval = 600_000
+  const w = extWiring(root(), [], { wakeIntervalMs: { get: () => interval } })
+  try {
+    assert.deepEqual(scheduled.map(timer => timer.delay), [600_000])
+    interval = 150_000
+    await w.emit('loader/volatile-update', [['wakeIntervalMs']])
+    assert.deepEqual(scheduled.map(timer => timer.delay), [600_000, 150_000])
+    assert.deepEqual(cleared, [scheduled[0]])
+    await w.emit('loader/volatile-update', [['modelId']])
+    assert.equal(scheduled.length, 2)
+    assert.equal(w.llmCalls.length, 0)
+  } finally { w.plugin.dispose() }
+  assert.deepEqual(cleared, scheduled)
+})
+
 test('corrections persist globally, recall across projects, scoped stays local, cap 2/768B', () => {
   const engine = new RebuildEngine({ stateRoot: root() })
   const saved = engine.recordCorrection({ text: '生成 JSON 时禁止尾随逗号，写完先跑 JSON.parse 校验',
@@ -1624,6 +1648,11 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
       assert.deepEqual(clientModule.__test.projectActivityWeeks(view.activity, 'total').at(-1).cumulativeCounts,
         { total: 185, rule: 92, lesson: 2, digest: 91 },
         'the final cumulative value includes the pre-window baseline and only new retained entries')
+    let settingsSnapshot = { status: 'ready', revision: 4, writable: true,
+      value: { enabled: true, wakeIntervalMs: 600_000, dailyHour: 23, maxContextBytes: 768 } }
+    let settingsChanged = () => {}
+    let waitingStatus = null
+    const writes = []
     const ctx = {
       effect(fn) { return typeof fn === 'function' ? fn() : undefined },
       locale: { register: () => true, getLocale: () => ({ active: 'zh' }) },
@@ -1636,9 +1665,17 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
         bindNamespacesReady = true
         return () => {}
       } },
-      configForms: { get: id => ({ id, getSnapshot: () => ({ status: 'ready', revision: 4,
-        value: { enabled: true, wakeIntervalMs: 600_000 } }), subscribe: () => () => {},
-      mutate: async () => true }),
+      configForms: { get: id => ({ id, getSnapshot: () => settingsSnapshot,
+        subscribe: fn => { settingsChanged = fn; return () => {} },
+        mutate: async (ops, revision) => {
+          assert.equal(revision, settingsSnapshot.revision)
+          const values = Object.fromEntries(ops.map(op => [op.path[0], op.value]))
+          writes.push(values)
+          settingsSnapshot = { ...settingsSnapshot, revision: revision + 1,
+            value: { ...settingsSnapshot.value, ...values } }
+          settingsChanged()
+          return true
+        } }),
         whileServed: (ids, cb) => {
           assert.ok(bindNamespacesReady, 'the section is only served after the real namespaces mount')
           const cleanup = cb()
@@ -1663,7 +1700,7 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
           },
           locale: ctx.locale,
           remote: {
-            mseRebuildStatus: { status: async () => ({ ok: true, value: { ok: true, view } }) },
+            mseRebuildStatus: { status: async () => waitingStatus ?? { ok: true, value: { ok: true, view } } },
             mseRebuildControl: { pause: async () => ({ ok: true, value: { ok: true, paused: true } }) },
           },
           configForms: ctx.configForms,
@@ -1688,6 +1725,15 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
     assert.equal(section.registered.spec.label(), '自我进化', 'findable Chinese sidebar label')
     assert.equal(detail.registered.spec.key, '@missher/dsh-mse-learning')
 
+    const walkUi = (node, visit) => {
+      if (Array.isArray(node)) { for (const kid of node) walkUi(kid, visit); return }
+      if (node !== null && typeof node === 'object') { visit(node); walkUi(node.children ?? [], visit) }
+    }
+    const findUi = (tree, predicate) => {
+      let found = null
+      walkUi(tree, node => { if (found === null && predicate(node)) found = node })
+      return found
+    }
     const setIntervalReal = globalThis.setInterval
     globalThis.setInterval = () => 0
     try {
@@ -1698,7 +1744,8 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
       await Promise.all(effectRuns)
       for (let tick = 0; tick < 12; tick += 1) await Promise.resolve() // let the async load settle
       cursor = 0
-      const overview = JSON.stringify(section.Page(props))
+      const overviewTree = section.Page(props)
+      const overview = JSON.stringify(overviewTree)
       assert.match(overview, /"h1","props":\{"key":"t"\},"children":\["自我进化"\]/u,
         'original title without 精简')
       assert.match(overview, /StateDot/u, 'the native status dot is back')
@@ -1707,8 +1754,51 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
       assert.match(overview, /Switch/u, 'the learning switch uses the host Switch control')
       assert.match(overview, /常规|经验|召回|任务|活动|用量\/学习状态/u, 'all six settings tabs')
       assert.match(overview, /演示日总结/u, 'daily summary shows the persisted host data')
-      assert.match(overview, /600000（约 10 分钟）/u,
-        'the interval keeps the raw ms field with a display-only readable minutes hint')
+      assert.doesNotMatch(overview, /600000|普通纠正何时保存|工作原理/u)
+      const input = (tree, label) => findUi(tree, node => node.type === 'Input' && node.props['aria-label'] === label)
+      const button = (tree, label) => findUi(tree, node => node.type === 'Button' && node.props['aria-label'] === label)
+      const menu = (tree, id) => findUi(tree, node => node.props['data-mse-picker'] === id)
+      const render = () => { cursor = 0; return section.Page(props) }
+      const change = (tree, label, value) => input(tree, label).props.onChange({ currentTarget: { value } })
+      assert.equal(input(overviewTree, '空闲检查间隔').props.value, '10')
+      change(overviewTree, '空闲检查间隔', '2.5')
+      await button(render(), '保存 · 空闲检查间隔').props.onClick()
+      await menu(render(), 'daily-hour').props.onSelect('9')
+      await menu(render(), 'recall-limit').props.onSelect('512')
+      change(render(), '服务商 ID', 'test-provider')
+      await button(render(), '保存 · 后台模型').props.onClick()
+      assert.equal(writes.length, 3, 'a partial model route never writes')
+      change(render(), '模型 ID', 'test-model')
+      menu(render(), 'reasoning-effort').props.onSelect('high')
+      await button(render(), '保存 · 后台模型').props.onClick()
+      assert.deepEqual(writes, [
+        { wakeIntervalMs: 150_000 }, { dailyHour: 9 }, { maxContextBytes: 512 },
+        { modelProvider: 'test-provider', modelId: 'test-model', reasoningEffort: 'high' },
+      ])
+      settingsSnapshot = { ...settingsSnapshot, value: { ...settingsSnapshot.value, reflectionEnabled: false } }
+      settingsChanged()
+      const disabledLearning = render()
+      const learningSwitch = findUi(disabledLearning, node => node.type === 'Switch')
+      assert.equal(learningSwitch.props.label, '自动学习')
+      assert.equal(learningSwitch.props.checked, false)
+      assert.match(JSON.stringify(disabledLearning), /已关闭/u)
+      await learningSwitch.props.onChange(true)
+      assert.deepEqual(writes.at(-1), { reflectionEnabled: true })
+
+      const refreshButton = tree => findUi(tree, node => node.props.className === 'mse-heading-action')
+      let finishStatus
+      waitingStatus = new Promise(resolve => { finishStatus = resolve })
+      refreshButton(overviewTree).props.onClick()
+      const refreshing = render()
+      assert.equal(refreshButton(refreshing).props.disabled, true, 'one refresh can run at a time')
+      assert.match(JSON.stringify(refreshing), /演示日总结/u, 'refresh keeps the last rendered data')
+      finishStatus({ ok: false, code: 'temporary_read_failure' })
+      for (let tick = 0; tick < 12; tick += 1) await Promise.resolve()
+      const stale = JSON.stringify(render())
+      assert.match(stale, /上次数据/u, 'temporary read failure labels the previous data')
+      assert.match(stale, /演示日总结/u, 'temporary read failure does not replace the current panel')
+      waitingStatus = null
+      for (let tick = 0; tick < 12; tick += 1) await Promise.resolve()
 
     const healthyView = view
     view = { storage: { available: false, reason: 'invalid_memory' } }
@@ -1810,8 +1900,8 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
         + 'never on unknown cost, never after a saved success')
       assert.match(tasksTree, /已知费用的截断仅自动重试一次/u,
         'the copy states the single known-cost truncation retry')
-      assert.match(tasksTree, /未知费用不重发，审计重试需人工操作/u,
-        'unknown-cost calls are not resent and audited retries require a manual action')
+      assert.match(tasksTree, /未知费用不重发/u)
+      assert.match(tasksTree, /重试可能计费/u)
 
       // (5b) 活动页以 53/54 周响应式方格展示全年；数字仅留在无障碍名称与所选统计中。
       const renderActivity = async activity => {
@@ -1825,15 +1915,6 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
         for (let tick = 0; tick < 12; tick += 1) await Promise.resolve()
         cursor = 0
         return section.Page(activityProps)
-      }
-      const walkUi = (node, visit) => {
-        if (Array.isArray(node)) { for (const kid of node) walkUi(kid, visit); return }
-        if (node !== null && typeof node === 'object') { visit(node); walkUi(node.children ?? [], visit) }
-      }
-      const findUi = (tree, predicate) => {
-        let found = null
-        walkUi(tree, node => { if (found === null && predicate(node)) found = node })
-        return found
       }
       const selected53 = await renderActivity(view.activity)
       assert.equal(typeof clientModule.__test.projectActivityWeeks, 'function',
@@ -2088,8 +2169,8 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
       }
       assert.match(usageTree, /"children":\["1"\]/u, 'saved count renders as its own aligned number')
       assert.match(usageTree, /"children":\["2"\]/u, 'pending count renders as its own aligned number')
-      assert.match(usageTree, /可复用纠正会在空闲时整理为长期规则/u, 'one short readable explanation line')
-      assert.match(usageTree, /保存规则说明/u, 'the full judgement stays readable in an expansion')
+      assert.match(usageTree, /保存规则说明/u)
+      assert.match(usageTree, /临时要求只留回合记录/u)
       assert.match(usageTree, /通用空话被拒绝/u)
       assert.match(usageTree, /忽略原因/u)
       // UI-DECISION-DEFECT: the real Panel branch/React tree must render decision TEXT, never
@@ -2142,8 +2223,8 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
           title: span.props.title, text: (span.children ?? []).join('') }))))
       }
       assert.match(usageTree, /现存规则与经验/u)
-      assert.match(usageTree, /按当前现存经验统计，不是全历史总量/u, 'totals are honestly scoped')
-      assert.match(usageTree, /查看经验列表/u, 'a real navigation to the lessons tab')
+      assert.match(usageTree, /"现存经验"/u, 'the section scopes the displayed totals to retained entries')
+      assert.match(usageTree, /查看经验/u, 'a real navigation to the lessons tab')
       // MSE18: the "最近规则变更" audit is LONG TEXT and must render as full-width ordinary
       // information rows — normal body size for #id and v1→停用, muted second line — never a
       // 1/3-width metric card with the whole string as a giant stat value.
@@ -2163,10 +2244,10 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
         assert.ok(JSON.stringify(revRow).includes('mse-row-title') && JSON.stringify(revRow).includes('mse-hint'),
           'normal body size + muted second line on existing classes')
       }
-      assert.match(usageTree, /调用用量（近 24 小时）/u, 'the 24h audit sits lower but stays complete')
+      assert.match(usageTree, /近 24 小时用量/u, 'the 24h audit sits lower but stays complete')
       assert.match(usageTree, /请求总数/u)
-      assert.match(overview, /更多信息/u, 'the 常规 tab carries the more-info disclosures')
-      assert.match(overview, /工作原理/u)
+      assert.match(overview, /更多信息/u, 'help stays available in one disclosure')
+      assert.match(overview, /已有经验仍可召回/u)
     } finally {
       globalThis.setInterval = setIntervalReal
     }

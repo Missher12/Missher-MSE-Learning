@@ -1,14 +1,5 @@
 /**
- * mse-learning (rebuilt) · 浏览器面板 —— 用户原设计（adapters/dsh/client.js 的布局、组件与交互）
- *
- * 视觉与结构按原实现恢复：宿主自己的设置组件（Button/Switch/SegmentedTabs/Input/Menu/StateDot/
- * 图标，来自平台静态模块表）、原 STYLE（同一字号/行高/16px 行距/0.5px 发丝分隔/折叠详情/窄屏
- * compact Picker 选项卡与 media query）、原 settingsTabNavigation 六页（常规、经验、召回、任务、
- * 学习状态、活动）、原 row/disclosure/definition/metric/Picker 原语、原生状态点与刷新按钮。
- * 内部只接精简新引擎：状态经 `mseRebuildStatus`（网关 RemoteResult {ok,value} 套宿主业务
- * {ok:true,view}，两层都解，失败绝不显示假状态），暂停/审计重试经 `mseRebuildControl`，设置开关
- * 走真实 ConfigForm（getSnapshot/subscribe + mutate(ops, revision) 修订栅栏，失败可读回滚）。
- * 不恢复预算、配额、付费评测或旧评测链；打开任何页面都不发起模型请求。
+ * MSE 的原生设置页和插件详情。设置通过宿主 ConfigForm 写入，学习状态由 Remote 读取。
  */
 window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (require) => {
   const React = require('react')
@@ -48,14 +39,14 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       'MseRebuildControlRequest', 'MseRebuildControlResult')) }
 
   const zh = {
-    settingsTitle: '自我进化', runtimeGroup: '运行设置',
+    settingsTitle: '自我进化', runtimeGroup: '学习', scheduleGroup: '调度与召回',
     tabOverview: '常规', tabLessons: '经验', tabRecall: '召回', tabTasks: '任务', tabUsage: '学习状态',
     tabActivity: '活动',
     activityTitle: '活动', activityToday: '今天新增', activityWeek: '本周新增',
     activityRetained: '当前保留', activityEntries: '条', activityDay: '每日', activityWeekMode: '每周',
     activityTotal: '累计', activityChart: '活动热力图',
     activityRule: '规则', activityLesson: '经验', activityDigest: '总结',
-    activityHistoryNote: '按当前保留记录的创建时间统计；已删除归档无法补算。',
+    activityHistoryNote: '按保留记录的创建时间统计。',
     activityDetails: '统计口径', activityImported: '导入记录', activityUnknown: '创建时间无效',
     activityFuture: '未来记录（未计入新增）', activityBeforeWindow: '一年窗口前',
     activityCumulativeThrough: '累计至', activityColorLabel: '活动配色', activityColorMenu: '配色',
@@ -72,8 +63,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     adaptiveControl: '无关对照', adaptiveBlockers: '当前原因', adaptiveSuccessor: '已有新版后继，旧版证据不计入。',
     adaptiveTargetCurrent: '当前版本', adaptiveTargetChanged: '版本已变化', adaptiveTargetRetired: '已停用',
     adaptiveTargetRevision: '待修订',
-    refresh: '刷新', refreshing: '读取中…', loading: '读取中…',
-    statusUnreadable: '状态不可读', loadFailed: '读取失败',
+    refresh: '刷新', loading: '读取中…',
+    statusUnreadable: '状态不可读', lastRead: '上次数据',
     storageInvalidMemory: '学习库内容校验失败，已暂停读写与后台学习。',
     storageInvalidStore: '学习库文件或目录不安全，已暂停读写与后台学习。',
     storageUnavailable: '学习库当前不可读写，后台学习已暂停。',
@@ -81,20 +72,22 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     storageDurability: '最近一次写入已提交，但持久化尚未确认。',
     storageBusy: '另一进程正在写入，本次写入已跳过。',
     storageWarning: '学习库状态',
-    effectiveRunning: '运行中', effectivePaused: '已暂停',
-    learning: '学习开关', learningHint: '关闭后停止后台复盘、每日总结与纠正提取。',
-    enabledOn: '已开启', enabledOff: '已关闭',
-    pauseControl: '后台任务', pauseHint: '暂停仅停止后台任务；前台采集与召回继续。',
+    effectiveRunning: '运行中', effectivePaused: '已暂停', effectiveOff: '已关闭',
+    learning: '自动学习', pauseControl: '后台任务',
     pause: '暂停', resume: '恢复',
-    settingsSaveFailed: '设置未保存，已重新读取真实状态。',
-    wakeInterval: '空闲触发间隔（毫秒）', wakeSave: '保存',
-    dailySection: '最近每日总结', dailyHint: '每日总结在空闲时运行。',
-    moreSection: '更多信息',
-    moreHowTitle: '工作原理', moreHow: '前台只记录可信用户消息与真实工具结果；反思、修订、每日总结和纠正提取都在空闲后台槽运行，打开本页不发起模型请求。',
-    moreSaveTitle: '普通纠正何时保存', moreSave: '明确表达长期意图且非临时任务要求的纠正才直接长期保存；普通纠正先入持久审计队列，再经提取门做原话核对、否定保留与范围核对，确认可复用才长期保存——「别再」不是无条件全局保存；一次性调整和不确定的只留回合事实，忽略原因可读，不会伪装成已保存。',
-    moreScopeTitle: '作用范围', moreScope: '全局经验跨项目注入；带「仅本项目/仓库/文件」条件的规则只在本项目注入，不会外泄。',
-    moreCheckTitle: '检查边界', moreCheck: '只跑本次改动影响的检查，不重复运行已经通过的测试；未知费用的调用不会自动重发。',
-    entriesSection: '规则与经验', entriesHint: '规则来自明确纠正；失败经验需独立观察与具体证据。',
+    settingsSaveFailed: '保存失败，请重试。', saveSetting: '保存', cancelSetting: '取消',
+    wakeInterval: '空闲检查间隔', minuteUnit: '分钟', invalidWake: '请输入 1–60 分钟。',
+    dailyHour: '每日总结时间', dailyLocalTime: '本机时间，空闲时运行',
+    recallBytes: '单次召回上限',
+    modelSettings: '后台模型', modelFromSource: '随来源会话', modelProvider: '服务商 ID',
+    modelId: '模型 ID', reasoningEffort: '推理强度', defaultEffort: '默认',
+    effortLow: '低', effortMedium: '中', effortHigh: '高',
+    invalidModel: '请同时填写服务商 ID 和模型 ID，或将两项留空。',
+    modelLimit: '服务商最多 32 字符，模型最多 64 字符。',
+    modelNote: '两项留空时跟随来源会话。后台调用可能计费。',
+    dailySection: '每日总结', moreSection: '更多信息',
+    moreHow: '关闭或暂停学习后，已有经验仍可召回。',
+    entriesSection: '规则与经验',
     filterType: '类型', filterStatus: '状态', allOption: '全部',
     typeRule: '用户规则', typeLesson: '失败经验', typeDigest: '每日总结',
     statusActive: '生效', statusSuperseded: '已被新版取代',
@@ -106,10 +99,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     windowInjected: '本版注入', windowChecks: '本版检查通过/失败',
     recentRevisionLabel: '最近修订原因', recentRevisionNone: '暂无修订',
     modeGuard: '警示', modeMethod: '方法', modeLegacy: '旧格式回执',
-    recallSection: '注入记录', recallHint: '历史回执可展开。',
+    recallSection: '注入记录',
     offeredVersions: '提供版本', outcomeUnknown: '未判定', outcomeCompleted: '完成', outcomeAborted: '中止',
     outcomeVerified: '检查通过', outcomeFailed: '存在失败', outcomeCancelled: '已取消',
-    rsiSection: '自适应召回', rsiHint: '展开候选可查看依据。',
     rsiPersisted: '最近持久化决定', rsiRuntime: '最近运行记录', rsiNone: '暂无记录',
     rsiStageAdmission: '来源检查', rsiStageProbe: '探针', rsiStageToolResult: '工具结果',
     rsiStagePending: '待结算', rsiStageSettled: '回合结算',
@@ -137,30 +129,29 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     rsiReasonRevisionLimit: '策略修订次数已满', rsiReasonSameMechanism: '修订机制重复',
     rsiReasonCounterexampleChild: '反例修订已建立',
     settledYes: '已结算', settledNo: '在途', historicalEntry: '历史经验', fullId: '完整标识',
-    summaryLabel: '摘要', fullText: '完整原文', requestLabel: '请求标识', rawCode: '原始结果码',
-    tasksSection: '后台请求', tasksHint: '未知费用的请求不会自动重发。',
+    summaryLabel: '摘要', requestLabel: '请求标识', rawCode: '原始结果码',
+    tasksSection: '后台请求', retryGuide: '重试规则',
+    tasksHint: '已知费用的截断仅自动重试一次。未知费用不重发。',
     inFlightNow: '在途', waitReasonLine: '等待原因', unknownCostHeld: '未知费用保留',
     taskKindReflect: '反思', taskKindRevise: '修订', taskKindDigest: '每日总结', taskKindExtract: '纠正提取',
     taskStatusSettled: '已结算', taskStatusRunning: '在途',
     usageTokens: '已知 tokens', usageCalls: '调用', usageUnknownCost: '未知费用',
     usageTotalRequests: '请求总数', usageSettled: '已结算',
-    usageAuditSection: '调用用量（近 24 小时）', usageAuditNote: '按类型统计真实调用与 tokens；未测量的调用不计入 0。',
+    usageAuditSection: '近 24 小时用量',
     correctionsSection: '纠正提取',
-    collectionSection: '采集范围', collectionScopeTitle: '工作区与跳过原因（只读）',
+    collectionScopeTitle: '采集范围',
     collectionWorkspaces: '注册工作区', collectionSkipped: '最近跳过', collectionNone: '无跳过记录',
     collectionUnknown: '未知', revisionsSection: '最近规则变更', revisionRetired: '停用',
     revisionNone: '暂无规则变更',
-    correctionsShort: '可复用纠正会在空闲时整理为长期规则。',
     correctionsFullTitle: '保存规则说明',
-    correctionsFull: '明确表达长期意图且非临时任务要求的纠正才直接长期保存；普通纠正先入持久审计队列，再经提取门做原话核对、否定保留与范围核对，确认可复用才长期保存——「别再」不是无条件全局保存；一次性调整和不确定的只留回合事实，忽略原因可读，不会伪装成已保存。',
+    correctionsFull: '可复用纠正在核对原话和范围后保存。临时要求只留回合记录。',
     saved: '已保存', pendingCorr: '待处理', dispatchedCorr: '提取中', ignoredReasons: '忽略原因',
     correctionsDecision: '最近决定', corrDurable: '长期', corrOneOff: '临时', corrUncertain: '长期性不明',
     corrGlobal: '全局', corrProject: '项目', corrScopeUnknown: '范围不明',
     corrSaved: '保存', corrIgnored: '忽略', corrContextOmitted: '上下文省略',
     existingSection: '现存经验', existingCount: '现存规则与经验', existingInjected: '注入合计',
-    existingRecurrences: '复发合计', existingScopeNote: '按当前现存经验统计，不是全历史总量。',
-    goLessons: '查看经验列表',
-    auditedRetry: '审计重试', auditedRetryHint: '已知费用的截断仅自动重试一次；未知费用不重发，审计重试需人工操作。',
+    existingRecurrences: '复发合计', goLessons: '查看经验',
+    auditedRetry: '审计重试', auditedRetryHint: '重试可能计费。',
     noEntries: '暂无经验。', noRecall: '暂无注入记录。', noTasks: '暂无后台请求。',
     lastSummaryLine: '总结', dailyState: '每日状态', lastDoneDay: '最后完成日', backlogDays: '待补日',
     dailyPartialLine: '部分完成（未核验来源的事实已安全排除）', dailyExcludedLine: '排除',
@@ -170,31 +161,31 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     daysProcessed: '已处理日', none: '无',
   }
   const en = {
-    settingsTitle: 'Self-evolution', runtimeGroup: 'Runtime settings',
+    settingsTitle: 'Self-evolution', runtimeGroup: 'Learning', scheduleGroup: 'Schedule and recall',
     tabOverview: 'Overview', tabLessons: 'Lessons', tabRecall: 'Recall', tabTasks: 'Tasks',
-    tabUsage: 'Learning', tabActivity: 'Activity', refresh: 'Refresh', refreshing: 'Loading…', loading: 'Loading…',
-    statusUnreadable: 'Status unavailable', loadFailed: 'Could not load',
+    tabUsage: 'Learning', tabActivity: 'Activity', refresh: 'Refresh', loading: 'Loading…',
+    statusUnreadable: 'Status unavailable', lastRead: 'Last read',
     storageInvalidMemory: 'Memory validation failed. Writes and background learning are paused.',
     storageInvalidStore: 'Memory path is unsafe. Writes and background learning are paused.',
     storageUnavailable: 'Memory is unavailable. Background learning is paused.',
     storageCapacity: 'Memory is full. Existing data is kept; new entries are on hold.',
     storageDurability: 'The latest write committed, but durability is unconfirmed.',
     storageBusy: 'Another process is writing. This write was skipped.', storageWarning: 'Memory status',
-    effectiveRunning: 'Running', effectivePaused: 'Paused', learning: 'Learning',
-    learningHint: 'Off stops background reflection, daily summaries, and correction extraction.',
-    enabledOn: 'On', enabledOff: 'Off', pauseControl: 'Background work',
-    pauseHint: 'Pause stops background work; foreground collection and recall continue.',
-    pause: 'Pause', resume: 'Resume', settingsSaveFailed: 'Settings were not saved; current state was reloaded.',
-    wakeInterval: 'Idle interval (ms)', wakeSave: 'Save', dailySection: 'Latest daily summary',
-    dailyHint: 'Daily summaries run while idle.',
-    moreSection: 'Details', moreHowTitle: 'How it works',
-    moreHow: 'Foreground events record trusted user messages and tool results. Reflection, revision, summaries, and correction extraction run in idle background slots. Opening this page makes no model calls.',
-    moreSaveTitle: 'When corrections are saved',
-    moreSave: 'Only explicit, reusable corrections are saved as rules. Other corrections are audited and checked against the original wording, negation, and scope first. One-off or uncertain changes remain turn facts.',
-    moreScopeTitle: 'Scope', moreScope: 'Global rules can be recalled across projects. Project-specific rules stay within that project.',
-    moreCheckTitle: 'Checks', moreCheck: 'Only checks relevant to the change are run. Calls with unknown cost are never replayed automatically.',
+    effectiveRunning: 'Running', effectivePaused: 'Paused', effectiveOff: 'Off',
+    learning: 'Automatic learning', pauseControl: 'Background work', pause: 'Pause', resume: 'Resume',
+    settingsSaveFailed: 'Save failed. Try again.', saveSetting: 'Save',
+    cancelSetting: 'Cancel', wakeInterval: 'Idle check interval', minuteUnit: 'min',
+    invalidWake: 'Enter 1–60 minutes.', dailyHour: 'Daily summary time',
+    dailyLocalTime: 'Local time, while idle', recallBytes: 'Recall limit',
+    modelSettings: 'Background model', modelFromSource: 'Source session', modelProvider: 'Provider ID',
+    modelId: 'Model ID', reasoningEffort: 'Reasoning effort', defaultEffort: 'Default',
+    effortLow: 'Low', effortMedium: 'Medium', effortHigh: 'High',
+    invalidModel: 'Enter both IDs or leave both blank.',
+    modelLimit: 'Provider IDs are limited to 32 characters, model IDs to 64.',
+    modelNote: 'Leave both IDs blank to use the source session. Background calls may incur charges.',
+    dailySection: 'Daily summary', moreSection: 'Details',
+    moreHow: 'Existing lessons are still recalled when learning is paused or off.',
     entriesSection: 'Rules and lessons',
-    entriesHint: 'Rules come from explicit corrections; lessons need independent observations and concrete evidence.',
     filterType: 'Type', filterStatus: 'Status', allOption: 'All', typeRule: 'User rule',
     typeLesson: 'Lesson', typeDigest: 'Daily summary', statusActive: 'Active', statusSuperseded: 'Superseded',
     version: 'Version', scope: 'Scope', scopeGlobal: 'Global', scopeScoped: 'This project',
@@ -205,11 +196,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     windowInjected: 'Current version offers', windowChecks: 'Current version checks (pass/fail)',
     recentRevisionLabel: 'Latest revision', recentRevisionNone: 'No revisions',
     modeGuard: 'Warning', modeMethod: 'Method', modeLegacy: 'Legacy receipt', recallSection: 'Recall receipts',
-    recallHint: 'Expand past receipts when needed.', offeredVersions: 'Versions offered',
+    offeredVersions: 'Versions offered',
     outcomeUnknown: 'Unknown', outcomeCompleted: 'Completed', outcomeAborted: 'Aborted',
     outcomeVerified: 'Verified', outcomeFailed: 'Failed', outcomeCancelled: 'Cancelled',
-    rsiSection: 'Adaptive recall',
-    rsiHint: 'Expand a candidate for its evidence.',
     rsiPersisted: 'Recent saved decisions', rsiRuntime: 'Recent runtime events', rsiNone: 'No records',
     rsiStageAdmission: 'Source check', rsiStageProbe: 'Probe', rsiStageToolResult: 'Tool result',
     rsiStagePending: 'Pending', rsiStageSettled: 'Settled', rsiResultCreated: 'Policy created',
@@ -236,29 +225,28 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     rsiReasonStrategyDisabled: 'Strategy disabled', rsiReasonRevisionLimit: 'Revision limit reached',
     rsiReasonSameMechanism: 'Repeated revision mechanism', rsiReasonCounterexampleChild: 'Counterexample revision created',
     settledYes: 'Settled', settledNo: 'In progress', historicalEntry: 'Historical lesson', fullId: 'Full ID',
-    summaryLabel: 'Summary', fullText: 'Full text', requestLabel: 'Request ID', rawCode: 'Result code',
-    tasksSection: 'Background requests',
-    tasksHint: 'Unknown-cost calls are never replayed automatically.',
+    summaryLabel: 'Summary', requestLabel: 'Request ID', rawCode: 'Result code',
+    tasksSection: 'Background requests', retryGuide: 'Retry rules',
+    tasksHint: 'One automatic retry for known-cost truncation. Unknown-cost calls stay on hold.',
     inFlightNow: 'In flight', waitReasonLine: 'Waiting', unknownCostHeld: 'Unknown cost held',
     taskKindReflect: 'Reflection', taskKindRevise: 'Revision', taskKindDigest: 'Daily summary',
     taskKindExtract: 'Correction extraction', taskStatusSettled: 'Settled', taskStatusRunning: 'In progress',
     usageTokens: 'Known tokens', usageCalls: 'Calls', usageUnknownCost: 'Unknown cost',
     usageTotalRequests: 'Requests / settled', usageSettled: 'settled',
-    usageAuditSection: 'Usage (last 24 hours)', usageAuditNote: 'Counts reflect measured calls and tokens; unmeasured usage is not shown as zero.',
-    correctionsSection: 'Correction extraction', collectionSection: 'Collection',
-    collectionScopeTitle: 'Workspaces and skips', collectionWorkspaces: 'Registered workspaces',
+    usageAuditSection: 'Usage (last 24 hours)',
+    correctionsSection: 'Correction extraction',
+    collectionScopeTitle: 'Collection scope', collectionWorkspaces: 'Registered workspaces',
     collectionSkipped: 'Recently skipped', collectionNone: 'No skipped events', collectionUnknown: 'Unknown',
     revisionsSection: 'Recent rule changes', revisionRetired: 'Retired', revisionNone: 'No rule changes',
-    correctionsShort: 'Reusable corrections are organized into rules while idle.',
-    correctionsFullTitle: 'Rule saving', correctionsFull: 'Only explicit, reusable corrections are saved as rules. Other corrections are checked against original wording, negation, and scope; one-off or uncertain changes remain turn facts.',
+    correctionsFullTitle: 'Rule saving', correctionsFull: 'Reusable corrections are checked for wording and scope. One-off requests stay with their turn.',
     saved: 'Saved', pendingCorr: 'Pending', dispatchedCorr: 'Extracting', ignoredReasons: 'Ignored because',
     correctionsDecision: 'Recent decisions', corrDurable: 'Reusable', corrOneOff: 'One-off',
     corrUncertain: 'Uncertain', corrGlobal: 'Global', corrProject: 'Project', corrScopeUnknown: 'Scope unknown',
     corrSaved: 'Saved', corrIgnored: 'Ignored', corrContextOmitted: 'Context omitted',
     existingSection: 'Retained entries', existingCount: 'Rules and lessons', existingInjected: 'Offers',
-    existingRecurrences: 'Recurrences', existingScopeNote: 'Counts cover currently retained entries only.',
-    goLessons: 'View lessons', auditedRetry: 'Audited retry',
-    auditedRetryHint: 'Known-cost truncation gets one automatic retry; unknown-cost calls are not resent, audited retries require a manual action.',
+    existingRecurrences: 'Recurrences', goLessons: 'View lessons',
+    auditedRetry: 'Audited retry',
+    auditedRetryHint: 'Retries may incur charges.',
     noEntries: 'No entries.', noRecall: 'No recall receipts.', noTasks: 'No background requests.',
     lastSummaryLine: 'Summary', dailyState: 'Daily status', lastDoneDay: 'Last completed day',
     backlogDays: 'Days pending', dailyPartialLine: 'Partial; unverified facts were excluded',
@@ -595,21 +583,34 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const one = String(text ?? '').replace(/\s+/gu, ' ').trim()
     return one.length <= max ? one : `${one.slice(0, max)}…`
   }
-  const minutesHint = ms => Number.isSafeInteger(ms) && ms > 0 ? `约 ${Math.round(ms / 60_000)} 分钟` : ''
   const atText = at => Number.isFinite(at) ? new Date(at).toLocaleString('zh-CN', { hour12: false }) : '—'
 
-  // The original STYLE (adapters/dsh/client.js), general parts verbatim: same fonts, hairlines,
-  // row rhythm, disclosures, pickers and the narrow-screen media query. Only the removed
-  // budget/evaluation rules are gone; nothing here is new visual design.
   const STYLE = `
-.mse-details{display:flex;flex-direction:column;width:100%;min-width:0;color:var(--dsw-alias-label-primary);font-size:14px;line-height:22px}
+.mse-details{display:flex;flex-direction:column;width:100%;min-width:0;container-type:inline-size;color:var(--dsw-alias-label-primary);font-size:14px;line-height:22px}
 .mse-details *{box-sizing:border-box}
 .mse-details p{margin:0}
-.mse-details .mse-heading { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; flex-wrap: wrap; min-width: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
-.mse-details h1{margin:0;font-size:20px;line-height:28px;font-weight:600}
-.mse-details .mse-status{font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary);display:inline-flex;align-items:center;gap:6px;min-width:0}
-.mse-details .mse-heading-action{margin-left:auto}
-.mse-details .mse-pane{display:flex;flex-direction:column;min-width:0}
+.mse-details[data-mse-surface="settings"]{height:100%;min-height:0}
+.mse-details .mse-toolbar{flex:none;padding:3px 2px 12px}
+.mse-details .mse-heading{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px;min-height:36px;margin-bottom:12px}
+.mse-details .mse-heading-title{display:flex;align-items:center;gap:10px;min-width:0}
+.mse-details h1{margin:0;font-size:20px;line-height:28px;font-weight:600;white-space:nowrap}
+.mse-details .mse-status{display:inline-flex;align-items:center;gap:5px;min-width:0;padding:2px 8px;border-radius:999px;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);font-size:12px;line-height:18px}
+.mse-details .mse-status span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mse-details .mse-status[data-unavailable="true"]{color:var(--dsw-alias-state-error-primary)}
+.mse-details .mse-heading-action{min-width:64px}
+.mse-details .mse-pane{min-width:0;padding:4px 2px 8px}
+.mse-details .mse-pane:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px;border-radius:8px}
+.mse-details[data-mse-surface="settings"]>.mse-pane{flex:1 1 auto;min-height:0;overflow-y:auto;scrollbar-gutter:stable;overscroll-behavior-y:contain}
+.mse-details .mse-pane>.mse-section-title:first-child{margin-top:2px}
+.mse-details .mse-panel-message,.mse-details .mse-empty{padding:12px 14px;border-radius:10px;background:var(--dsw-alias-bg-module-platform)}
+.mse-details .mse-empty{color:var(--dsw-alias-label-secondary);font-size:13px}
+.mse-details .mse-panel-message{margin-bottom:12px}
+.mse-details .mse-control-list{border:1px solid var(--dsw-alias-border-l2);border-radius:12px;padding:0 14px;background:var(--dsw-alias-bg-layer-3)}
+.mse-details .mse-settings>.mse-section-title{margin:16px 0 6px;font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary)}
+.mse-details .mse-settings>.mse-section-title:first-child{margin-top:0}
+.mse-details .mse-settings>.mse-control-list+.mse-control-list{margin-top:12px}
+.mse-details .mse-control-list>.mse-row,.mse-details .mse-control-list>.mse-disclosure>summary{min-height:46px;padding-block:8px}
+.mse-details .mse-control-list>.mse-disclosure:last-child{border-bottom:0}
 .mse-details .mse-row { display: flex; gap: 20px; align-items: center; padding: 10px 0; border-bottom: 0.5px solid var(--dsw-alias-border-l2); min-width: 0; }
 .mse-details .mse-row-top{align-items:flex-start}
 .mse-details .mse-row-stacked{display:block}
@@ -619,10 +620,19 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-row-title{font-weight:400;line-height:22px;overflow-wrap:anywhere}
 .mse-details .mse-hint{font-size:13px;color:var(--dsw-alias-label-secondary);line-height:22px;margin-top:4px;overflow-wrap:anywhere}
 .mse-details .mse-row-side{flex:none;min-width:0;display:flex;align-items:center;justify-content:flex-end;gap:8px;font-size:13px}
+.mse-details .mse-settings .mse-row-side{max-width:65%}
+.mse-details .mse-settings .mse-picker{width:7rem}
+.mse-details .mse-settings .mse-picker-trigger{width:100%}
+.mse-details .mse-setting-number{width:70px;min-width:0;font-variant-numeric:tabular-nums}
+.mse-details .mse-setting-text{width:218px;max-width:100%;min-width:0}
+.mse-details .mse-settings-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}
+.mse-details .mse-settings .mse-detail-body>.mse-hint{margin-top:8px}
 .mse-details .mse-unit{color:var(--dsw-alias-label-tertiary);font-size:12px}
-.mse-details .mse-section-title { margin: 28px 0 8px; font-size: 16px; line-height: 24px; color: var(--dsw-alias-label-primary); font-weight: 600; display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
-.mse-details .mse-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;padding:16px 0 20px;border-bottom:0.5px solid var(--dsw-alias-border-l2)}
-.mse-details .mse-metrics>div{padding:12px 14px;background:var(--dsw-alias-bg-module-platform);border-radius:8px;min-width:0;overflow-wrap:anywhere}
+.mse-details .mse-section-title{margin:20px 0 8px;font-size:15px;line-height:22px;color:var(--dsw-alias-label-primary);font-weight:600;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;min-width:0}
+.mse-details .mse-count{font-size:12px;font-weight:500;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary);padding-inline:7px;border-radius:8px;background:var(--dsw-alias-bg-module-platform)}
+.mse-details .mse-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));margin:0 0 8px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-3)}
+.mse-details .mse-metrics>div{padding:10px 12px;min-width:0;overflow-wrap:anywhere}
+.mse-details .mse-metrics>div+div{border-inline-start:1px solid var(--dsw-alias-border-l2)}
 .mse-details .mse-metrics-2{grid-template-columns:repeat(2,minmax(0,1fr))}
 .mse-details .mse-statline{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding:10px 0;font-size:13px;line-height:22px}
 .mse-details .mse-statline b{font-size:14px;font-weight:500;font-variant-numeric:tabular-nums}
@@ -631,7 +641,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-metric-value b{font-size:20px;line-height:28px;font-weight:500;font-variant-numeric:tabular-nums}
 .mse-details .mse-metric-value span{font-size:12px;color:var(--dsw-alias-label-tertiary)}
 .mse-details .mse-disclosure{border-bottom:0.5px solid var(--dsw-alias-border-l2);min-width:0}
-.mse-details .mse-disclosure>summary{list-style:none;display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;padding:16px 0;font-size:14px;line-height:22px}
+.mse-details .mse-disclosure>summary{list-style:none;display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer;padding:11px 0;font-size:14px;line-height:22px}
+.mse-details .mse-disclosure>summary:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px;border-radius:6px}
 .mse-details .mse-summary{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
 .mse-details .mse-meta{flex:none;display:inline-flex;gap:10px;align-items:center;font-size:12px;line-height:20px;color:var(--dsw-alias-label-secondary);white-space:normal;flex-wrap:wrap;justify-content:flex-end}
 .mse-details .mse-summary-stack{display:flex;flex-direction:column;gap:4px;align-items:flex-start}
@@ -640,7 +651,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-meta>span{white-space:nowrap}
 .mse-details .mse-detail-text{font-size:14px;line-height:22px;color:var(--dsw-alias-label-primary);margin-bottom:12px;overflow-wrap:anywhere;white-space:pre-line}
 .mse-details .mse-disclosure>summary::-webkit-details-marker{display:none}
-.mse-details .mse-chevron{transition:transform 150ms;width:14px;height:14px;flex:none;color:var(--dsw-alias-label-tertiary)}
+.mse-details .mse-chevron{width:14px;height:14px;flex:none;color:var(--dsw-alias-label-tertiary)}
 .mse-details .mse-disclosure[open]>summary .mse-chevron{transform:rotate(90deg)}
 .mse-details .mse-detail-body{padding:0 0 16px;min-width:0}
 .mse-details .mse-definition{display:grid;grid-template-columns:minmax(90px,auto) minmax(0,1fr);gap:10px 20px;margin:0;font-size:12px;line-height:20px}
@@ -654,16 +665,16 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-error{color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:20px;overflow-wrap:anywhere}
 .mse-details .mse-notice{color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px;min-height:20px;overflow-wrap:anywhere}
 .mse-details .mse-inline{display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-width:0}
+.mse-details .mse-lessons-heading{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,320px)}
+.mse-details .mse-filters{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;min-width:0}
+.mse-details .mse-filters .mse-picker,.mse-details .mse-filters .mse-picker-trigger{width:100%}
 .mse-details .mse-activity-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));margin:0;overflow:hidden;border:0.5px solid var(--dsw-alias-border-l2);border-radius:12px;background:var(--dsw-alias-bg-layer-3)}
 .mse-details .mse-activity-metric{display:flex;min-width:0;flex-direction:column;align-items:center;padding:8px 6px;text-align:center}
 .mse-details .mse-activity-metric+.mse-activity-metric{border-left:0.5px solid var(--dsw-alias-border-l2)}
 .mse-details .mse-activity-metric dt,.mse-details .mse-activity-metric dd{max-width:100%;margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mse-details .mse-activity-metric dd{font-size:14px;line-height:21px;font-weight:500;font-variant-numeric:tabular-nums}
-.mse-details .mse-activity-metric dd span{margin-left:3px;font-size:10px;font-weight:400;color:var(--dsw-alias-label-tertiary)}
 .mse-details .mse-activity-metric dt{font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary)}
-.mse-details .mse-activity-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:22px 0 16px;min-width:0}
-.mse-details .mse-activity-title{display:flex;align-items:center;gap:8px;min-width:0}
-.mse-details .mse-activity-title h3{margin:0;font-size:15px;line-height:22px;font-weight:500}
+.mse-details .mse-activity-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:14px 0;min-width:0}
 .mse-details .mse-activity-color-control{position:relative;display:flex;min-width:0}
 .mse-details .mse-activity-color-trigger{display:inline-flex;align-items:center;gap:5px;min-height:30px;padding:5px 8px;border:0;border-radius:999px;background:transparent;color:var(--dsw-alias-label-tertiary);font:inherit;font-size:11px;line-height:16px;cursor:pointer}
 .mse-details .mse-activity-color-trigger:hover,.mse-details .mse-activity-color-trigger[aria-expanded="true"]{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
@@ -698,21 +709,28 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-activity-months span{min-width:0;overflow:hidden;white-space:nowrap}
 .mse-details .mse-activity-months span.mse-activity-month-final{min-width:max-content;overflow:visible;justify-self:end}
 .mse-details .mse-activity-history{margin:0 0 12px;color:var(--dsw-alias-label-secondary);font-size:12px;line-height:20px;overflow-wrap:anywhere}
-@media(max-width:620px){
-.mse-details .mse-row { gap: 12px; padding: 10px 0; }
-.mse-details .mse-metrics{gap:8px}
-.mse-details .mse-metrics>div{padding:10px}
-.mse-details .mse-disclosure>summary{flex-wrap:wrap;gap:8px}
-.mse-details .mse-summary{flex-basis:calc(100% - 26px)}
-.mse-details .mse-meta{order:3;justify-content:flex-start;flex:1 1 100%}
-.mse-details .mse-definition{grid-template-columns:minmax(70px,auto) minmax(0,1fr);gap:8px 12px}
+@container(max-width:500px){
+.mse-details .mse-lessons-heading{grid-template-columns:minmax(0,1fr)}
 }
-@media(max-width:420px){
-.mse-details .mse-activity-header{align-items:flex-start;flex-direction:column;gap:8px}
+@container(max-width:450px){
+.mse-details .mse-row { gap: 12px; padding: 10px 0; }
+.mse-details .mse-metrics>div{padding:10px}
+.mse-details .mse-disclosure>summary>.mse-meta{max-width:45%}
+.mse-details .mse-meta>span{white-space:normal;overflow-wrap:anywhere}
+.mse-details .mse-definition{grid-template-columns:minmax(70px,auto) minmax(0,1fr);gap:8px 12px}
 .mse-details .mse-activity-grid,.mse-details .mse-activity-months{column-gap:2px}
+}
+@container(max-width:300px){
+.mse-details .mse-settings .mse-row{align-items:flex-start;flex-direction:column;gap:4px}
+.mse-details .mse-settings .mse-row-side{width:100%;max-width:100%;justify-content:flex-start}
+.mse-details .mse-setting-text{width:100%}
+.mse-details .mse-activity-header{flex-wrap:wrap;gap:6px}
 }
 .mse-details .mse-picker-trigger { position: relative; justify-content: center; padding-inline: 28px; }
 .mse-details .mse-picker-chevrons { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); }
+.mse-details .mse-picker-wide{width:100%}
+.mse-details .mse-tabs-host button[role="tab"][aria-haspopup="menu"]{width:100%;padding-inline:12px 32px}
+.mse-details .mse-tabs-host button[role="tab"][aria-haspopup="menu"] .mse-picker-label{text-align:left}
 .mse-details input:not([type=checkbox]) { text-align: center; line-height: 30px; }
 `
 
@@ -764,7 +782,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const selected = options.find(option => option.id === value) ?? options[0]
     const items = options.map(option => ({ id: option.id === '' ? '__default' : option.id, label: option.label }))
     return h(Menu, {
-      open, portal: true, compact: true, className: `mse-picker ${className}`.trim(),
+      open, portal: true, compact: true, align: 'end', minWidthFromAnchor: true,
+      className: `mse-picker ${className}`.trim(),
       'data-mse-picker': testId,
       anchor: h(Button, { ...triggerProps, variant: 'outline', size: 'sm', disabled, className: 'mse-picker-trigger',
         'aria-haspopup': 'menu', 'aria-expanded': open, 'aria-label': label,
@@ -781,15 +800,15 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     })
   }
 
-  function settingsTabNavigation(tab, onChange, dict, compact) {
+  function settingsTabNavigation(tab, onChange, dict, compact, idPrefix = 'mse') {
     if (compact) return h('div', { role: 'tablist', 'aria-label': dict.settingsTitle },
       h(Picker, { label: tabLabel(tab, dict), value: tab,
         options: TABS.map(id => ({ id, label: tabLabel(id, dict) })), onChange,
         testId: 'settings-tabs-compact', className: 'mse-picker-wide',
-        triggerProps: { id: `mse-tab-${tab}`, role: 'tab', 'aria-selected': true,
-          'aria-controls': `mse-pane-${tab}` } }))
+        triggerProps: { id: `${idPrefix}-tab-${tab}`, role: 'tab', 'aria-selected': true,
+          'aria-controls': `${idPrefix}-pane-${tab}` } }))
     return h(SegmentedTabs, { label: dict.settingsTitle, value: tab, onChange,
-      items: TABS.map(id => ({ value: id, id: `mse-tab-${id}`, panelId: `mse-pane-${id}`,
+      items: TABS.map(id => ({ value: id, id: `${idPrefix}-tab-${id}`, panelId: `${idPrefix}-pane-${id}`,
         label: tabLabel(id, dict) })) })
   }
 
@@ -809,9 +828,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
   }
 
   function useFormSnapshot(form) {
-    const [snapshot, setSnapshot] = React.useState(() => form === undefined ? null : form.getSnapshot())
+    const [snapshot, setSnapshot] = React.useState(() => form?.getSnapshot() ?? null)
     React.useEffect(() => {
-      if (form === undefined) return undefined
+      if (form === undefined || form === null) return undefined
       setSnapshot(form.getSnapshot())
       return form.subscribe(() => setSnapshot(form.getSnapshot()))
     }, [form])
@@ -888,6 +907,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const call = props.call
     const control = props.control
     const form = props.form
+    const surface = props.surface ?? 'settings'
+    const idPrefix = surface === 'settings' ? 'mse' : 'mse-bundle'
     const [tab, setTab] = React.useState(props.initialTab ?? 'overview')
     const [compactTabs, setCompactTabs] = React.useState(false)
     const tabsHost = React.useRef(null)
@@ -899,13 +920,19 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const [activityColor, setActivityColorState] = React.useState(readActivityColor())
     const [activityTooltip, setActivityTooltip] = React.useState(null)
     const activityTabRefs = React.useRef([])
-    const [shell, setShell] = React.useState({ status: 'idle', value: null, error: null })
+    const [shell, setShell] = React.useState({ status: 'loading', value: null, error: null })
     // Three-state like the original: "we could not read it" is NOT "it is running".
     const [controlState, setControlState] = React.useState({ status: 'unknown', paused: null })
-    const [wakeDraft, setWakeDraft] = React.useState('')
+    const [wakeDraft, setWakeDraft] = React.useState(null)
+    const [modelDraft, setModelDraft] = React.useState(null)
     const [saveState, setSaveState] = React.useState(null)
     const generation = React.useRef(0)
     const formSnapshot = useFormSnapshot(form)
+    const reading = shell.status === 'loading'
+    const reloadStatus = () => {
+      setShell(current => ({ ...current, status: 'loading' }))
+      setReloadToken(current => current + 1)
+    }
 
     React.useEffect(() => {
       const node = tabsHost.current
@@ -924,107 +951,193 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     React.useEffect(() => {
       const mine = generation.current + 1
       generation.current = mine
-      setShell(current => ({ ...current, status: current.value === null ? 'loading' : current.status }))
+      setShell(current => current.status === 'loading' ? current : { ...current, status: 'loading' })
       void (async () => {
         try {
           const business = await callRemote(call, 'status')
           if (generation.current !== mine) return
-          const view = business.view ?? null
-          if (view?.storage?.available === false) {
+          const view = business.view
+          if (view == null) throw new Error(dict.statusUnreadable)
+          if (view.storage?.available === false) {
             setShell({ status: 'error', value: null,
               error: storageReasonLabels[view.storage.reason] ?? dict.statusUnreadable })
             setControlState({ status: 'unknown', paused: null })
           } else {
             setShell({ status: 'ready', value: view, error: null })
-            setControlState({ status: 'ready', paused: view?.paused === true })
+            setControlState({ status: 'ready', paused: view.paused === true })
           }
         } catch (error) {
           if (generation.current !== mine) return
-          setShell({ status: 'error', value: null, error: String(error?.message ?? error) })
+          setShell(current => ({ ...current, status: 'error', error: String(error?.message ?? error) }))
+          setControlState({ status: 'unknown', paused: null })
         }
       })()
     }, [call, reloadToken])
 
     // Settings writes go through the REAL ConfigForm with its revision fence: one atomic
     // mutate(ops, revision); a refusal re-reads the truth instead of faking the switch.
-    const mutateSetting = async (path, value) => {
+    const mutateSettings = async values => {
       const snapshot = form?.getSnapshot?.() ?? null
-      if (form === undefined || form === null || snapshot === null || snapshot.status !== 'ready') {
+      if (snapshot === null || snapshot.status !== 'ready' || snapshot.writable === false) {
         setSaveState({ kind: 'error', detail: dict.settingsSaveFailed })
-        return
+        return false
       }
+      const ops = Object.entries(values)
+        .filter(([field, value]) => snapshot.value?.[field] !== value)
+        .map(([field, value]) => ({ op: 'set', path: [field], value }))
+      if (ops.length === 0) return true
+      setSaveState({ kind: 'saving' })
       try {
-        const ok = await form.mutate([{ op: 'set', path: [path], value }], snapshot.revision)
+        const ok = await form.mutate(ops, snapshot.revision)
         if (ok !== true) throw new Error('refused')
         setSaveState(null)
+        return true
       } catch {
         setSaveState({ kind: 'error', detail: dict.settingsSaveFailed })
-        setReloadToken(current => current + 1) // show the host's truth, never a fake flip
+        reloadStatus()
+        return false
       }
     }
-    const enabled = formSnapshot?.status === 'ready'
-      ? formSnapshot.value?.enabled !== false : true
+    const settings = formSnapshot?.status === 'ready' ? formSnapshot.value : null
+    const saving = saveState?.kind === 'saving'
+    const canEdit = settings !== null && settings !== undefined && formSnapshot.writable !== false && !saving
+    const learningOn = settings == null ? null
+      : settings.enabled !== false && settings.reflectionEnabled !== false
+    const effectiveStatus = learningOn === false ? dict.effectiveOff
+      : controlState.paused === true ? dict.effectivePaused : dict.effectiveRunning
+    const setLearning = next => {
+      const values = next && settings?.reflectionEnabled === false
+        ? { enabled: true, reflectionEnabled: true } : { enabled: next }
+      return mutateSettings(values)
+    }
 
     const togglePause = async () => {
+      if (reading || controlState.status !== 'ready') return
       const next = !(controlState.paused === true)
+      setControlState({ ...controlState, status: 'updating' })
       try {
-        await callRemote(control, 'pause', { paused: next })
-        setControlState({ status: 'ready', paused: next })
+        const result = await callRemote(control, 'pause', { paused: next })
+        setControlState({ status: 'ready', paused: result.paused === true })
         setSaveState(null)
       } catch (error) {
-        setSaveState({ kind: 'error', detail: `${dict.settingsSaveFailed}（${String(error?.message ?? error)}）` })
-        setReloadToken(current => current + 1) // the truth comes from the host re-read
+        setSaveState({ kind: 'error', detail: reasonLabels[error?.message] ?? dict.settingsSaveFailed })
+        setControlState({ status: 'unknown', paused: null })
+        reloadStatus()
       }
     }
+    const savedInterval = settings == null ? null : (settings.wakeIntervalMs ?? 600_000)
     const saveWake = async () => {
-      const parsed = Number(String(wakeDraft).trim())
-      if (!Number.isSafeInteger(parsed) || parsed < 60_000 || parsed > 3_600_000) {
-        setSaveState({ kind: 'error', detail: `${dict.wakeInterval} 60000–3600000` })
+      const minutes = Number(wakeDraft)
+      if (!Number.isFinite(minutes) || minutes < 1 || minutes > 60) {
+        setSaveState({ kind: 'error', detail: dict.invalidWake })
         return
       }
-      await mutateSetting('wakeIntervalMs', parsed)
+      if (await mutateSettings({ wakeIntervalMs: Math.round(minutes * 60_000) })) setWakeDraft(null)
+    }
+    const savedModel = {
+      modelProvider: settings?.modelProvider ?? '',
+      modelId: settings?.modelId ?? '',
+      reasoningEffort: settings?.reasoningEffort ?? '',
+    }
+    const model = modelDraft ?? savedModel
+    const editModel = (field, value) => setModelDraft(current => ({ ...(current ?? savedModel), [field]: value }))
+    const saveModel = async () => {
+      const provider = model.modelProvider.trim()
+      const id = model.modelId.trim()
+      if ((provider === '') !== (id === '')) {
+        setSaveState({ kind: 'error', detail: dict.invalidModel })
+        return
+      }
+      if (provider.length > 32 || id.length > 64 || /[\u0000-\u001f\u007f]/u.test(provider + id)) {
+        setSaveState({ kind: 'error', detail: dict.modelLimit })
+        return
+      }
+      if (await mutateSettings({ modelProvider: provider, modelId: id,
+        reasoningEffort: id === '' ? '' : model.reasoningEffort })) setModelDraft(null)
     }
     const auditedRetry = async ticket => {
+      if (reading || shell.error !== null) return
       try { await callRemote(control, 'retryRequest', { ticket }) }
       catch (error) { setSaveState({ kind: 'error', detail: String(error?.message ?? error) }) }
-      setReloadToken(current => current + 1)
+      reloadStatus()
     }
 
-    const view = shell.status === 'ready' ? shell.value : null
-    const state = shell.status === 'error' ? 'error' : shell.status === 'idle' ? 'loading' : 'ready'
+    const view = shell.value
     const dailyBacklog = view?.daily?.backlog ?? []
     const dailyPartial = (view?.daily?.daysProcessed ?? []).filter(item => item.partial)
 
     // ── 常规 ──────────────────────────────────────────────────────────────────────────────
-    const runtimeSettings = [
+    const recallLimit = Math.min(settings?.maxContextBytes ?? 768, 768)
+    const recallChoices = [...new Set([128, 256, 384, 512, 640, 768, recallLimit])].sort((a, b) => a - b)
+    const clockChoices = Array.from({ length: 24 }, (_, hour) => ({
+      id: String(hour), label: `${String(hour).padStart(2, '0')}:00`,
+    }))
+    const runtimeSettings = tab === 'overview' ? [
       h('h2', { key: 'runtime-group', className: 'mse-section-title' }, dict.runtimeGroup),
-      row('enabled', dict.learning, dict.learningHint,
-        h(Switch, { key: 'sw', checked: enabled, onChange: next => void mutateSetting('enabled', next) })),
-      row('pause', dict.pauseControl, dict.pauseHint,
-        h(Button, { key: 'b', variant: 'outline', size: 'sm', onClick: togglePause },
-          controlState.paused === true ? dict.resume : dict.pause)),
-      row('wake', dict.wakeInterval,
-        formSnapshot?.status === 'ready'
-          ? `当前 ${formSnapshot.value?.wakeIntervalMs ?? '—'}`
-            + (formSnapshot.value?.wakeIntervalMs ? `（${minutesHint(formSnapshot.value.wakeIntervalMs)}）` : '')
-          : null,
-        [h(Input, { key: 'i', value: wakeDraft, placeholder: '600000', onChange: setWakeDraft }),
-          h(Button, { key: 'b', variant: 'outline', size: 'sm', onClick: saveWake }, dict.wakeSave)]),
-      saveState?.kind === 'error' ? h('p', { key: 'err', className: 'mse-error' }, saveState.detail) : null,
-    ]
-    const overviewPanel = h(React.Fragment, { key: 'overview' }, [
-      h('div', { key: 'm', className: 'mse-metrics mse-metrics-2' }, [
-        metric(dict.pauseControl, controlState.paused === null ? '—'
-          : controlState.paused === true ? dict.effectivePaused : dict.effectiveRunning),
-        metric(dict.lastDoneDay, view?.daily?.lastDoneDay ?? '—'),
+      h('div', { key: 'learning-settings', className: 'mse-control-list' }, [
+        row('enabled', dict.learning, null,
+          h(Switch, { key: 'sw', label: dict.learning, checked: learningOn === true,
+            disabled: !canEdit, onChange: setLearning })),
+        row('pause', dict.pauseControl, null,
+          h(Button, { key: 'b', variant: 'outline', size: 'sm', onClick: togglePause,
+            disabled: reading || controlState.status !== 'ready' },
+            controlState.paused === true ? dict.resume : dict.pause)),
       ]),
-      ...runtimeSettings,
-      h('h2', { key: 'sec', className: 'mse-section-title' }, dict.dailySection),
-      h('p', { key: 'dh', className: 'mse-hint' }, dict.dailyHint),
-      view === null ? null : row('daily',
-        `${dict.waitReasonLine}: ${waitLabels[view.daily?.waitReason ?? null] ?? view.daily?.waitReason ?? '—'}`,
-        `${dailyBacklog.length}${locale === 'en' ? ' days pending' : ' 天待补'}`,
-        null, { stacked: true }),
+      h('h2', { key: 'schedule-group', className: 'mse-section-title' }, dict.scheduleGroup),
+      h('div', { key: 'schedule-settings', className: 'mse-control-list' }, [
+        row('wake', dict.wakeInterval, null, [
+          h(Input, { key: 'i', type: 'number', min: 1, max: 60, step: 'any', inputMode: 'decimal',
+            className: 'mse-setting-number', 'aria-label': dict.wakeInterval,
+            value: wakeDraft ?? (savedInterval === null ? '' : String(savedInterval / 60_000)),
+            disabled: !canEdit, onChange: event => setWakeDraft(event.currentTarget.value) }),
+          h('span', { key: 'u', className: 'mse-unit' }, dict.minuteUnit),
+          h(Button, { key: 'b', variant: 'outline', size: 'sm', onClick: saveWake,
+            'aria-label': `${dict.saveSetting} · ${dict.wakeInterval}`,
+            disabled: !canEdit || wakeDraft === null }, dict.saveSetting),
+        ]),
+        row('daily-hour', dict.dailyHour, null,
+          h(Picker, { label: dict.dailyHour, value: String(settings?.dailyHour ?? 23), options: clockChoices,
+            testId: 'daily-hour', disabled: !canEdit,
+            triggerProps: { title: dict.dailyLocalTime, 'aria-description': dict.dailyLocalTime },
+            onChange: value => mutateSettings({ dailyHour: Number(value) }) })),
+        row('recall-limit', dict.recallBytes, null,
+          h(Picker, { label: dict.recallBytes, value: String(recallLimit),
+            options: recallChoices.map(bytes => ({ id: String(bytes), label: `${bytes} B` })),
+            testId: 'recall-limit', disabled: !canEdit,
+            onChange: value => mutateSettings({ maxContextBytes: Number(value) }) })),
+      ]),
+      h('div', { key: 'advanced-settings', className: 'mse-control-list' }, [
+        disclosure('background-model', dict.modelSettings, [
+          row('provider', dict.modelProvider, null, h(Input, { key: 'i', className: 'mse-setting-text',
+            'aria-label': dict.modelProvider, value: model.modelProvider, maxLength: 32,
+            disabled: !canEdit, onChange: event => editModel('modelProvider', event.currentTarget.value) })),
+          row('model', dict.modelId, null, h(Input, { key: 'i', className: 'mse-setting-text',
+            'aria-label': dict.modelId, value: model.modelId, maxLength: 64,
+            disabled: !canEdit, onChange: event => editModel('modelId', event.currentTarget.value) })),
+          row('effort', dict.reasoningEffort, null, h(Picker, { label: dict.reasoningEffort,
+            value: model.reasoningEffort, options: [{ id: '', label: dict.defaultEffort },
+              { id: 'low', label: dict.effortLow }, { id: 'medium', label: dict.effortMedium },
+              { id: 'high', label: dict.effortHigh }],
+            testId: 'reasoning-effort', disabled: !canEdit || model.modelId.trim() === '',
+            onChange: value => editModel('reasoningEffort', value) })),
+          h('p', { key: 'note', className: 'mse-hint' }, dict.modelNote),
+          h('div', { key: 'actions', className: 'mse-settings-actions' }, [
+            h(Button, { key: 'cancel', variant: 'ghost', size: 'sm',
+              disabled: saving || modelDraft === null,
+              onClick: () => { setModelDraft(null); setSaveState(null) } }, dict.cancelSetting),
+            h(Button, { key: 'save', variant: 'outline', size: 'sm', disabled: !canEdit || modelDraft === null,
+              'aria-label': `${dict.saveSetting} · ${dict.modelSettings}`, onClick: saveModel }, dict.saveSetting),
+          ]),
+        ], { id: 'background-model', meta: settings == null ? '—'
+          : savedModel.modelProvider && savedModel.modelId ? summaryText(savedModel.modelId, 32) : dict.modelFromSource }),
+        disclosure('more-how', dict.moreSection, h('p', { className: 'mse-hint' }, dict.moreHow),
+          { id: 'more-how' }),
+      ]),
+    ] : null
+    const overviewPanel = tab === 'overview' ? h(React.Fragment, { key: 'overview' }, [
+      h('div', { key: 'settings', className: 'mse-settings', 'aria-busy': saving }, runtimeSettings),
+      view?.daily?.lastSummary?.summary || dailyBacklog.length > 0 || dailyPartial.length > 0
+        ? h('h2', { key: 'sec', className: 'mse-section-title' }, dict.dailySection) : null,
       view === null || (dailyBacklog.length === 0 && dailyPartial.length === 0) ? null
         : disclosure('daily-detail', `${dict.backlogDays} · ${dailyBacklog.length + dailyPartial.length}`,
           definition('daily-audit', [
@@ -1036,25 +1149,20 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         ? disclosure('summary', `${dict.lastSummaryLine} · ${view.daily.lastSummary.day}`,
           h('p', { className: 'mse-detail-text' }, view.daily.lastSummary.summary), { id: 'last-summary' })
         : null,
-      h('h2', { key: 'secm', className: 'mse-section-title' }, dict.moreSection),
-      disclosure('more-how', dict.moreHowTitle, h('p', { className: 'mse-hint' }, dict.moreHow),
-        { id: 'more-how' }),
-      disclosure('more-save', dict.moreSaveTitle, h('p', { className: 'mse-hint' }, dict.moreSave),
-        { id: 'more-save' }),
-      disclosure('more-scope', dict.moreScopeTitle, h('p', { className: 'mse-hint' }, dict.moreScope),
-        { id: 'more-scope' }),
-      disclosure('more-check', dict.moreCheckTitle, h('p', { className: 'mse-hint' }, dict.moreCheck),
-        { id: 'more-check' }),
-    ])
+    ]) : null
 
     // ── 经验 ──────────────────────────────────────────────────────────────────────────────
     const entries = view?.entries ?? []
     const shown = entries.filter(entry => (filter.type === '' || entry.type === filter.type)
       && (filter.status === '' || (statusLabels[entry.status] ?? entry.status) === filter.status))
-    const lessonsPanel = h(React.Fragment, { key: 'lessons' }, [
-      h('h2', { key: 'sec', className: 'mse-section-title' }, [
-        h('span', { key: 't' }, dict.entriesSection),
-        h('div', { key: 'f', className: 'mse-inline' }, [
+    const lessonsPanel = tab === 'lessons' && view !== null ? h(React.Fragment, { key: 'lessons' }, [
+      h('h2', { key: 'sec', className: 'mse-section-title mse-lessons-heading' }, [
+        h('span', { key: 't', className: 'mse-inline' }, [
+          dict.entriesSection,
+          h('span', { key: 'count', className: 'mse-count' },
+            filter.type || filter.status ? `${shown.length}/${entries.length}` : String(entries.length)),
+        ]),
+        h('div', { key: 'f', className: 'mse-filters' }, [
           h(Picker, { key: 'type', label: dict.filterType, prefix: dict.filterType,
             value: filter.type, testId: 'filter-type',
             options: [{ id: '', label: dict.allOption },
@@ -1068,17 +1176,11 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
             onChange: value => setFilter(current => ({ ...current, status: value })) }),
         ]),
       ]),
-      h('p', { key: 'eh', className: 'mse-hint' }, dict.entriesHint),
-      view === null ? null : h('p', { key: 'cnt', className: 'mse-statline' }, [
-        h('span', { key: 'c' }, `${dict.existingCount}`), h('b', { key: 'n' }, String(shown.length)),
-        filter.type !== '' || filter.status !== ''
-          ? h('span', { key: 'f', className: 'mse-unit' },
-            `/${entries.length}（${dict.filterType}·${dict.filterStatus}）`) : null]),
-      view === null ? null : shown.length === 0 ? h('p', { key: 'ne', className: 'mse-hint' }, dict.noEntries)
+      shown.length === 0 ? h('p', { key: 'ne', className: 'mse-empty' }, dict.noEntries)
         : shown.map(entry => disclosure(`e-${entry.id}`,
           summaryText(entry.instruction, 64),
           h(React.Fragment, null, [
-            h('p', { key: 'full', className: 'mse-detail-text' }, `${dict.fullText}${colon}${entry.instruction}`),
+            h('p', { key: 'full', className: 'mse-detail-text' }, entry.instruction),
             definition('d', [
               [dict.version, `${entry.version}${entry.parentVersion ? ` ← ${entry.parentVersion}` : ''}`],
               [dict.scope, entry.visibility === 'scoped'
@@ -1112,8 +1214,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
             meta: [typeLabels[entry.type] ?? entry.type, statusLabels[entry.status] ?? entry.status,
               entry.guard ? dict.modeGuard : null,
               entry.visibility === 'scoped' ? dict.scopeScoped : dict.scopeGlobal,
-              `v${entry.version}`, `${dict.injectedCount} ${entry.injected}`] })),
-    ])
+              `v${entry.version}`] })),
+    ]) : null
 
     // ── 召回 ──────────────────────────────────────────────────────────────────────────────
     const recall = view?.recall ?? []
@@ -1171,17 +1273,18 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
             + `${locale === 'en' ? 'Counterexamples' : '反例'} ${replay.regressions ?? 0} · `
             + `${locale === 'en' ? 'Incomplete' : '不完整'} ${replay.incomplete ?? 0}`],
           [dict.adaptiveBlockers, blockers.length === 0 ? '—' : blockers.map(blockerLabel).join('；')],
-        ], { left: true }), { id: `adaptive-${policy.id}`, meta: [modeText, progress,
+        ], { left: true }), { id: `adaptive-${policy.id}`, stackMeta: true, meta: [modeText, progress,
           primaryBlocker ? blockerLabel(primaryBlocker)
             : ready.legacySuccessor ? dict.adaptiveSuccessor : null] })
     }
-    const recallPanel = h(React.Fragment, { key: 'recall' }, [
-      h('h2', { key: 'rsi-sec', className: 'mse-section-title' }, dict.rsiSection),
-      h('p', { key: 'rsi-hint', className: 'mse-hint' }, dict.rsiHint),
-      h('div', { key: 'adaptive-label', className: 'mse-statline' }, `${dict.adaptiveCandidates} · ${adaptivePolicies.length}`),
-      adaptivePolicies.length === 0 ? h('p', { key: 'adaptive-empty', className: 'mse-hint' }, dict.adaptiveNoCandidates)
+    const recallPanel = tab === 'recall' && view !== null ? h(React.Fragment, { key: 'recall' }, [
+      h('h2', { key: 'rsi-sec', className: 'mse-section-title' }, [
+        dict.adaptiveCandidates,
+        h('span', { key: 'count', className: 'mse-count' }, String(adaptivePolicies.length)),
+      ]),
+      adaptivePolicies.length === 0 ? h('p', { key: 'adaptive-empty', className: 'mse-empty' }, dict.adaptiveNoCandidates)
         : adaptivePolicies.slice(0, 8).map(adaptiveCandidateRow),
-      view === null || recall.length === 0 ? null : disclosure('recall-history',
+      recall.length === 0 ? null : disclosure('recall-history',
         `${dict.recallSection} · ${recall.length}`,
         recall.map(item => disclosure(`r-${item.at}`,
           `${dateText(item.at)} · ${dict.offeredVersions} ${item.offered.length}`,
@@ -1196,7 +1299,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
             meta: [item.settled ? dict.settledYes : dict.settledNo,
               item.outcome === null ? dict.outcomeUnknown : (outcomeLabels[item.outcome] ?? item.outcome),
               `${item.bytes} B`] })), { id: 'recall-history' }),
-      view === null || (view.recallStrategy?.adaptive?.decisions ?? []).length === 0 ? null
+      (view.recallStrategy?.adaptive?.decisions ?? []).length === 0 ? null
         : disclosure('rsi-decisions', `${dict.rsiPersisted} · ${view.recallStrategy.adaptive.decisions.length}`,
           view.recallStrategy.adaptive.decisions.slice(0, 8).map((item, index) => row(
             `rsi-decision-${index}`, resultLabels[item.result] ?? dict.rsiResultUnknown,
@@ -1204,7 +1307,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
               + `${item.policyId ? `${locale === 'en' ? 'Policy' : '策略'} ${item.policyId}` : (locale === 'en' ? 'No policy ID' : '无策略标识')} · `
               + `${item.entryId ? `${locale === 'en' ? 'Target' : '目标'} ${item.entryId}` : (locale === 'en' ? 'No target ID' : '无目标标识')}${Number.isSafeInteger(item.version) ? ` · v${item.version}` : ''}`,
             dateText(item.at), { top: true })), { id: 'rsi-decisions' }),
-      view === null || (view.rsiDiagnostics?.recent ?? []).length === 0 ? null
+      (view.rsiDiagnostics?.recent ?? []).length === 0 ? null
         : disclosure('rsi-runtime', `${dict.rsiRuntime} · ${view.rsiDiagnostics.recent.length}`,
           view.rsiDiagnostics.recent.slice(0, 8).map((item, index) => row(
             `rsi-runtime-${index}`,
@@ -1216,22 +1319,20 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
               + `${item.entryId ? ` · ${locale === 'en' ? 'Target' : '目标'} ${item.entryId}` : ''}`
               + `${Number.isSafeInteger(item.version) ? ` · v${item.version}` : ''}`,
             dateText(item.at), { top: true })), { id: 'rsi-runtime' }),
-      view === null ? h('p', { key: 'loading', className: 'mse-hint' }, dict.loading) : null,
-    ])
+    ]) : null
 
     // ── 任务 ──────────────────────────────────────────────────────────────────────────────
     const tasks = view?.tasks ?? []
-    const tasksPanel = h(React.Fragment, { key: 'tasks' }, [
+    const tasksPanel = tab === 'tasks' && view !== null ? h(React.Fragment, { key: 'tasks' }, [
       h('h2', { key: 'sec', className: 'mse-section-title' }, dict.tasksSection),
-      h('p', { key: 'th', className: 'mse-hint' }, dict.tasksHint),
       h('div', { key: 'm', className: 'mse-metrics mse-metrics-2' }, [
-        metric(dict.inFlightNow, String((view?.inFlight ?? []).length)),
-        metric(dict.unknownCostHeld, String((view?.unknownCostHeld ?? []).length)),
+        metric(dict.inFlightNow, String((view.inFlight ?? []).length)),
+        metric(dict.unknownCostHeld, String((view.unknownCostHeld ?? []).length)),
       ]),
-      view === null ? null : h('div', { key: 'wait', className: 'mse-statline' }, [
+      h('div', { key: 'wait', className: 'mse-statline' }, [
         h('span', { key: 'l' }, dict.waitReasonLine),
         h('b', { key: 'v' }, waitLabels[view.daily?.waitReason ?? null] ?? view.daily?.waitReason ?? '—')]),
-      view === null ? null : tasks.length === 0 ? h('p', { key: 'nt', className: 'mse-hint' }, dict.noTasks)
+      tasks.length === 0 ? h('p', { key: 'nt', className: 'mse-empty' }, dict.noTasks)
         : tasks.map(item => disclosure(`t-${item.ticket}`,
           `${kindLabels[item.kind] ?? item.kind} · ${dateText(item.at)}`,
           h(React.Fragment, null, [
@@ -1250,20 +1351,24 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
             // something: never after a committed/saved success, never on an unknown cost.
             item.settled && item.usageUnknown !== true && item.terminal !== null
               && !OK_TERMINALS.has(item.terminal)
-              ? h(Button, { key: 'b', variant: 'outline', size: 'sm',
-                onClick: () => auditedRetry(item.ticket) }, dict.auditedRetry) : null,
-          ]), { id: `t-${item.ticket}`,
+              ? h('div', { key: 'retry', className: 'mse-inline' }, [
+                h(Button, { key: 'b', variant: 'outline', size: 'sm',
+                  disabled: reading || shell.error !== null, onClick: () => auditedRetry(item.ticket) }, dict.auditedRetry),
+                h('span', { key: 'cost', className: 'mse-unit' }, dict.auditedRetryHint),
+              ]) : null,
+          ]), { id: `t-${item.ticket}`, stackMeta: true,
             meta: [item.settled ? dict.taskStatusSettled : dict.taskStatusRunning,
               item.usageUnknown ? dict.unknownCostHeld
                 : item.usageTotal !== null ? `${item.usageTotal} tok` : null,
               item.settled && item.terminal !== null
                 ? (reasonLabels[item.terminal] ?? terminalLabel(item.terminal) ?? '') : null]
               .filter(label => label !== null && label !== '') })),
-      h('p', { key: 'rh', className: 'mse-hint' }, dict.auditedRetryHint),
-    ])
+      disclosure('retry-guide', dict.retryGuide, h('p', { className: 'mse-hint' }, dict.tasksHint),
+        { id: 'retry-guide' }),
+    ]) : null
 
     // ── 活动 ─────────────────────────────────────────────────────────────────────────
-    const activity = view?.activity ?? null
+    const activity = tab === 'activity' ? view?.activity ?? null : null
     const activityProjection = activity === null ? [] : projectActivityWeeks(activity, activityMode)
     const selectedActivityDate = activity?.days.some(day => day.date === activityDate)
       ? activityDate : activity?.todayDate ?? null
@@ -1300,7 +1405,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       setActivityColorState(normalized)
       writeActivityColor(normalized)
     }
-    const activityBlock = activity === null ? null : (() => {
+    const activityPanel = activity === null ? null : (() => {
       const visibleDate = week => week.days.find(day => day !== null)
       const monthPositions = []
       let priorMonth = null
@@ -1349,31 +1454,27 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         [dict.activityWeek, activity.week.total],
         [dict.activityRetained, activity.retained],
       ].map(([label, value]) => h('div', { key: label, className: 'mse-activity-metric' }, [
-        h('dd', { key: 'value' }, [String(value), h('span', { key: 'unit' }, dict.activityEntries)]),
         h('dt', { key: 'label' }, label),
+        h('dd', { key: 'value' }, String(value)),
       ]))
       const tabs = ACTIVITY_MODES.map((mode, index) => {
         const label = mode === 'day' ? dict.activityDay
           : mode === 'week' ? dict.activityWeekMode : dict.activityTotal
-        return h('button', { key: mode, id: `mse-activity-${mode}-tab`, type: 'button', role: 'tab',
-          'aria-selected': activityMode === mode, 'aria-controls': 'mse-activity-panel',
+        return h('button', { key: mode, id: `${idPrefix}-activity-${mode}-tab`, type: 'button', role: 'tab',
+          'aria-selected': activityMode === mode, 'aria-controls': `${idPrefix}-activity-panel`,
           tabIndex: activityMode === mode ? 0 : -1, ref: node => { activityTabRefs.current[index] = node },
           onClick: () => updateActivityMode(mode), onKeyDown: event => onActivityModeKey(event, index) }, label)
       })
       return h(React.Fragment, null, [
         h('dl', { key: 'metrics', className: 'mse-activity-summary' }, summary),
         h('div', { key: 'header', className: 'mse-activity-header' }, [
-          h('div', { key: 'title', className: 'mse-activity-title' }, [
-            h('h3', { key: 'heading' }, dict.activityTitle),
-            h(ActivityColorPicker, { key: 'color', color: activityColor,
-              onChange: updateActivityColor, dict }),
-          ]),
+          h(ActivityColorPicker, { key: 'color', color: activityColor, onChange: updateActivityColor, dict }),
           h('div', { key: 'tabs', className: 'mse-activity-tabs', role: 'tablist',
             'aria-label': dict.activityTitle }, tabs),
         ]),
-        h('div', { key: 'chart-panel', id: 'mse-activity-panel',
+        h('div', { key: 'chart-panel', id: `${idPrefix}-activity-panel`,
           className: 'mse-activity-chart-panel', role: 'tabpanel',
-          'aria-labelledby': `mse-activity-${activityMode}-tab`,
+          'aria-labelledby': `${idPrefix}-activity-${activityMode}-tab`,
           style: { '--mse-activity-color': activityColor || 'var(--dsw-alias-state-business-primary)' } }, [
           h('div', { key: 'chart', className: 'mse-activity-chart',
             style: { '--mse-activity-weeks': activity.weeks.length } }, [
@@ -1400,9 +1501,6 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         ]), { id: 'activity-details' }),
       ])
     })()
-    const activityPanel = h(React.Fragment, { key: 'activity' }, [
-      activityBlock ?? h('p', { key: 'loading', className: 'mse-hint' }, dict.loading),
-    ])
 
     // ── 学习状态 ────────────────────────────────────────────────────────────────────
     const usage = view?.usageAudit ?? null
@@ -1414,15 +1512,13 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       : Object.values(usage.byKind).reduce((total, bucket) => total + bucket[pick], 0)
     const injectedTotal = entries.reduce((total, entry) => total + (entry.injected ?? 0), 0)
     const recurrenceTotal = entries.reduce((total, entry) => total + (entry.recurrences ?? 0), 0)
-    const usagePanel = h(React.Fragment, { key: 'usage' }, [
+    const usagePanel = tab === 'usage' && view !== null ? h(React.Fragment, { key: 'usage' }, [
       h('h2', { key: 'sec', className: 'mse-section-title' }, dict.correctionsSection),
-      corrections === null ? h('p', { key: 'cl', className: 'mse-hint' }, dict.loading)
-        : h('div', { key: 'm', className: 'mse-metrics' }, [
+      corrections === null ? null : h('div', { key: 'm', className: 'mse-metrics' }, [
           metric(dict.saved, String(corrections.saved)),
           metric(dict.pendingCorr, String(corrections.pending)),
           metric(dict.dispatchedCorr, String(corrections.dispatched)),
         ]),
-      h('p', { key: 'ch', className: 'mse-hint' }, dict.correctionsShort),
       disclosure('corr-full', dict.correctionsFullTitle, h('p', { className: 'mse-detail-text' },
         dict.correctionsFull), { id: 'corr-full' }),
       ignoredRecent.length === 0 ? null
@@ -1436,7 +1532,6 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         // separators are strings; every decision is an element child.
         : disclosure('corr-decisions', `${dict.correctionsDecision} · ${recentDecisions.length}`,
           h('p', { className: 'mse-hint' }, [
-          `${dict.correctionsDecision}${colon}`,
           ...recentDecisions.flatMap((row, rowIndex) => [
             ...(rowIndex === 0 ? [] : [' ｜ ']),
             ...row.decisions.flatMap((decision, decisionIndex) => [
@@ -1457,16 +1552,13 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
             ]),
           ]),
         ]), { id: 'corr-decisions' }),
-      h('h2', { key: 'secCol', className: 'mse-section-title' }, dict.collectionSection),
-      disclosure('coll-scope', dict.collectionScopeTitle,
-        view?.collection === undefined ? dict.loading
-          : `${dict.collectionWorkspaces}${colon}${view.collection.workspaces ?? dict.collectionUnknown}`
-            + (view.collection.skipped.length === 0 ? `${locale === 'en' ? '; ' : '；'}${dict.collectionNone}`
-              : `${locale === 'en' ? '; ' : '；'}${dict.collectionSkipped}${colon}${view.collection.skipped
-                .map(r => `${reasonLabels[r.reason] ?? r.reason} × ${r.count}`).join(listSeparator)}`),
-        { id: 'coll-scope' }),
-      view?.revisions === undefined ? h('p', { key: 'rvl', className: 'mse-hint' }, dict.loading)
-        : view.revisions.length === 0 ? null
+      view.collection === undefined ? null : disclosure('coll-scope', dict.collectionScopeTitle,
+        definition('collection', [
+          [dict.collectionWorkspaces, view.collection.workspaces ?? dict.collectionUnknown],
+          [dict.collectionSkipped, view.collection.skipped.length === 0 ? dict.collectionNone
+            : view.collection.skipped.map(r => `${reasonLabels[r.reason] ?? r.reason} × ${r.count}`).join(listSeparator)],
+        ], { left: true }), { id: 'coll-scope' }),
+      (view.revisions ?? []).length === 0 ? null
           // MSE18: the revision audit is LONG TEXT, not a numeric stat — it must not be shoved
           // into a 1/3-width metric card (the whole v1→停用·原因·日期 string became a giant wrapped
           // headline). Full-width ordinary information rows on the page's EXISTING styles: the
@@ -1481,23 +1573,22 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
                 h('p', { key: 'h', className: 'mse-hint' },
                   `${reasonLabels[item.reason] ?? item.reason ?? ''} · ${dateText(item.at)}`),
               ]))), { id: 'recent-revisions' }),
-      row('go-lessons', dict.goLessons, null,
-        h(Button, { key: 'b', variant: 'outline', size: 'sm', onClick: () => setTab('lessons') },
-          dict.tabLessons)),
-      h('h2', { key: 'sec1', className: 'mse-section-title' }, dict.existingSection),
+      h('h2', { key: 'sec1', className: 'mse-section-title' }, [
+        h('span', { key: 't' }, dict.existingSection),
+        h(Button, { key: 'b', variant: 'ghost', size: 'sm', onClick: () => setTab('lessons') }, dict.goLessons),
+      ]),
       h('div', { key: 'ex', className: 'mse-metrics mse-metrics-2' }, [
         metric(dict.existingCount, String(entries.length)),
         metric(`${dict.existingInjected}／${dict.existingRecurrences}`, `${injectedTotal}／${recurrenceTotal}`),
       ]),
-      h('p', { key: 'exn', className: 'mse-hint' }, dict.existingScopeNote),
       h('h2', { key: 'sec2', className: 'mse-section-title' }, dict.dailyState),
-      view === null ? null : h('div', { key: 'daily', className: 'mse-metrics mse-metrics-2' }, [
+      h('div', { key: 'daily', className: 'mse-metrics mse-metrics-2' }, [
         metric(dict.lastDoneDay, view.daily?.lastDoneDay ?? '—'),
         metric(dict.backlogDays, String((view.daily?.backlog ?? []).length)),
       ]),
       dailyPartial.length === 0 ? null : row('daily-partial', dict.dailyPartialLine,
         `${dailyPartial.length}${locale === 'en' ? ' days' : ' 日'}`, null),
-      view === null || ((view.daily?.backlog ?? []).length === 0 && processedDays.length === 0) ? null
+      (view.daily?.backlog ?? []).length === 0 && processedDays.length === 0 ? null
         : disclosure('daily-history', `${dict.daysProcessed} · ${processedDays.length}`,
           definition('daily-history-data', [
             [dict.backlogDays, (view.daily?.backlog ?? []).length === 0 ? dict.none
@@ -1508,7 +1599,6 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
               dailyPartial.map(item => `${item.day} (${dict.dailyExcludedLine} ${item.excluded})`).join(listSeparator)],
           ], { left: true }), { id: 'daily-history' }),
       h('h2', { key: 'sec3', className: 'mse-section-title' }, dict.usageAuditSection),
-      h('p', { key: 'un', className: 'mse-hint' }, dict.usageAuditNote),
       usage === null ? null : h('div', { key: 'm2', className: 'mse-metrics' }, [
         metric(dict.usageCalls, String(sum('calls'))),
         metric(dict.usageTokens, String(sum('knownTokens'))),
@@ -1522,42 +1612,51 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
             `${dict.usageCalls} ${bucket.calls}｜${dict.usageTokens} ${bucket.knownTokens}`
             + `${bucket.unknownCost > 0 ? `｜${dict.usageUnknownCost} ${bucket.unknownCost}` : ''}`,
           ]), { left: true })]), { id: 'usage-kinds' }),
-    ])
+    ]) : null
 
     const tabs = h('div', { key: 'tabs', ref: tabsHost, className: 'mse-tabs-host' },
-      settingsTabNavigation(tab, setTab, dict, compactTabs))
-    const unavailablePanel = tab === 'overview'
-      ? h(React.Fragment, { key: 'storage-unavailable' }, runtimeSettings) : null
-    const normalBody = tab === 'overview' ? overviewPanel : tab === 'lessons' ? lessonsPanel
+      settingsTabNavigation(tab, setTab, dict, compactTabs, idPrefix))
+    const body = tab === 'overview' ? overviewPanel : tab === 'lessons' ? lessonsPanel
       : tab === 'recall' ? recallPanel : tab === 'tasks' ? tasksPanel
         : tab === 'activity' ? activityPanel : usagePanel
-    const body = state === 'error' ? unavailablePanel : normalBody
-    return h('section', { className: 'mse-details', 'data-mse-details': 'page' }, [
-      h('div', { key: 'heading', className: 'mse-heading' }, [
-        h('h1', { key: 't' }, dict.settingsTitle),
-        state === 'error'
-          ? h('span', { key: 's', className: 'mse-error' }, dict.statusUnreadable)
-          : h('span', { key: 's', className: 'mse-status' }, [
-            h(StateDot, { key: 'd', state: view === null ? 'idle' : view.paused === true ? 'idle' : 'done' }),
-            h('span', { key: 't' }, view === null ? dict.loading
-              : `${view.paused === true ? dict.effectivePaused : dict.effectiveRunning}`
-                + (view.storage?.reason ? ` · ${storageReasonLabels[view.storage.reason] ?? dict.storageWarning}` : '')),
+    const statusText = shell.error !== null ? (view === null ? dict.statusUnreadable : dict.lastRead)
+      : view === null ? dict.loading : effectiveStatus
+    const storageNotice = view?.storage?.reason
+      ? (storageReasonLabels[view.storage.reason] ?? dict.storageWarning) : null
+    return h('section', { className: 'mse-details', 'data-mse-details': 'page', 'data-mse-surface': surface }, [
+      h('div', { key: 'toolbar', className: 'mse-toolbar' }, [
+        h('div', { key: 'heading', className: 'mse-heading' }, [
+          h('div', { key: 'title', className: 'mse-heading-title' }, [
+            h('h1', { key: 't' }, dict.settingsTitle),
+            h('span', { key: 's', className: 'mse-status', 'data-unavailable': shell.error !== null,
+              'aria-live': 'polite', title: statusText }, [
+              h(StateDot, { key: 'd', state: view === null || shell.error !== null
+                || learningOn === false || controlState.paused === true ? 'idle' : 'done' }),
+              h('span', { key: 't' }, statusText),
+            ]),
           ]),
-        h(Button, { key: 'r', variant: 'ghost', size: 'sm', className: 'mse-heading-action',
-          disabled: shell.status === 'loading', onClick: () => setReloadToken(current => current + 1) },
-        shell.status === 'loading' ? dict.refreshing : dict.refresh),
+          h(Button, { key: 'r', variant: 'ghost', size: 'sm', className: 'mse-heading-action',
+            disabled: reading || controlState.status === 'updating', 'aria-busy': reading,
+            onClick: reloadStatus }, dict.refresh),
+        ]),
+        tabs,
       ]),
-      shell.error !== null && shell.error !== undefined && shell.error !== ''
-        ? h('p', { key: 'err', className: 'mse-error' }, `${dict.loadFailed}: ${shell.error}`) : null,
-      tabs,
-      h('div', { key: 'pane', id: `mse-pane-${tab}`, role: 'tabpanel', 'aria-labelledby': `mse-tab-${tab}`,
-        className: 'mse-pane' }, body),
+      h('div', { key: tab, id: `${idPrefix}-pane-${tab}`, role: 'tabpanel', tabIndex: 0,
+        'aria-labelledby': `${idPrefix}-tab-${tab}`, 'aria-busy': reading, className: 'mse-pane' }, [
+        shell.error ? h('p', { key: 'read-error', role: 'status', className: 'mse-panel-message mse-error' },
+          shell.error) : null,
+        !shell.error && storageNotice ? h('p', { key: 'storage-notice', className: 'mse-panel-message mse-notice' },
+          storageNotice) : null,
+        saveState?.kind === 'error' ? h('p', { key: 'save-error', role: 'alert', className: 'mse-panel-message mse-error' },
+          saveState.detail) : null,
+        body,
+      ]),
     ])
   }
 
   // Plugin detail page: the SAME panel and read face — never a README pointer.
   function BundlePage(props) {
-    return MsePanel({ ...props, initialTab: 'usage' })
+    return MsePanel({ ...props, initialTab: 'usage', surface: 'bundle' })
   }
 
   async function apply(ctx) {
