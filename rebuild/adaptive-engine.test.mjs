@@ -6,6 +6,8 @@ import { buildEngine, cleanupAdaptiveEngineFixture, failureX, failureY, failureZ
   trainApiPolicy } from '../scripts/rsi/adaptive-engine-fixture.mjs'
 import { RECALL_QUALIFICATION } from './recall-qualification.mjs'
 import { synthesizeAdaptivePolicy } from './adaptive-recall.mjs'
+import { RECALL_TOKEN_UNIT } from './recall-budget.mjs'
+import { validateDoc } from './memory.mjs'
 
 test('status exposes only the newest eight fixed-field persisted adaptive decisions', () => {
   const { root, engine, targetX } = buildEngine()
@@ -193,6 +195,78 @@ test('adaptive discovery needs two independent gains and two feasible full-offer
       item.id === row.id && item.version === row.version && item.mode === row.mode)))
     assert.ok(!JSON.stringify(engine.store.read().recallStrategy.adaptive).includes('API 调用'),
       'adaptive state stores no prompt text')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('token-profile RSI keeps its evidence separate from a legacy byte observer', () => {
+  const fixture = buildEngine()
+  const { root, engine, prepare, fail, settle, targetX } = fixture
+  try {
+    const seed = (session, turnId, prompt, callId) => {
+      prepare(session, turnId, prompt)
+      fail(session, turnId, callId, failureX)
+      settle(session, turnId)
+    }
+    seed('legacy-byte-observer', 'old', 'API 调用遇到阻塞，请定位原因', 'legacy-byte-failure')
+    const legacy = engine.store.read().recallStrategy.adaptive.policies.find(row => row.entryId === targetX.id)
+    assert.equal(legacy.mode, 'observing')
+    assert.equal(legacy.budget, undefined, 'the old policy keeps its original byte evidence shape')
+
+    engine.setRecallBudget({ unit: RECALL_TOKEN_UNIT, limit: 512 })
+    seed('token-discovery', 'new', 'API 调用遇到阻塞，请定位原因', 'token-discovery-failure')
+    let policies = engine.store.read().recallStrategy.adaptive.policies
+    assert.equal(policies.length, 2, 'a profileless byte observer does not block a distinct token policy')
+    const tokenPolicy = policies.find(row => row.budget?.unit === RECALL_TOKEN_UNIT)
+    assert.ok(tokenPolicy)
+    assert.equal(tokenPolicy.mode, 'observing')
+    assert.notEqual(tokenPolicy.id, legacy.id)
+
+    const holdout = prepare('token-holdout', 'positive', 'API 请求仍然阻塞，麻烦定位原因')
+    const probe = engine.store.read().recallStrategy.adaptive.probes
+      .find(row => row.turnKey === holdout.turnKey)
+    assert.deepEqual(probe.budget, { unit: RECALL_TOKEN_UNIT, limit: 512 })
+    assert.ok(probe.comparisons.some(row => row.policyId === tokenPolicy.id
+      && row.budget.unit === RECALL_TOKEN_UNIT
+      && row.baselineTokens <= 512 && row.candidateTokens <= 512))
+    fail('token-holdout', 'positive', 'token-positive-failure', failureX)
+    settle('token-holdout', 'positive')
+    policies = engine.store.read().recallStrategy.adaptive.policies
+    const updated = policies.find(row => row.id === tokenPolicy.id)
+    assert.equal(updated.mode, 'observing', 'a token seed plus one token gain cannot borrow byte gains')
+    assert.equal(updated.samples.at(-1).replay.budget.limit, 512)
+    assert.equal(engine.statusView().recallStrategy.adaptive.recent
+      .find(row => row.id === tokenPolicy.id).replay.independentGains, 1)
+    assert.doesNotThrow(() => validateDoc(engine.store.read()))
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('an approved legacy policy is rechecked under the live token cap and can still be isolated', () => {
+  const fixture = buildEngine({ includeProtected: true })
+  const { root, engine, targetX, protectedRule, warning, fail, prepare, settle } = fixture
+  try {
+    const legacy = trainApiPolicy({ engine, fail, prepare, settle })
+    assert.equal(legacy.mode, 'approved')
+    engine.setRecallBudget({ unit: RECALL_TOKEN_UNIT, limit: 512 })
+    const live = prepare('legacy-active-token-budget', 'active', 'API 调用遇到阻塞，请定位原因')
+    assert.ok(live.offered.some(row => row.id === targetX.id && row.mode === 'method'))
+    assert.ok(live.offered.some(row => row.id === protectedRule.id && row.mode === 'method'))
+    assert.ok(live.offered.some(row => row.id === warning.id && row.mode === 'guard'))
+    assert.ok(live.contextTokens <= 512)
+    const probe = engine.store.read().recallStrategy.adaptive.probes
+      .find(row => row.turnKey === live.turnKey)
+    assert.ok(probe.activePolicies.includes(legacy.id), 'the currently checked legacy policy remains attributable')
+    assert.ok(!probe.comparisons.some(row => row.policyId === legacy.id),
+      'the new token probe does not append to its old byte evidence')
+
+    fail('legacy-active-token-budget', 'active', 'legacy-token-recurrence', failureX)
+    settle('legacy-active-token-budget', 'active')
+    const isolated = engine.store.read().recallStrategy.adaptive.policies.find(row => row.id === legacy.id)
+    assert.equal(isolated.mode, 'isolated', 'an actual recurrence still isolates the used policy')
+    assert.equal(isolated.reason, 'native_recurrence')
+    assert.equal(isolated.samples.at(-1).result, 'recurrence')
+    assert.equal(isolated.samples.at(-1).replay, undefined,
+      'cross-profile recurrence never becomes a comparable promotion sample')
+    assert.doesNotThrow(() => validateDoc(engine.store.read()))
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

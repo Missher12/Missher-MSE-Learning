@@ -16,6 +16,7 @@ export const SETTINGS_DEFAULTS = Object.freeze({
   modelId: '',
   reasoningEffort: '',
   maxContextBytes: 768,
+  maxContextTokens: null,
   dailyHour: 23,
   wakeIntervalMs: 600_000,
 })
@@ -30,6 +31,8 @@ export const Config = z.object({
   reasoningEffort: z.union([z.const(''), z.const('low'), z.const('medium'), z.const('high')])
     .default('').volatile(),
   maxContextBytes: z.number().min(128).max(1536).step(1).default(SETTINGS_DEFAULTS.maxContextBytes).volatile(),
+  maxContextTokens: z.union([z.number().min(128).max(1024).step(1), z.const(null)])
+    .default(SETTINGS_DEFAULTS.maxContextTokens).volatile(),
   dailyHour: z.number().min(0).max(23).step(1).default(SETTINGS_DEFAULTS.dailyHour).volatile(),
   wakeIntervalMs: z.number().min(60_000).max(3_600_000).step(1).default(SETTINGS_DEFAULTS.wakeIntervalMs).volatile(),
 })

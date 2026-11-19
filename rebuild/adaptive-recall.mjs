@@ -4,6 +4,8 @@ import { ALIAS_GROUPS, analyze } from '../src/recall.mjs'
 import { MAX_GUARDS_PER_TURN, MAX_METHODS_PER_TURN, MAX_RECALL_TOTAL, packRecall }
   from './recall.mjs'
 import { ACTION_GROUPS, OPERATION_IDS, ADAPTIVE_TASK_OPERATION_IDS } from './adaptive-operations.mjs'
+import { estimateRecallTokens, MAX_RECALL_LINE_BYTES, RECALL_INJECTION_PREFIX,
+  RECALL_TOKEN_UNIT } from './recall-budget.mjs'
 
 const hash = value => createHash('sha256').update(value).digest('hex')
 const offerKey = row => `${row.id}\u0000${row.version}\u0000${row.mode}`
@@ -229,7 +231,7 @@ function boundedTaskCondition(taskFeatures) {
 /** Freeze a task-aware v2 condition; child revisions only add an exclusion after a counterexample. */
 export function synthesizeAdaptiveTaskPolicy({ scope, qualification, entry, taskFeatures,
   turnKey, session, queryKey, now, parent = null, excludeFeature = null,
-  candidateFamilyId = null }) {
+  candidateFamilyId = null, budget = null }) {
   const base = parent === null ? boundedTaskCondition(taskFeatures) : [...parent.features]
   if (base === null || typeof entry?.lesson?.problemId !== 'string') return null
   const excludedFeatures = parent === null ? [] : [...parent.excludedFeatures]
@@ -244,10 +246,12 @@ export function synthesizeAdaptiveTaskPolicy({ scope, qualification, entry, task
   if (familyGeneration > 2) return null
   // Keep the original full-condition identity byte-for-byte stable for pending v1.3.16 signals.
   const familyId = parent?.familyId ?? candidateFamilyId ?? hash(JSON.stringify({ scope, qualification,
-    entryId: entry.id, version: entry.version, objective, firstQuery: queryKey }))
+    entryId: entry.id, version: entry.version, objective, firstQuery: queryKey,
+    ...(budget === null ? {} : { budget }) }))
   const identity = { schema: 'mse-adaptive-recall-v2', scope, qualification,
     entryId: entry.id, version: entry.version, objective, features: base,
-    excludedFeatures, familyId, familyGeneration, parentId: parent?.id ?? null }
+    excludedFeatures, familyId, familyGeneration, parentId: parent?.id ?? null,
+    ...(budget === null ? {} : { budget }) }
   const id = hash(JSON.stringify(identity))
   const sample = { turnKey, session, query: queryKey, result: 'discovery_hit',
     reason: parent === null ? 'unique_native_method_match' : 'counterexample_child', at: now }
@@ -269,7 +273,8 @@ export function synthesizeAdaptiveTaskCandidates(args) {
   const alternativeFeatures = [...common, operation]
   const candidateFamilyId = hash(JSON.stringify({ scope: args.scope,
     qualification: args.qualification, entryId: args.entry.id, version: args.entry.version,
-    objective: args.entry.lesson.problemId, firstQuery: args.queryKey, features: alternativeFeatures }))
+    objective: args.entry.lesson.problemId, firstQuery: args.queryKey, features: alternativeFeatures,
+    ...(args.budget === null || args.budget === undefined ? {} : { budget: args.budget }) }))
   const alternative = synthesizeAdaptiveTaskPolicy({ ...args, taskFeatures: alternativeFeatures,
     candidateFamilyId })
   if (alternative === null || alternative.id === full.id
@@ -300,10 +305,20 @@ export function adaptivePolicyMatches(policy, queryFeatures) {
     && !(policy.excludedFeatures ?? []).some(id => query.has(id))
 }
 
+const tokenContextSize = lines => estimateRecallTokens(`${RECALL_INJECTION_PREFIX}${lines.join('')}`)
+
+const isTokenBudget = budget => budget?.unit === RECALL_TOKEN_UNIT
+  && Number.isSafeInteger(budget.limit) && budget.limit >= 128 && budget.limit <= 1024
+const measuredSize = (lines, bytes, tokenMode) => tokenMode ? tokenContextSize(lines) : bytes
+const profileLimit = (maxBytes, budget, tokenMode) => tokenMode ? budget.limit
+  : Math.min(768, budget?.unit === 'bytes' ? budget.limit
+    : Number.isFinite(maxBytes) ? Math.max(0, maxBytes) : 768)
+
 /** Add one method while preserving each incumbent line, offer and byte-for-byte body. */
 export function addAdaptiveCandidate(incumbent, entry, { maxBytes = 768, now = Date.now(),
-  guardAdmit = null, prompt = '' } = {}) {
-  const limit = Math.min(768, Number.isFinite(maxBytes) ? Math.max(0, maxBytes) : 768)
+  guardAdmit = null, prompt = '', budget = null } = {}) {
+  const tokenMode = isTokenBudget(budget)
+  const limit = profileLimit(maxBytes, budget, tokenMode)
   const offered = incumbent?.offered ?? []
   const methods = offered.filter(row => row.mode === 'method').length
   const guards = offered.filter(row => row.mode === 'guard').length
@@ -319,8 +334,8 @@ export function addAdaptiveCandidate(incumbent, entry, { maxBytes = 768, now = D
       return { ok: false, reason: 'candidate_excluded' }
     }
   }
-  const remaining = limit - (incumbent?.bytes ?? 0)
-  if (remaining <= 0) return { ok: false, reason: 'byte_cap' }
+  const remaining = tokenMode ? MAX_RECALL_LINE_BYTES : limit - (incumbent?.bytes ?? 0)
+  if (!tokenMode && remaining <= 0) return { ok: false, reason: 'byte_cap' }
   const candidate = packRecall([{ entry }], { maxBytes: remaining, maxEntries: 1, now, guardAdmit })
   if (candidate.offered.length !== 1 || candidate.offered[0].mode !== 'method') {
     return { ok: false, reason: 'candidate_not_method_or_over_budget' }
@@ -332,17 +347,20 @@ export function addAdaptiveCandidate(incumbent, entry, { maxBytes = 768, now = D
   lines.splice(insertion, 0, candidate.lines[0])
   rows.splice(insertion, 0, candidate.offered[0])
   const bytes = incumbent.bytes + candidate.bytes
-  if (bytes > limit || rows.filter(row => row.mode === 'method').length > MAX_METHODS_PER_TURN
+  const size = measuredSize(lines, bytes, tokenMode)
+  if (size > limit || rows.filter(row => row.mode === 'method').length > MAX_METHODS_PER_TURN
     || rows.filter(row => row.mode === 'guard').length > MAX_GUARDS_PER_TURN
-    || rows.length > MAX_RECALL_TOTAL) return { ok: false, reason: 'offer_cap' }
+    || rows.length > MAX_RECALL_TOTAL) return { ok: false, reason: tokenMode ? 'token_cap' : 'offer_cap' }
   return { ok: true, reason: 'additive_candidate', selection: { ...incumbent, lines,
-    offered: rows, bytes } }
+    offered: rows, bytes, ...(tokenMode ? { contextTokens: size } : {}),
+    ...(budget === null ? {} : { budget }) } }
 }
 
 /** Add or replace one lower-ranked automatic method while preserving rules and all warnings. */
 export function competeAdaptiveCandidate(incumbent, entry, entries = [], { maxBytes = 768,
-  now = Date.now(), guardAdmit = null, prompt = '', protectedOffers = [] } = {}) {
-  const limit = Math.min(768, Number.isFinite(maxBytes) ? Math.max(0, maxBytes) : 768)
+  now = Date.now(), guardAdmit = null, prompt = '', protectedOffers = [], budget = null } = {}) {
+  const tokenMode = isTokenBudget(budget)
+  const limit = profileLimit(maxBytes, budget, tokenMode)
   const offered = incumbent?.offered ?? []
   const methods = offered.filter(row => row.mode === 'method').length
   if (offered.some(row => row.id === entry?.id && row.version === entry?.version)) {
@@ -356,21 +374,25 @@ export function competeAdaptiveCandidate(incumbent, entry, entries = [], { maxBy
     && analyze(prompt).keys.some(token => analyze(entry.exclusions).keys.includes(token))) {
     return { ok: false, reason: 'candidate_excluded' }
   }
-  const packed = packRecall([{ entry }], { maxBytes: limit, maxEntries: 1, now, guardAdmit })
+  const packed = packRecall([{ entry }], { maxBytes: tokenMode ? MAX_RECALL_LINE_BYTES : limit,
+    maxEntries: 1, now, guardAdmit })
   if (packed.offered.length !== 1 || packed.offered[0].mode !== 'method') {
     return { ok: false, reason: 'candidate_not_method_or_over_budget' }
   }
   const protectedKeys = new Set(protectedOffers.map(offerKey))
   const beforeGuard = offered.findIndex(row => row.mode === 'guard')
-  if (methods < MAX_METHODS_PER_TURN && offered.length < MAX_RECALL_TOTAL
-    && (incumbent.bytes ?? 0) + packed.bytes <= limit) {
+  if (methods < MAX_METHODS_PER_TURN && offered.length < MAX_RECALL_TOTAL) {
     const insertion = beforeGuard < 0 ? offered.length : beforeGuard
     const lines = [...incumbent.lines]
     const rows = [...offered]
     lines.splice(insertion, 0, packed.lines[0])
     rows.splice(insertion, 0, packed.offered[0])
-    return { ok: true, reason: 'additive_candidate', selection: { ...incumbent,
-      lines, offered: rows, bytes: incumbent.bytes + packed.bytes }, replaced: [] }
+    const bytes = (incumbent.bytes ?? 0) + packed.bytes
+    const size = measuredSize(lines, bytes, tokenMode)
+    if (size <= limit) return { ok: true, reason: 'additive_candidate',
+      selection: { ...incumbent, lines, offered: rows, bytes,
+        ...(tokenMode ? { contextTokens: size } : {}), ...(budget === null ? {} : { budget }) },
+      replaced: [] }
   }
   const byId = new Map((entries ?? []).map(row => [row.id, row]))
   const rank = new Map((incumbent.ranked ?? []).map((row, index) => [row.entry.id, index]))
@@ -381,18 +403,20 @@ export function competeAdaptiveCandidate(incumbent, entry, entries = [], { maxBy
   for (const candidate of removable) {
     const bytes = incumbent.bytes - Buffer.byteLength(incumbent.lines[candidate.index], 'utf8')
       + packed.bytes
-    if (bytes > limit) continue
     const lines = [...incumbent.lines]
     const rows = [...offered]
     lines.splice(candidate.index, 1, packed.lines[0])
     rows.splice(candidate.index, 1, packed.offered[0])
+    const size = measuredSize(lines, bytes, tokenMode)
+    if (size > limit) continue
     if (rows.filter(row => row.mode === 'method').length > MAX_METHODS_PER_TURN
       || rows.filter(row => row.mode === 'guard').length > MAX_GUARDS_PER_TURN
       || rows.length > MAX_RECALL_TOTAL) continue
     if (offered.some(row => (row.mode === 'guard' || byId.get(row.id)?.type === 'rule')
       && !rows.some(item => offerKey(item) === offerKey(row)))) continue
     return { ok: true, reason: 'replace_automatic_method', selection: { ...incumbent,
-      lines, offered: rows, bytes }, replaced: [candidate.row] }
+      lines, offered: rows, bytes, ...(tokenMode ? { contextTokens: size } : {}),
+      ...(budget === null ? {} : { budget }) }, replaced: [candidate.row] }
   }
   return { ok: false, reason: 'no_safe_slot' }
 }

@@ -37,6 +37,8 @@ import { commitMemoryFile, prepareMemoryDirectory, readBoundedMemoryFileBytes, r
 import { problemLoopValid, ensureProblemLoop } from '../src/problems.mjs'
 import { PYTHON_RECEIPT_BIRTH_PROOF_MAX_BYTES, pythonReceiptBirthProofValid } from '../src/failure-evidence.mjs'
 import { ADAPTIVE_TASK_OPERATION_IDS } from './adaptive-operations.mjs'
+import { MAX_RECALL_LINE_BYTES, RECALL_TOKEN_UNIT } from './recall-budget.mjs'
+import { MAX_RECALL_TOTAL } from './recall.mjs'
 
 // EVOLUTION016: format 4 adds the version evidence ledger (methodStats / methodHistory /
 // receipt.methodFeedback / request.methodFingerprint). Format 3 stays READ-COMPATIBLE: a pure
@@ -253,9 +255,19 @@ const entryValid = entry => isPlainObject(entry)
 
 const receiptValid = row => isPlainObject(row)
   && Object.keys(row).every(key => ['id', 'turnKey', 'at', 'bytes', 'offered', 'settled', 'outcome',
-    'evidenceHash', 'source', 'methodFeedback'].includes(key))
+    'evidenceHash', 'source', 'methodFeedback', 'contextTokens', 'budgetUnit', 'budgetLimit'].includes(key))
   && hex64(row.id) && hex64(row.turnKey) && Number.isFinite(row.at)
-  && Number.isSafeInteger(row.bytes) && row.bytes >= 0 && row.bytes <= 1536
+  && Number.isSafeInteger(row.bytes) && row.bytes >= 0
+  && (row.budgetUnit === undefined
+    ? row.contextTokens === undefined && row.budgetLimit === undefined && row.bytes <= 1536
+    : row.budgetUnit === RECALL_TOKEN_UNIT
+      ? Number.isSafeInteger(row.budgetLimit) && row.budgetLimit >= 128 && row.budgetLimit <= 1024
+        && Number.isSafeInteger(row.contextTokens) && row.contextTokens >= 0
+        && row.contextTokens <= row.budgetLimit
+        && row.bytes <= MAX_RECALL_LINE_BYTES * MAX_RECALL_TOTAL
+      : row.budgetUnit === 'bytes' && row.contextTokens === undefined
+        && Number.isSafeInteger(row.budgetLimit) && row.budgetLimit >= 128 && row.budgetLimit < 768
+        && row.bytes <= row.budgetLimit)
   && Array.isArray(row.offered) && row.offered.length <= 4
   && row.offered.every(x => isPlainObject(x) && entryHex(x.id) && Number.isSafeInteger(x.version)
     && Object.keys(x).every(key => ['id', 'version', 'mode'].includes(key))
@@ -530,13 +542,34 @@ const adaptiveOfferListValid = rows => Array.isArray(rows) && rows.length <= 3
   && new Set(rows.map(row => `${row.id}\u0000${row.version}\u0000${row.mode}`)).size === rows.length
   && rows.filter(row => row.mode === 'method').length <= 2
   && rows.filter(row => row.mode === 'guard').length <= 1
+const adaptiveBudgetValid = budget => isPlainObject(budget)
+  && Object.keys(budget).every(key => ['unit', 'limit'].includes(key))
+  && Number.isSafeInteger(budget.limit)
+  && (budget.unit === RECALL_TOKEN_UNIT ? budget.limit >= 128 && budget.limit <= 1024
+    : budget.unit === 'bytes' && budget.limit >= 128 && budget.limit < 768)
+const sameAdaptiveBudget = (left, right) => left === undefined || right === undefined
+  ? left === right : left.unit === right.unit && left.limit === right.limit
+const adaptiveMeasureValid = (row, budget, prefix = '') => budget === undefined
+  ? row.budget === undefined && row[`${prefix}Tokens`] === undefined
+    && Number.isSafeInteger(row[`${prefix}Bytes`]) && row[`${prefix}Bytes`] >= 0
+    && row[`${prefix}Bytes`] <= 768
+  : row.budget !== undefined && adaptiveBudgetValid(row.budget)
+    && row.budget.unit === budget.unit && row.budget.limit === budget.limit
+    && (budget.unit === RECALL_TOKEN_UNIT
+      ? Number.isSafeInteger(row[`${prefix}Tokens`]) && row[`${prefix}Tokens`] >= 0
+        && row[`${prefix}Tokens`] <= budget.limit
+        && Number.isSafeInteger(row[`${prefix}Bytes`]) && row[`${prefix}Bytes`] >= 0
+        && row[`${prefix}Bytes`] <= MAX_RECALL_LINE_BYTES * MAX_RECALL_TOTAL
+      : row[`${prefix}Tokens`] === undefined
+        && Number.isSafeInteger(row[`${prefix}Bytes`]) && row[`${prefix}Bytes`] >= 0
+        && row[`${prefix}Bytes`] <= budget.limit)
 const adaptiveReplayProjectionValid = row => isPlainObject(row)
   && ['baselineOffers', 'candidateOffers', 'protectedOffers', 'baselineBytes', 'candidateBytes',
     'matched', 'observedEntry'].every(key => Object.hasOwn(row, key))
   && adaptiveOfferListValid(row.baselineOffers) && adaptiveOfferListValid(row.candidateOffers)
   && adaptiveOfferListValid(row.protectedOffers)
-  && Number.isSafeInteger(row.baselineBytes) && row.baselineBytes >= 0 && row.baselineBytes <= 768
-  && Number.isSafeInteger(row.candidateBytes) && row.candidateBytes >= 0 && row.candidateBytes <= 768
+  && adaptiveMeasureValid(row, row.budget, 'baseline')
+  && adaptiveMeasureValid(row, row.budget, 'candidate')
   && typeof row.matched === 'boolean'
   && isPlainObject(row.observedEntry) && entryHex(row.observedEntry.id)
   && Number.isSafeInteger(row.observedEntry.version) && row.observedEntry.version >= 1
@@ -551,7 +584,8 @@ const adaptiveSampleValid = row => isPlainObject(row)
   && (row.replay === undefined || (isPlainObject(row.replay)
     && Object.keys(row.replay).every(key => ['features', 'baselineHasTarget', 'canAdd', 'expected',
       'matched', 'baselineOffers', 'candidateOffers', 'protectedOffers', 'baselineBytes',
-      'candidateBytes', 'observedEntry', 'nativeCheckEvent'].includes(key))
+      'candidateBytes', 'baselineTokens', 'candidateTokens', 'budget', 'observedEntry',
+      'nativeCheckEvent'].includes(key))
     && Array.isArray(row.replay.features) && row.replay.features.length <= 8
     && row.replay.features.every(safeAdaptiveFeature)
     && new Set(row.replay.features).size === row.replay.features.length
@@ -560,7 +594,8 @@ const adaptiveSampleValid = row => isPlainObject(row)
     && (row.replay.nativeCheckEvent === undefined || (row.result === 'negative_control'
       && row.replay.baselineOffers !== undefined && hex64(row.replay.nativeCheckEvent)))
     && (row.replay.baselineOffers === undefined
-      ? ['matched', 'candidateOffers', 'protectedOffers', 'baselineBytes', 'candidateBytes', 'observedEntry']
+      ? ['matched', 'candidateOffers', 'protectedOffers', 'baselineBytes', 'candidateBytes',
+        'baselineTokens', 'candidateTokens', 'budget', 'observedEntry']
         .every(key => row.replay[key] === undefined)
       : adaptiveReplayProjectionValid(row.replay))))
   && Number.isFinite(row.at)
@@ -568,7 +603,8 @@ const adaptivePolicyValid = row => isPlainObject(row)
   && Object.keys(row).every(key => ['id', 'schema', 'scope', 'qualification', 'entryId', 'version',
     'objective', 'features', 'mode', 'generation', 'positives', 'negativeControls', 'rejections', 'firstSession',
     'firstQuery', 'reason', 'createdAt', 'updatedAt', 'samples', 'excludedFeatures', 'familyId',
-    'familyGeneration', 'parentId'].includes(key))
+    'familyGeneration', 'parentId', 'budget'].includes(key))
+  && (row.budget === undefined || adaptiveBudgetValid(row.budget))
   && hex64(row.id) && ['mse-adaptive-recall-v1', 'mse-adaptive-recall-v2'].includes(row.schema)
   && hex64(row.scope) && hex64(row.qualification) && entryHex(row.entryId)
   && Number.isSafeInteger(row.version) && row.version >= 1 && hex64(row.objective)
@@ -601,6 +637,7 @@ const adaptivePolicyValid = row => isPlainObject(row)
   && Number.isFinite(row.createdAt) && Number.isFinite(row.updatedAt)
   && Array.isArray(row.samples) && row.samples.length >= 1 && row.samples.length <= 8
   && row.samples.every(sample => adaptiveSampleValid(sample)
+    && (sample.replay === undefined || sameAdaptiveBudget(row.budget, sample.replay.budget))
     && (row.schema !== 'mse-adaptive-recall-v2'
       || !['holdout_hit', 'holdout_miss', 'negative_control', 'negative'].includes(sample.result)
       || sample.replay !== undefined && adaptiveReplayProjectionValid(sample.replay)))
@@ -608,15 +645,17 @@ const adaptivePolicyValid = row => isPlainObject(row)
   && Buffer.byteLength(JSON.stringify(row), 'utf8') <= ADAPTIVE_POLICY_ROW_BYTES
 const adaptiveComparisonValid = row => isPlainObject(row)
   && Object.keys(row).every(key => ['policyId', 'baselineHasTarget', 'canAdd', 'matched',
-    'baselineOffers', 'candidateOffers', 'protectedOffers', 'baselineBytes', 'candidateBytes'].includes(key))
+    'baselineOffers', 'candidateOffers', 'protectedOffers', 'baselineBytes', 'candidateBytes',
+    'baselineTokens', 'candidateTokens', 'budget'].includes(key))
   && hex64(row.policyId) && typeof row.baselineHasTarget === 'boolean' && typeof row.canAdd === 'boolean'
   && (row.baselineOffers === undefined
-    ? ['matched', 'candidateOffers', 'protectedOffers', 'baselineBytes', 'candidateBytes']
+    ? ['matched', 'candidateOffers', 'protectedOffers', 'baselineBytes', 'candidateBytes',
+      'baselineTokens', 'candidateTokens', 'budget']
       .every(key => row[key] === undefined)
     : typeof row.matched === 'boolean' && adaptiveOfferListValid(row.baselineOffers)
       && adaptiveOfferListValid(row.candidateOffers) && adaptiveOfferListValid(row.protectedOffers)
-      && Number.isSafeInteger(row.baselineBytes) && row.baselineBytes >= 0 && row.baselineBytes <= 768
-      && Number.isSafeInteger(row.candidateBytes) && row.candidateBytes >= 0 && row.candidateBytes <= 768
+      && adaptiveMeasureValid(row, row.budget, 'baseline')
+      && adaptiveMeasureValid(row, row.budget, 'candidate')
       && row.protectedOffers.every(offer => row.baselineOffers.some(base => base.id === offer.id
         && base.version === offer.version && base.mode === offer.mode)
         && row.candidateOffers.some(next => next.id === offer.id
@@ -636,7 +675,8 @@ const adaptiveSignalValid = row => isPlainObject(row)
 const adaptiveProbeValid = row => isPlainObject(row)
   && Object.keys(row).every(key => ['turnKey', 'scope', 'projectScope', 'environment', 'session',
     'query', 'taskQuery', 'features', 'taskFeatures', 'baselineOffers', 'offered', 'shadowPolicies', 'controlPolicies',
-    'activePolicies', 'comparisons', 'pending', 'at'].includes(key))
+    'activePolicies', 'comparisons', 'pending', 'at', 'budget'].includes(key))
+  && (row.budget === undefined || adaptiveBudgetValid(row.budget))
   && hex64(row.turnKey) && hex64(row.scope) && hex64(row.projectScope) && hex64(row.environment)
   && hex64(row.session) && hex64(row.query)
   && (row.taskQuery === undefined || hex64(row.taskQuery))
@@ -655,6 +695,7 @@ const adaptiveProbeValid = row => isPlainObject(row)
   && row.activePolicies.every(hex64) && new Set(row.activePolicies).size === row.activePolicies.length
   && Array.isArray(row.comparisons) && row.comparisons.length <= 8
   && row.comparisons.every(adaptiveComparisonValid)
+  && row.comparisons.every(item => sameAdaptiveBudget(row.budget, item.budget))
   && new Set(row.comparisons.map(item => item.policyId)).size === row.comparisons.length
   && Array.isArray(row.pending) && row.pending.length <= 8 && row.pending.every(adaptiveSignalValid)
   && Number.isFinite(row.at)

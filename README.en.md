@@ -2,7 +2,7 @@
 
 ![MSE Learning · 持久学习（品牌插画）](docs/images/cover-v2.webp)
 
-MSE learns reusable corrections and failure lessons for DSH. **1.4.3** can add relevant experience before the next model step after a trusted tool failure or repeated, explicitly classified check, within one full-turn recall budget and the existing source boundaries. Recall policies activate or roll back based on observed evidence.
+MSE learns reusable corrections and failure lessons for DSH. **1.4.4** aligns the recall limit with DSH Memory's token estimate, defaults to 512, and allows 128–1024. Existing settings below 768 B remain byte limits until Token is explicitly selected. First-step recall, failure follow-ups, and repeated-operation follow-ups share one per-turn budget; receipts keep their actual UTF-8 byte counts. Trusted tool failures and repeated, explicitly classified checks can add relevant lessons at the next model step within the existing source boundaries. Recall policies activate or roll back based on observed evidence.
 
 Checks run one restricted snapshot through a native tool and require Python plus a host sandbox reporting full read-only enforcement. Exit code 0, hard-coded success, cancellation, stale versions, and unpaired results do not establish a pass. Other Python scripts and business contracts remain unverified.
 

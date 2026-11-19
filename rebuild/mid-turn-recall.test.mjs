@@ -10,6 +10,7 @@ import { RebuildEngine } from './engine.mjs'
 import { MID_TURN_FAILURE_FIXTURE_IDS, MID_TURN_OPERATION_FIXTURE_IDS,
   classifyMidTurnFailure, midTurnOperation } from './mid-turn-recall.mjs'
 import bundle from './root.mjs'
+import { RECALL_TOKEN_UNIT } from './recall-budget.mjs'
 
 const probes = join(dirname(fileURLToPath(import.meta.url)), '.probes-mid-turn')
 mkdirSync(probes, { recursive: true })
@@ -55,10 +56,13 @@ test('R23 native rc.4 failure recalls one matching lesson before the next entere
   try {
     const engine = ctx.get('mseRebuild').engine
     const midTurnQueries = []
+    const midTurnTokens = []
     const prepareMidTurnRecall = engine.prepareMidTurnRecall.bind(engine)
     engine.prepareMidTurnRecall = options => {
       midTurnQueries.push(options)
-      return prepareMidTurnRecall(options)
+      const selected = prepareMidTurnRecall(options)
+      midTurnTokens.push(selected.contextTokens ?? 0)
+      return selected
     }
     const base = lesson({ id: '111111111111111111111111',
       instruction: '运行 Node 测试前先确认测试范围，再根据失败结果定位断言',
@@ -83,6 +87,9 @@ test('R23 native rc.4 failure recalls one matching lesson before the next entere
       part?.type === 'text' && part.text.includes('删除尾随逗号'))),
     'the first-step selection must not already contain the failure-specific method')
     const receiptBefore = structuredClone(engine.store.read().receipts.at(-1))
+    assert.equal(receiptBefore.budgetUnit, RECALL_TOKEN_UNIT)
+    assert.equal(receiptBefore.budgetLimit, 512)
+    assert.ok(receiptBefore.contextTokens <= 512)
     const turnKey = receiptBefore.turnKey
     assert.ok(receiptBefore.offered.some(row => row.id === base.id))
     assert.ok(!receiptBefore.offered.some(row => row.id === json.id))
@@ -116,6 +123,8 @@ test('R23 native rc.4 failure recalls one matching lesson before the next entere
     assert.ok(second.messages.some(message => message?.content?.some(part =>
       part?.type === 'text' && part.text.includes('删除尾随逗号'))),
     'the matching lesson should be available before the next entered model request')
+    assert.ok(receiptBefore.contextTokens + midTurnTokens[0] <= 512,
+      'the failure follow-up includes its own message prefix in the shared turn estimate')
     assert.deepEqual(engine.store.read().receipts.at(-1), receiptAfterFailure,
       'mid-turn recall must not change receipt outcome or efficacy attribution')
     assert.equal(engine.store.read().entries.find(row => row.id === json.id).injected, 1)
@@ -148,12 +157,12 @@ test('R23 native rc.4 failure recalls one matching lesson before the next entere
     const thirdStep = await send(3, [user])
     assert.equal(midTurnQueries.length, 1, 'one successful stage is not a repetition')
     await check(3, 'repeat-after-failure-2')
-    engine.maxContextBytes = 128 // lower live user setting; the original turn budget remains spent
+    engine.setRecallBudget({ unit: RECALL_TOKEN_UNIT, limit: 128 })
     await send(4, [user])
     assert.equal(midTurnQueries.length, 2,
       'a later distinct repeated operation still gets its own query after the failure query')
     assert.ok(midTurnQueries[1].prompt.includes('suite validation stage'))
-    assert.equal(midTurnQueries[1].maxBytes, 0, 'the lower live byte ceiling is enforced cumulatively')
+    assert.equal(midTurnQueries[1].maxTokens, 0, 'the lower live token ceiling is enforced cumulatively')
     assert.ok(engine.statusView().collection.skipped.some(row => row.reason === '本回合召回预算已用完'),
       'an exhausted budget returns a readable local reason')
     assert.ok(thirdStep.kind === 'enter')
@@ -253,10 +262,13 @@ test('a second objectively repeated test stage queues one query and can use the 
       check: 'node --test checks.test.mjs' })
     host.engine.store.transaction(doc => { doc.entries.push(base, repeated); return true })
     const queries = []
+    const selectionTokens = []
     const originalPrepare = host.engine.prepareMidTurnRecall.bind(host.engine)
     host.engine.prepareMidTurnRecall = options => {
       queries.push(options)
-      return originalPrepare(options)
+      const selected = originalPrepare(options)
+      selectionTokens.push(selected.contextTokens ?? 0)
+      return selected
     }
     const { message, decision: first } = await host.start(session, 3,
       '请更新 README 并运行 Node 测试，整理失败项')
@@ -283,6 +295,8 @@ test('a second objectively repeated test stage queues one query and can use the 
       'operation retrieval uses only fixed task/category labels')
     assert.ok(offeredText(third).includes('two consecutive suite validation passes'),
       'the repeat-specific lesson is recalled at the next model step')
+    assert.ok(receiptBefore.contextTokens + selectionTokens[0] <= 512,
+      'the repeated-operation follow-up consumes only the remaining turn budget')
     assert.deepEqual(host.engine.store.read().receipts.at(-1), receiptBefore,
       'the later query does not rewrite the first request receipt')
     assert.equal(host.engine.store.read().entries.find(row => row.id === repeated.id).injected, 1)
@@ -291,6 +305,30 @@ test('a second objectively repeated test stage queues one query and can use the 
     await host.enter(session, 3, 4, [message])
     assert.equal(queries.length, 1, 'the same normalized operation class triggers at most once per turn')
     assert.ok(second.kind === 'enter')
+  } finally { host.fiber.dispose() }
+})
+
+test('mid-turn setting changes across budget units skip the queued recall without throwing', async () => {
+  const fixture = JSON.parse(readFileSync(
+    new URL('../tests/fixtures/native-a3-diagnostic.json', import.meta.url), 'utf8'))
+  const id = 'mse-midturn-budget-switch'
+  const host = await makeNativeHost([id])
+  try {
+    const session = host.sessions.get(id)
+    const { message } = await host.start(session, 91, '请更新 README 并检查 JSON 解析错误')
+    let recallCalls = 0
+    const original = host.engine.prepareMidTurnRecall.bind(host.engine)
+    host.engine.prepareMidTurnRecall = options => { recallCalls += 1; return original(options) }
+    host.engine.setRecallBudget({ unit: 'bytes', limit: 512 })
+    const failed = { isError: false, value: { exitCode: 1, cwd: host.dir,
+      stdout: { text: '', truncated: false }, stderr: { text: fixture.text, truncated: false } } }
+    await host.nativeTool(session, { turn: 91, step: 1, callId: 'budget-switch-failure',
+      command: 'python3 scripts/check_json.py', result: failed, resultText: 'Process failed with exit code 1.' })
+    const next = await host.enter(session, 91, 2, [message])
+    assert.equal(recallCalls, 0, 'a token-budget turn never passes old bytes into the new byte selector')
+    assert.ok(host.engine.statusView().collection.skipped.some(row =>
+      row.reason === 'mid_turn_budget_unit_changed'))
+    assert.equal(next.kind, 'enter')
   } finally { host.fiber.dispose() }
 })
 

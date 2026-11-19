@@ -1598,7 +1598,9 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
         steps: ['定位受影响测试', '只跑受影响部分'], check: { check: 'node --test 受影响文件' },
         evidenceIds: [], evidenceHash: 'b'.repeat(64) }],
       recall: [{ at: 1000, bytes: 240, settled: true, outcome: 'completed',
-        offered: [{ id: 'mem_aaaaaaaaaaaaaa11111111', version: 2 }] }],
+        offered: [{ id: 'mem_aaaaaaaaaaaaaa11111111', version: 2 }] },
+      { at: 1050, bytes: 900, contextTokens: 320, budgetUnit: 'dsh-memory-estimated-tokens-v1',
+        budgetLimit: 512, settled: true, outcome: 'completed', offered: [] }],
       tasks: [{ ticket: 'tk0', kind: 'reflect', at: 1150, settled: true, terminal: 'model_failed',
         dispatchedAt: 1140, usageTotal: 120, usageUnknown: false, sourceSessionId: 'sQ1',
         outputBytes: 682, finishKind: 'max-tokens', verdictFields: ['instruction'],
@@ -1761,10 +1763,14 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
       const render = () => { cursor = 0; return section.Page(props) }
       const change = (tree, label, value) => input(tree, label).props.onChange({ currentTarget: { value } })
       assert.equal(input(overviewTree, '空闲检查间隔').props.value, '10')
+      const recallPicker = menu(overviewTree, 'recall-limit')
+      assert.equal(recallPicker.props.selectedId, 'tokens:512',
+        'the shipped 768-byte default resolves to 512 Token estimate')
+      assert.ok(recallPicker.props.items.some(option => option.label === '512 Token 估算'))
       change(overviewTree, '空闲检查间隔', '2.5')
       await button(render(), '保存 · 空闲检查间隔').props.onClick()
       await menu(render(), 'daily-hour').props.onSelect('9')
-      await menu(render(), 'recall-limit').props.onSelect('512')
+      await menu(render(), 'recall-limit').props.onSelect('tokens:512')
       change(render(), '服务商 ID', 'test-provider')
       await button(render(), '保存 · 后台模型').props.onClick()
       assert.equal(writes.length, 3, 'a partial model route never writes')
@@ -1772,9 +1778,25 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
       menu(render(), 'reasoning-effort').props.onSelect('high')
       await button(render(), '保存 · 后台模型').props.onClick()
       assert.deepEqual(writes, [
-        { wakeIntervalMs: 150_000 }, { dailyHour: 9 }, { maxContextBytes: 512 },
+        { wakeIntervalMs: 150_000 }, { dailyHour: 9 }, { maxContextTokens: 512 },
         { modelProvider: 'test-provider', modelId: 'test-model', reasoningEffort: 'high' },
       ])
+      settingsSnapshot = { ...settingsSnapshot, value: { ...settingsSnapshot.value,
+        maxContextBytes: 512, maxContextTokens: null } }
+      settingsChanged()
+      const legacyRecall = menu(render(), 'recall-limit')
+      assert.equal(legacyRecall.props.selectedId, 'bytes:512', 'an old sub-768 value remains a byte limit')
+      assert.ok(legacyRecall.props.items.some(option => option.id === 'bytes:512'
+        && option.label.includes('旧设置')))
+      await legacyRecall.props.onSelect('tokens:384')
+      assert.deepEqual(writes.at(-1), { maxContextTokens: 384 },
+        'choosing Token leaves the legacy byte setting untouched')
+      settingsSnapshot = { ...settingsSnapshot, value: { ...settingsSnapshot.value, maxContextTokens: 500 } }
+      settingsChanged()
+      const customTokenLimit = menu(render(), 'recall-limit')
+      assert.equal(customTokenLimit.props.selectedId, 'tokens:500')
+      assert.ok(customTokenLimit.props.items.some(option => option.id === 'tokens:500'
+        && option.label === '500 Token 估算'), 'the current valid non-preset limit remains selectable')
       settingsSnapshot = { ...settingsSnapshot, value: { ...settingsSnapshot.value, reflectionEnabled: false } }
       settingsChanged()
       const disabledLearning = render()
@@ -1867,6 +1889,8 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
       cursor = 0
       const recallTree = JSON.stringify(section.Page({ ...props, initialTab: 'recall' }))
       assert.match(recallTree, /注入记录/u)
+      assert.match(recallTree, /320 Token 估算/u, 'new token receipts show the estimate')
+      assert.match(recallTree, /240 B/u, 'older receipts keep their real byte display')
       assert.match(recallTree, /改插件必须在源码里修改/u,
         'the recall maps the offered version to the REAL rule summary, not just an id')
       assert.match(recallTree, /mem_aaaaaaaaaaaaaa11111111/u, 'the full id is readable in the expansion')

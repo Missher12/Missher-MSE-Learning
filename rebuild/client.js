@@ -78,7 +78,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     settingsSaveFailed: '保存失败，请重试。', saveSetting: '保存', cancelSetting: '取消',
     wakeInterval: '空闲检查间隔', minuteUnit: '分钟', invalidWake: '请输入 1–60 分钟。',
     dailyHour: '每日总结时间', dailyLocalTime: '本机时间，空闲时运行',
-    recallBytes: '单次召回上限',
+    recallBytes: '每轮召回上限',
+    recallTokenEstimate: 'Token 估算', recallLegacyBytes: '旧设置',
+    adaptiveByteEvidence: '旧版字节证据（≤768 B）',
     modelSettings: '后台模型', modelFromSource: '随来源会话', modelProvider: '服务商 ID',
     modelId: '模型 ID', reasoningEffort: '推理强度', defaultEffort: '默认',
     effortLow: '低', effortMedium: '中', effortHigh: '高',
@@ -176,7 +178,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     settingsSaveFailed: 'Save failed. Try again.', saveSetting: 'Save',
     cancelSetting: 'Cancel', wakeInterval: 'Idle check interval', minuteUnit: 'min',
     invalidWake: 'Enter 1–60 minutes.', dailyHour: 'Daily summary time',
-    dailyLocalTime: 'Local time, while idle', recallBytes: 'Recall limit',
+    dailyLocalTime: 'Local time, while idle', recallBytes: 'Per-turn recall limit',
+    recallTokenEstimate: 'Token estimate', recallLegacyBytes: 'legacy setting',
+    adaptiveByteEvidence: 'Legacy byte evidence (≤768 B)',
     modelSettings: 'Background model', modelFromSource: 'Source session', modelProvider: 'Provider ID',
     modelId: 'Model ID', reasoningEffort: 'Reasoning effort', defaultEffort: 'Default',
     effortLow: 'Low', effortMedium: 'Medium', effortHigh: 'High',
@@ -1067,8 +1071,18 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const dailyPartial = (view?.daily?.daysProcessed ?? []).filter(item => item.partial)
 
     // ── 常规 ──────────────────────────────────────────────────────────────────────────────
-    const recallLimit = Math.min(settings?.maxContextBytes ?? 768, 768)
-    const recallChoices = [...new Set([128, 256, 384, 512, 640, 768, recallLimit])].sort((a, b) => a - b)
+    const legacyRecallBytes = settings?.maxContextBytes ?? 768
+    const configuredRecallTokens = settings?.maxContextTokens
+    const recallTokenLimit = Number.isSafeInteger(configuredRecallTokens)
+      && configuredRecallTokens >= 128 && configuredRecallTokens <= 1024
+      ? configuredRecallTokens : legacyRecallBytes >= 768 ? 512 : null
+    const recallValue = recallTokenLimit === null ? `bytes:${legacyRecallBytes}` : `tokens:${recallTokenLimit}`
+    const recallChoices = [...new Set([128, 256, 384, 512, 640, 768, 896, 1024,
+      ...(recallTokenLimit === null ? [] : [recallTokenLimit])])].sort((a, b) => a - b).map(tokens => ({
+      id: `tokens:${tokens}`, label: `${tokens} ${dict.recallTokenEstimate}`,
+    }))
+    if (recallTokenLimit === null) recallChoices.unshift({ id: `bytes:${legacyRecallBytes}`,
+      label: `${legacyRecallBytes} B · ${dict.recallLegacyBytes}` })
     const clockChoices = Array.from({ length: 24 }, (_, hour) => ({
       id: String(hour), label: `${String(hour).padStart(2, '0')}:00`,
     }))
@@ -1101,10 +1115,11 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
             triggerProps: { title: dict.dailyLocalTime, 'aria-description': dict.dailyLocalTime },
             onChange: value => mutateSettings({ dailyHour: Number(value) }) })),
         row('recall-limit', dict.recallBytes, null,
-          h(Picker, { label: dict.recallBytes, value: String(recallLimit),
-            options: recallChoices.map(bytes => ({ id: String(bytes), label: `${bytes} B` })),
+          h(Picker, { label: dict.recallBytes, value: recallValue, options: recallChoices,
             testId: 'recall-limit', disabled: !canEdit,
-            onChange: value => mutateSettings({ maxContextBytes: Number(value) }) })),
+            onChange: value => String(value).startsWith('tokens:')
+              ? mutateSettings({ maxContextTokens: Number(String(value).slice(7)) })
+              : mutateSettings({ maxContextBytes: Number(String(value).slice(6)), maxContextTokens: null }) })),
       ]),
       h('div', { key: 'advanced-settings', className: 'mse-control-list' }, [
         disclosure('background-model', dict.modelSettings, [
@@ -1239,6 +1254,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const adaptiveCandidateRow = policy => {
       const ready = policy.readiness ?? {}
       const legacy = ready.schema === 'v1'
+      const budgetLabel = policy.budget?.unit === 'dsh-memory-estimated-tokens-v1'
+        ? `${policy.budget.limit} ${dict.recallTokenEstimate}`
+        : policy.budget?.unit === 'bytes' ? `${policy.budget.limit} B` : dict.adaptiveByteEvidence
       const modeText = policy.mode === 'approved' ? dict.adaptiveApproved
         : policy.mode === 'isolated' ? dict.adaptiveIsolated : dict.adaptiveObserving
       const remainingGain = legacy ? null : Math.max(0,
@@ -1274,6 +1292,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
             + `${locale === 'en' ? 'Incomplete' : '不完整'} ${replay.incomplete ?? 0}`],
           [dict.adaptiveBlockers, blockers.length === 0 ? '—' : blockers.map(blockerLabel).join('；')],
         ], { left: true }), { id: `adaptive-${policy.id}`, stackMeta: true, meta: [modeText, progress,
+          budgetLabel,
           primaryBlocker ? blockerLabel(primaryBlocker)
             : ready.legacySuccessor ? dict.adaptiveSuccessor : null] })
     }
@@ -1298,7 +1317,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
           { id: `r-${item.at}`,
             meta: [item.settled ? dict.settledYes : dict.settledNo,
               item.outcome === null ? dict.outcomeUnknown : (outcomeLabels[item.outcome] ?? item.outcome),
-              `${item.bytes} B`] })), { id: 'recall-history' }),
+              item.budgetUnit === 'dsh-memory-estimated-tokens-v1'
+                ? `${item.contextTokens} ${dict.recallTokenEstimate}` : `${item.bytes} B`] })), { id: 'recall-history' }),
       (view.recallStrategy?.adaptive?.decisions ?? []).length === 0 ? null
         : disclosure('rsi-decisions', `${dict.rsiPersisted} · ${view.recallStrategy.adaptive.decisions.length}`,
           view.recallStrategy.adaptive.decisions.slice(0, 8).map((item, index) => row(

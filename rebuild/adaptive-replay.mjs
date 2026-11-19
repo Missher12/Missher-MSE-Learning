@@ -1,6 +1,7 @@
 /** Offline replay over bounded feature and offer projections; no store, model call, or clock. */
 import { adaptivePolicyMatches } from './adaptive-recall.mjs'
 import { judge } from './adaptive-selection.mjs'
+import { MAX_RECALL_LINE_BYTES, RECALL_TOKEN_UNIT } from './recall-budget.mjs'
 
 const key = row => `${row.id}\u0000${row.version}\u0000${row.mode}`
 const sameOffers = (left, right) => left.length === right.length
@@ -10,6 +11,31 @@ const validOffer = row => row !== null && typeof row === 'object'
   && ['method', 'guard'].includes(row.mode)
 const has = (rows, id, version) => rows.some(row => row.id === id && row.version === version
   && row.mode === 'method')
+const validBudget = budget => budget !== null && typeof budget === 'object' && !Array.isArray(budget)
+  && Object.keys(budget).every(key => ['unit', 'limit'].includes(key))
+  && Number.isSafeInteger(budget.limit)
+  && (budget.unit === RECALL_TOKEN_UNIT ? budget.limit >= 128 && budget.limit <= 1024
+    : budget.unit === 'bytes' && budget.limit >= 128 && budget.limit < 768)
+const measuredForPolicy = (policy, row) => {
+  const budget = policy.budget
+  if (budget === undefined) return row.budget === undefined
+    && row.baselineTokens === undefined && row.candidateTokens === undefined
+    && row.baselineBytes <= 768 && row.candidateBytes <= 768
+  if (!validBudget(budget) || row.budget?.unit !== budget.unit || row.budget?.limit !== budget.limit) return false
+  if (budget.unit === RECALL_TOKEN_UNIT) return Number.isSafeInteger(row.baselineTokens)
+    && row.baselineTokens >= 0 && row.baselineTokens <= budget.limit
+    && Number.isSafeInteger(row.candidateTokens) && row.candidateTokens >= 0
+    && row.candidateTokens <= budget.limit
+    && row.baselineBytes <= MAX_RECALL_LINE_BYTES * 3
+    && row.candidateBytes <= MAX_RECALL_LINE_BYTES * 3
+  return budget.unit === 'bytes' && row.baselineTokens === undefined
+    && row.candidateTokens === undefined && row.baselineBytes <= budget.limit
+    && row.candidateBytes <= budget.limit
+}
+const budgetExceeded = (policy, row) => policy.budget === undefined
+  ? row.candidateBytes > 768
+  : policy.budget.unit === RECALL_TOKEN_UNIT
+    ? row.candidateTokens > policy.budget.limit : row.candidateBytes > policy.budget.limit
 
 function replayV1(policy) {
   const incumbent = { hits: 0, misses: 0, falseOffers: 0 }
@@ -59,7 +85,7 @@ function replayV2(policy) {
   const controlObjectives = new Set()
   const evidenceKeys = []
   let evaluated = 0, independentGains = 0, independentControls = 0, regressions = 0,
-    repeats = 0, incomplete = 0, maxCandidateBytes = 0
+    repeats = 0, incomplete = 0, maxCandidateBytes = 0, maxCandidateTokens = 0
   for (const sample of policy.samples ?? []) {
     if (!['holdout_hit', 'holdout_miss', 'negative_control', 'negative'].includes(sample.result)) continue
     if (typeof sample.turnKey === 'string') evidenceKeys.push(sample.turnKey)
@@ -71,8 +97,9 @@ function replayV2(policy) {
       && Array.isArray(row.baselineOffers) && Array.isArray(row.candidateOffers)
       && Array.isArray(row.protectedOffers) && row.baselineOffers.every(validOffer)
       && row.candidateOffers.every(validOffer) && row.protectedOffers.every(validOffer)
-      && Number.isSafeInteger(row.baselineBytes) && row.baselineBytes >= 0 && row.baselineBytes <= 768
-      && Number.isSafeInteger(row.candidateBytes) && row.candidateBytes >= 0 && row.candidateBytes <= 768
+      && Number.isSafeInteger(row.baselineBytes) && row.baselineBytes >= 0
+      && Number.isSafeInteger(row.candidateBytes) && row.candidateBytes >= 0
+      && measuredForPolicy(policy, row)
       && row.baselineOffers.length <= 3 && row.candidateOffers.length <= 3
       && row.baselineOffers.filter(offer => offer.mode === 'method').length <= 2
       && row.candidateOffers.filter(offer => offer.mode === 'method').length <= 2
@@ -94,9 +121,13 @@ function replayV2(policy) {
         && row.observedEntry.id !== policy.entryId && row.canAdd && !row.matched
         && !row.baselineHasTarget && has(row.baselineOffers, row.observedEntry.id, row.observedEntry.version)
         && sameOffers(row.baselineOffers, row.candidateOffers)
-        && row.baselineBytes === row.candidateBytes))
+        && row.baselineBytes === row.candidateBytes
+        && row.baselineTokens === row.candidateTokens))
     if (!complete) { incomplete++; continue }
     maxCandidateBytes = Math.max(maxCandidateBytes, row.candidateBytes)
+    if (Number.isSafeInteger(row.candidateTokens)) {
+      maxCandidateTokens = Math.max(maxCandidateTokens, row.candidateTokens)
+    }
     for (const base of row.baselineOffers) {
       if (base.mode === 'method' && !row.candidateOffers.some(next => key(next) === key(base))) {
         removed.add(base.id)
@@ -106,9 +137,9 @@ function replayV2(policy) {
     const candidateTarget = has(row.candidateOffers, policy.entryId, policy.version)
     const baselineObjective = has(row.baselineOffers, row.observedEntry.id, row.observedEntry.version)
     const candidateObjective = has(row.candidateOffers, row.observedEntry.id, row.observedEntry.version)
-    if (baselineObjective && !candidateObjective || row.candidateBytes > 768
+    if (baselineObjective && !candidateObjective || budgetExceeded(policy, row)
       || !row.matched && (!sameOffers(row.baselineOffers, row.candidateOffers)
-        || row.baselineBytes !== row.candidateBytes)
+        || row.baselineBytes !== row.candidateBytes || row.baselineTokens !== row.candidateTokens)
       || sample.result === 'holdout_miss' && (row.matched || baselineTarget || candidateTarget)
       || sample.result === 'holdout_hit' && (!row.expected || !row.matched || !row.canAdd || baselineTarget || !candidateTarget
         || !candidateObjective || row.observedEntry.id !== policy.entryId
@@ -136,6 +167,7 @@ function replayV2(policy) {
   }
   const report = { evaluated, independentGains, independentControls, regressions, repeats, incomplete,
     incumbent, candidate, removedMethods: [...removed].sort(), maxCandidateBytes,
+    ...(policy.budget?.unit === RECALL_TOKEN_UNIT ? { maxCandidateTokens } : {}),
     evidenceKeys: [...new Set(evidenceKeys)].sort() }
   const decision = judge({ id: policy.id ?? 'adaptive-candidate', policy, replay: report })
   return { ...report, approved: decision.admissible, reason: decision.reason }

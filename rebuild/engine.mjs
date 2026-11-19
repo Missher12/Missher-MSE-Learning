@@ -42,6 +42,8 @@ import { mechanismKey, resolveMethodVersion, versionWindow, ensureMethodStats, a
   sourceSnapshot }
   from './evolution.mjs'
 import { compareRecallWithUserRulePriority } from './recall-user-rule-priority.mjs'
+import { compareRecallWithUserRulePriorityByTokens, RECALL_TOKEN_UNIT, resolveRecallBudget, sameRecallBudget,
+  selectMidTurnRecallByTokens } from './recall-budget.mjs'
 import { selectMidTurnRecall } from './mid-turn-selection.mjs'
 import { RECALL_QUALIFICATION } from './recall-qualification.mjs'
 import { addAdaptiveCandidate, competeAdaptiveCandidate, adaptivePolicyMatches, adaptiveQueryFeatures,
@@ -138,7 +140,11 @@ function adaptiveComparisonProjection(doc, baseline, challenger, matched, additi
   const candidate = matched && challenger.ok ? challenger.selection : baseline
   return { baselineOffers: offerProjection(baseline), candidateOffers: offerProjection(candidate),
     protectedOffers: adaptiveProtectedOffers(doc, baseline, additionalProtected),
-    baselineBytes: baseline.bytes, candidateBytes: candidate.bytes, matched }
+    baselineBytes: baseline.bytes, candidateBytes: candidate.bytes, matched,
+    ...(baseline.budget === undefined ? {} : { budget: baseline.budget,
+      ...(Number.isSafeInteger(baseline.contextTokens) ? {
+        baselineTokens: baseline.contextTokens, candidateTokens: candidate.contextTokens,
+      } : {}) }) }
 }
 function adaptiveSampleProjection(policy, probe, comparison, signal, observedEntry = signal) {
   const features = adaptiveFeaturesFor(policy, probe)
@@ -149,6 +155,10 @@ function adaptiveSampleProjection(policy, probe, comparison, signal, observedEnt
       matched: comparison.matched, baselineOffers: comparison.baselineOffers,
       candidateOffers: comparison.candidateOffers, protectedOffers: comparison.protectedOffers,
       baselineBytes: comparison.baselineBytes, candidateBytes: comparison.candidateBytes,
+      ...(comparison.budget === undefined ? {} : { budget: comparison.budget,
+        ...(Number.isSafeInteger(comparison.baselineTokens) ? {
+          baselineTokens: comparison.baselineTokens, candidateTokens: comparison.candidateTokens,
+        } : {}) }),
       observedEntry: { id: observedEntry.id ?? observedEntry.entryId,
         version: observedEntry.version ?? observedEntry.entryVersion },
     } : {}) }
@@ -175,7 +185,8 @@ const adaptivePolicyTarget = (doc, policy) => {
 const hasAdaptiveV2Successor = (adaptive, policy) => policy?.schema === 'mse-adaptive-recall-v1'
   && adaptive.policies.some(row => row.schema === 'mse-adaptive-recall-v2'
     && row.scope === policy.scope && row.entryId === policy.entryId
-    && row.version === policy.version && row.objective === policy.objective)
+    && row.version === policy.version && row.objective === policy.objective
+    && sameRecallBudget(row, policy))
 const adaptiveEntryVisible = (entry, projectScope, environment) => entry.visibility === 'global'
   || (entry.originScope === projectScope && entry.originEnvironment === environment)
 function matchingCurrentMethods(doc, { problemId, signature, projectScope, environment, now,
@@ -217,14 +228,15 @@ function stageAdaptiveSignal(probe, signal) {
   return true
 }
 function adaptiveDiscoveryAllowed(existing, generated) {
-  if (existing.length === 0) return true
   if (generated?.schema !== 'mse-adaptive-recall-v2') return false
+  const comparable = existing.filter(policy => sameRecallBudget(policy, generated))
+  if (comparable.length === 0) return true
   const sameFeatures = policy => policy.features.length === generated.features.length
     && policy.features.every((id, index) => id === generated.features[index])
-  const legacy = existing.filter(policy => policy.schema === 'mse-adaptive-recall-v1')
+  const legacy = comparable.filter(policy => policy.schema === 'mse-adaptive-recall-v1')
   if (!legacy.every(policy => policy.mode === 'observing'
     || policy.mode === 'isolated' && !sameFeatures(policy))) return false
-  const peers = existing.filter(policy => policy.schema === 'mse-adaptive-recall-v2')
+  const peers = comparable.filter(policy => policy.schema === 'mse-adaptive-recall-v2')
   if (peers.length === 0) return true
   if (peers.length !== 1) return false
   const peer = peers[0]
@@ -402,7 +414,7 @@ function recallStrategyStatusView(doc, sourceAdmit = () => false) {
       recent: adaptivePolicies.slice(-8).reverse().map(policy => {
         const replay = replayAdaptivePolicy(policy)
         return { id: policy.id, entryId: policy.entryId, version: policy.version,
-          mode: policy.mode, features: policy.features,
+          mode: policy.mode, features: policy.features, budget: policy.budget ?? null,
           positives: policy.positives, negativeControls: policy.negativeControls,
           rejections: policy.rejections, reason: policy.reason,
           sourceAdmitted: adaptivePolicyTarget(doc, policy) === null ? null
@@ -636,7 +648,8 @@ function settleAdaptiveRecall(doc, { turnKey, sessionId, outcome, receipt, allow
       }
       const generated = synthesizeAdaptiveTaskCandidates({ scope: probe.scope,
         qualification: RECALL_QUALIFICATION.id, entry: target, taskFeatures: probe.taskFeatures,
-        turnKey, session: probe.session, queryKey: probe.taskQuery ?? probe.query, now })
+        turnKey, session: probe.session, queryKey: probe.taskQuery ?? probe.query, now,
+        budget: probe.budget ?? null })
       const candidate = generated.find(row => row.id === policyId)
       if (candidate === undefined || candidate.features.length !== signal.features.length
         || candidate.features.some((id, index) => id !== signal.features[index])) {
@@ -737,7 +750,8 @@ function settleAdaptiveRecall(doc, { turnKey, sessionId, outcome, receipt, allow
           continue
         }
         const children = narrowAdaptivePolicy(policy, probe.taskFeatures ?? [], { turnKey,
-          session: probe.session, queryKey: probe.taskQuery ?? probe.query, now })
+          session: probe.session, queryKey: probe.taskQuery ?? probe.query, now,
+          budget: probe.budget ?? null })
         let created = 0
         for (const child of children) {
           if (created >= 2 || family.length + created >= 3 || adaptive.policies.length >= ADAPTIVE_RECALL_POLICY_LIMIT) break
@@ -1734,12 +1748,17 @@ function revisionSnapshot(doc, referenceText, trustedBody) {
 }
 
 export class RebuildEngine {
-  constructor({ stateRoot, now = Date.now, maxContextBytes = DEFAULT_CONTEXT_BYTES } = {}) {
+  constructor({ stateRoot, now = Date.now, maxContextBytes = DEFAULT_CONTEXT_BYTES,
+    maxContextTokens = null } = {}) {
     check(maxContextBytes >= 128 && maxContextBytes <= 1536, 'invalid_context_bytes')
+    check(maxContextTokens === null || Number.isSafeInteger(maxContextTokens)
+      && maxContextTokens >= 128 && maxContextTokens <= 1024, 'invalid_context_tokens')
     this.store = new MemoryStore({ stateRoot })
     this.stateRoot = stateRoot
     this.now = now
     this.maxContextBytes = maxContextBytes
+    this.recallBudget = maxContextTokens === null ? null
+      : resolveRecallBudget({ maxContextBytes, maxContextTokens })
     this.settingsEnabled = true // the settings `enabled` switch, NOT the durable user pause
     this.busy = false
     this.route = null
@@ -1758,6 +1777,14 @@ export class RebuildEngine {
   /** The durable user pause lives IN the document: it survives wakes and restarts. */
   get paused() { return this.store.read().controls.userPaused === true }
   setSettingsEnabled(enabled) { this.settingsEnabled = enabled === true }
+  setRecallBudget(budget) {
+    check(isPlainObject(budget) && Number.isSafeInteger(budget.limit)
+      && (budget.unit === RECALL_TOKEN_UNIT ? budget.limit >= 128 && budget.limit <= 1024
+        : budget.unit === 'bytes' && budget.limit >= 128 && budget.limit < 768),
+    'invalid_recall_budget')
+    this.recallBudget = { unit: budget.unit, limit: budget.limit }
+    return this.recallBudget
+  }
   #blockedNow(doc) { return doc.controls.userPaused === true || this.settingsEnabled !== true }
   pause(paused) {
     check(typeof paused === 'boolean')
@@ -2138,6 +2165,8 @@ export class RebuildEngine {
       // first, capped — the page never receives the raw store.
       recall: doc.receipts.slice(-20).reverse().map(row => ({
         at: row.at, bytes: row.bytes, settled: row.settled, outcome: row.outcome ?? null,
+        ...(row.contextTokens === undefined ? {} : { contextTokens: row.contextTokens }),
+        ...(row.budgetUnit === undefined ? {} : { budgetUnit: row.budgetUnit, budgetLimit: row.budgetLimit }),
         // mode: 'method'|'guard'; null = a legacy receipt written before this field existed.
         offered: row.offered.map(x => ({ id: x.id, version: x.version, mode: x.mode ?? null })),
       })),
@@ -2427,7 +2456,8 @@ export class RebuildEngine {
             const generated = synthesizeAdaptiveTaskCandidates({ scope: strategyScope,
               qualification: RECALL_QUALIFICATION.id, entry: unique,
               taskFeatures: probe.taskFeatures, turnKey, session: probe.session,
-              queryKey: probe.taskQuery ?? probe.query, now: observedAt })
+              queryKey: probe.taskQuery ?? probe.query, now: observedAt,
+              budget: probe.budget ?? null })
             const existing = adaptive.policies.filter(row => row.scope === strategyScope
               && row.entryId === unique.id && row.version === unique.version)
             if (!baselineExplains && !alreadyOffered && !fixedTracked) {
@@ -2875,10 +2905,12 @@ export class RebuildEngine {
 
   // ── recall ──────────────────────────────────────────────────────────────────────────────────
   /** Read-only same-turn selection. It deliberately writes no receipt, turn usage, or RRSI data. */
-  prepareMidTurnRecall({ sessionId, turnId, projectKey, environmentId = null, prompt, maxBytes, maxMethods, maxGuards,
-    excludeOffers = [] }) {
+  prepareMidTurnRecall({ sessionId, turnId, projectKey, environmentId = null, prompt, maxBytes, maxTokens,
+    maxMethods, maxGuards, excludeOffers = [] }) {
     check(typeof prompt === 'string' && prompt.length <= 512, 'invalid_prompt')
-    check(Number.isSafeInteger(maxBytes) && maxBytes >= 0 && maxBytes <= DEFAULT_CONTEXT_BYTES
+    check((this.recallBudget?.unit === RECALL_TOKEN_UNIT
+      ? Number.isSafeInteger(maxTokens) && maxTokens >= 0 && maxTokens <= 1024
+      : Number.isSafeInteger(maxBytes) && maxBytes >= 0 && maxBytes <= DEFAULT_CONTEXT_BYTES)
       && Number.isSafeInteger(maxMethods) && maxMethods >= 0 && maxMethods <= 2
       && Number.isSafeInteger(maxGuards) && maxGuards >= 0 && maxGuards <= 1, 'invalid_mid_turn_budget')
     const turnKey = turnKeyOf(sessionId, turnId)
@@ -2894,16 +2926,24 @@ export class RebuildEngine {
       if (this.#materialOk(prompt, null) !== true) {
         return { ok: false, context: '', bytes: 0, offered: [], reason: '当前召回条件未通过材料检查' }
       }
-      const max = Math.min(maxBytes, this.maxContextBytes, DEFAULT_CONTEXT_BYTES)
-      const options = { prompt, scope: scopeOf(projectKey), environment: environmentOf(environmentId), maxBytes: max,
+      const tokenMode = this.recallBudget?.unit === RECALL_TOKEN_UNIT
+      const max = tokenMode ? Math.min(maxTokens, this.recallBudget.limit, 1024)
+        : Math.min(maxBytes, this.recallBudget?.unit === 'bytes'
+          ? this.recallBudget.limit : this.maxContextBytes, DEFAULT_CONTEXT_BYTES)
+      const options = { prompt, scope: scopeOf(projectKey), environment: environmentOf(environmentId),
+        maxBytes: tokenMode ? undefined : max, maxTokens: tokenMode ? max : undefined,
         maxMethods, maxGuards, excludeOffers, now: this.now(),
         guardAdmit: text => this.#materialOk(text, null) }
-      const selection = selectMidTurnRecall(doc.entries, options)
+      const selection = tokenMode ? selectMidTurnRecallByTokens(doc.entries, options)
+        : selectMidTurnRecall(doc.entries, options)
       if (selection.offered.length === 0) return { ok: true, context: '', bytes: 0, offered: [],
+        ...(tokenMode ? { contextTokens: 0, budget: { ...this.recallBudget } } : {}),
         reason: max === 0 || (maxMethods === 0 && maxGuards === 0)
           ? '本回合召回预算已用完' : '没有找到适用于当前任务的经验' }
       return { ok: true, context: selection.lines.join(''), bytes: selection.bytes,
-        offered: selection.offered, reason: null }
+        offered: selection.offered,
+        ...(tokenMode ? { contextTokens: selection.contextTokens, budget: { ...this.recallBudget } } : {}),
+        reason: null }
     } catch (error) {
       if (!storageFailure(error)) throw error
       this.noteCollectionSkip('mid_turn_recall_state_unavailable')
@@ -2961,9 +3001,18 @@ export class RebuildEngine {
             ...(existingAdaptiveProbe === undefined ? {} : { rsiProbe: adaptiveProbeTrace(existingAdaptiveProbe) }) })
         }
         const now = this.now()
-        const selectorOptions = { prompt, scope, environment, maxBytes: this.maxContextBytes, now,
-          guardAdmit: text => this.#materialOk(text, null) }
-        const { selection: baseline, candidate } = compareRecallWithUserRulePriority(doc.entries, selectorOptions)
+        const configuredBudget = this.recallBudget
+        const selectorOptions = { prompt, scope, environment,
+          maxBytes: configuredBudget?.unit === 'bytes' ? configuredBudget.limit : this.maxContextBytes,
+          now, guardAdmit: text => this.#materialOk(text, null) }
+        const comparison = configuredBudget?.unit === RECALL_TOKEN_UNIT
+          ? compareRecallWithUserRulePriorityByTokens(doc.entries,
+            { ...selectorOptions, maxTokens: configuredBudget.limit })
+          : compareRecallWithUserRulePriority(doc.entries, selectorOptions)
+        const attachBudget = selection => selection === null || configuredBudget === null
+          ? selection : { ...selection, budget: { ...configuredBudget } }
+        const baseline = attachBudget(comparison.selection)
+        const candidate = attachBudget(comparison.candidate)
         let selected = baseline
         const admitted = strategyEligible === true && typeof sessionId === 'string'
           && sessionId !== '' && !this.#blockedNow(doc) && this.#sourceOk(sessionId)
@@ -2997,16 +3046,23 @@ export class RebuildEngine {
             && preservesBaselineGuards
             && eligible.every(row => approvedStrategyMethod(strategy.rows, strategyScope, row)
               && !isolatedStrategyMethod(strategy.rows, strategyScope, row))
-          const mode = allApproved ? 'active' : 'shadow'
-          const tracked = allApproved ? eligible : unapproved
-          if (tracked.length > 0) {
-            const rows = tracked.map(row => ({ turnKey, scope: strategyScope,
-              session: sessionKeyOf(sessionId), qualification: RECALL_QUALIFICATION.id,
-              id: row.id, version: row.version, mode, generation: strategy.generation,
-              reason: 'candidate_difference' }))
-            if (appendRecallStrategyRows(doc, rows)) {
-              strategyWriteAttempted = true
-              if (allApproved) selected = candidate
+          if (configuredBudget !== null) {
+            // Historical approvals remain usable only when the candidate still fits the current
+            // selector and preserves every baseline guard/rule. They create no new cross-budget
+            // approval evidence.
+            if (allApproved) selected = candidate
+          } else {
+            const mode = allApproved ? 'active' : 'shadow'
+            const tracked = allApproved ? eligible : unapproved
+            if (tracked.length > 0) {
+              const rows = tracked.map(row => ({ turnKey, scope: strategyScope,
+                session: sessionKeyOf(sessionId), qualification: RECALL_QUALIFICATION.id,
+                id: row.id, version: row.version, mode, generation: strategy.generation,
+                reason: 'candidate_difference' }))
+              if (appendRecallStrategyRows(doc, rows)) {
+                strategyWriteAttempted = true
+                if (allApproved) selected = candidate
+              }
             }
           }
         }
@@ -3028,6 +3084,7 @@ export class RebuildEngine {
           const sourceAdmit = this.#adaptiveSourceGuard()
           const scopedPolicies = adaptive.policies.filter(policy => policy.scope === strategyScope
             && policy.qualification === RECALL_QUALIFICATION.id
+            && (sameRecallBudget(policy, configuredBudget) || policy.mode === 'approved')
             && ['observing', 'approved'].includes(policy.mode)
             && !(policy.mode === 'observing' && hasAdaptiveV2Successor(adaptive, policy))
             && adaptivePolicyTarget(doc, policy) !== null
@@ -3045,14 +3102,32 @@ export class RebuildEngine {
             const policyFeatures = policy.schema === 'mse-adaptive-recall-v2'
               ? taskFeatures : queryFeatures
             const matches = adaptivePolicyMatches(policy, policyFeatures)
+            const candidateBudgetOptions = configuredBudget === null ? {}
+              : { budget: configuredBudget,
+                maxBytes: configuredBudget.unit === 'bytes' ? configuredBudget.limit : this.maxContextBytes }
+            const comparable = sameRecallBudget(policy, configuredBudget)
+            if (!comparable) {
+              if (!matches || policy.mode !== 'approved' || activePolicies.length > 0) continue
+              const actual = policy.schema === 'mse-adaptive-recall-v2'
+                ? competeAdaptiveCandidate(selected, entry, doc.entries, { ...candidateBudgetOptions,
+                  now, guardAdmit: text => this.#materialOk(text, null), prompt,
+                  protectedOffers: legacyProtected })
+                : addAdaptiveCandidate(selected, entry, { ...candidateBudgetOptions,
+                  now, guardAdmit: text => this.#materialOk(text, null), prompt })
+              if (actual.ok) {
+                selected = actual.selection
+                activePolicies.push(policy.id)
+              }
+              continue
+            }
             const incumbent = policy.schema === 'mse-adaptive-recall-v2' ? adaptiveBaseline : selected
             const baselineHasTarget = incumbent.offered.some(row => row.id === policy.entryId
               && row.version === policy.version && row.mode === 'method')
             const comparison = policy.schema === 'mse-adaptive-recall-v2'
-              ? competeAdaptiveCandidate(incumbent, entry, doc.entries, { maxBytes: this.maxContextBytes,
+              ? competeAdaptiveCandidate(incumbent, entry, doc.entries, { ...candidateBudgetOptions,
                 now, guardAdmit: text => this.#materialOk(text, null), prompt,
                 protectedOffers: legacyProtected })
-              : addAdaptiveCandidate(incumbent, entry, { maxBytes: this.maxContextBytes,
+              : addAdaptiveCandidate(incumbent, entry, { ...candidateBudgetOptions,
                 now, guardAdmit: text => this.#materialOk(text, null), prompt })
             if (comparisons.length < 8) {
               comparisons.push(policy.schema === 'mse-adaptive-recall-v2'
@@ -3071,7 +3146,7 @@ export class RebuildEngine {
             if (policy.mode === 'approved') {
               if (activePolicies.length === 0) {
                 const actual = incumbent === selected ? comparison
-                  : competeAdaptiveCandidate(selected, entry, doc.entries, { maxBytes: this.maxContextBytes,
+                  : competeAdaptiveCandidate(selected, entry, doc.entries, { ...candidateBudgetOptions,
                     now, guardAdmit: text => this.#materialOk(text, null), prompt,
                     protectedOffers: legacyProtected })
                 if (!actual.ok) continue
@@ -3087,7 +3162,7 @@ export class RebuildEngine {
             session, query, taskQuery, features: queryFeatures, taskFeatures,
             baselineOffers: offerProjection(adaptiveBaseline), offered: offerProjection(selected), shadowPolicies,
             controlPolicies: controlPolicies.slice(0, 8), activePolicies, comparisons,
-            pending: [], at: now }
+            pending: [], ...(configuredBudget === null ? {} : { budget: { ...configuredBudget } }), at: now }
           adaptive.probes.push(probe)
           rsiProbeTrace = adaptiveProbeTrace(probe)
           adaptiveWriteAttempted = true
@@ -3095,7 +3170,11 @@ export class RebuildEngine {
         const { lines, bytes, offered } = selected
         if (offered.length > 0) {
           doc.receipts.push({ id: turnKey, turnKey, at: this.now(), bytes, offered, settled: false,
-            outcome: null, evidenceHash: null, source: null })
+            outcome: null, evidenceHash: null, source: null,
+            ...(configuredBudget === null ? {} : { budgetUnit: configuredBudget.unit,
+              budgetLimit: configuredBudget.limit,
+              ...(configuredBudget.unit === RECALL_TOKEN_UNIT
+                ? { contextTokens: selected.contextTokens } : {}) }) })
           if (doc.receipts.length > 256) doc.receipts = doc.receipts.slice(-256)
           doc.turnUsage.push({ turnKey, at: this.now() })
           if (doc.turnUsage.length > 128) doc.turnUsage = doc.turnUsage.slice(-128)
@@ -3111,6 +3190,9 @@ export class RebuildEngine {
           }
         }
         return { ok: true, context: lines.join(''), bytes, offered, turnKey,
+          ...(configuredBudget === null ? {} : { budget: { ...configuredBudget } }),
+          ...(configuredBudget?.unit === RECALL_TOKEN_UNIT
+            ? { contextTokens: selected.contextTokens } : {}),
           ...(typeof rsiProbeTrace === 'object' && rsiProbeTrace !== null ? { rsiProbe: rsiProbeTrace } : {}) }
       })
     } catch (error) {

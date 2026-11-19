@@ -1,6 +1,6 @@
 {
   "name": "@missher/dsh-mse-learning",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "description": "Native DSH learning from corrections and concrete failures, with adaptive recall evidence and activity history.",
   "type": "module",
   "private": true,
@@ -36,6 +36,7 @@
     "rebuild/mid-turn-recall.mjs",
     "rebuild/mid-turn-selection.mjs",
     "rebuild/recall.mjs",
+    "rebuild/recall-budget.mjs",
     "rebuild/recall-qualification.mjs",
     "rebuild/remote.mjs",
     "rebuild/root.mjs",
