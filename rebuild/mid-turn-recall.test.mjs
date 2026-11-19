@@ -176,7 +176,11 @@ async function makeNativeHost(sessionIds) {
     Session.create(id, undefined, { ...Session.create(id).header, cwd: dir })]))
   const ctx = new Context().root
   ctx.provide('agents', {})
-  ctx.provide('tools', {})
+  const toolGuards = []
+  ctx.provide('tools', { guard(handler) {
+    toolGuards.push(handler)
+    return () => toolGuards.splice(toolGuards.indexOf(handler), 1)
+  } })
   ctx.provide('llm', { async * stream() { throw new Error('unexpected provider call') } })
   ctx.provide('dshHomePath', name => join(stateRoot, name))
   await mountRegistryMirror(ctx, [{ path: realpathSync(dir), sessionIds }])
@@ -210,8 +214,118 @@ async function makeNativeHost(sessionIds) {
     await emit('session/event', session, nativeResult)
     return nativeResult
   }
-  return { dir, sessions, ctx, fiber, engine: ctx.get('mseRebuild').engine, emit, enter, start, nativeTool }
+  const proposeEdit = async (session, { turn, step, callId, path, fileText }) => {
+    const name = 'str_replace_editor'
+    const args = { command: 'create', path, file_text: fileText }
+    await emit('session/event', session, session.append('tool/call', {
+      turn, step, callId, name, arguments: JSON.stringify(args),
+    }))
+    const exec = { name, callId, rootCallId: callId, token: Symbol(callId),
+      arguments: args, agent: { session }, signal: new AbortController().signal }
+    return { exec, denial: toolGuards.map(handler => handler(exec)).find(value => value !== undefined) }
+  }
+  return { dir, sessions, ctx, fiber, engine: ctx.get('mseRebuild').engine, emit, enter, start,
+    nativeTool, proposeEdit }
 }
+
+const includesAdvice = (decision, text) => decision.messages.some(message => message.content?.some(part =>
+  part.type === 'text' && part.text.includes(text)))
+
+test('an active todo recalls the relevant experience before the next model step', async () => {
+  const id = 'mse-active-stage'
+  const host = await makeNativeHost([id])
+  try {
+    const session = host.sessions.get(id)
+    const rule = '发布插件前分别核对安装包版本和实际安装版本。'
+    assert.ok(host.engine.recordCorrection({ sessionId: id, turnId: 'saved', projectKey: host.dir,
+      text: rule }).ok)
+    const { decision: first } = await host.start(session, 1, '整理一下这个仓库')
+    assert.equal(includesAdvice(first, rule), false)
+    const update = status => host.emit('session/event', session, session.append('todo/write', { todos: [
+      { status, content: '发布插件前核对安装包版本和实际安装版本' },
+    ] }))
+    await update('pending')
+    assert.equal(includesAdvice(await host.enter(session, 1, 2, []), rule), false)
+    await update('in_progress')
+    assert.equal(includesAdvice(await host.enter(session, 1, 3, []), rule), true)
+    await update('in_progress')
+    assert.equal(includesAdvice(await host.enter(session, 1, 4, []), rule), false)
+  } finally { host.fiber.dispose() }
+})
+
+test('a direct style edit waits for its saved rule without counting the reminder as a failure', async () => {
+  const id = 'mse-style-stage'
+  const host = await makeNativeHost([id])
+  try {
+    const session = host.sessions.get(id)
+    const rule = '禁止使用紫色渐变。'
+    assert.ok(host.engine.recordCorrection({ sessionId: id, turnId: 'saved', projectKey: host.dir,
+      text: rule }).ok)
+    const { decision: first } = await host.start(session, 1, '开发一个新的设置页面')
+    assert.equal(includesAdvice(first, rule), false, 'the general request does not already recall the rule')
+    const path = join(host.dir, 'settings.css')
+    const content = '.panel { background: linear-gradient(135deg, violet, white); }'
+    const { exec, denial } = await host.proposeEdit(session, { turn: 1, step: 1, callId: 'first-style-write',
+      path, fileText: content })
+    assert.equal(denial?.info?.code, 'MSE_STAGE_RECALL_DEFERRED')
+    await host.emit('tools/result', exec, { isError: true, error: { message: denial.reason, info: denial.info } })
+    const parallel = await host.proposeEdit(session, { turn: 1, step: 1, callId: 'parallel-style-write',
+      path: join(host.dir, 'button.css'), fileText: content })
+    assert.equal(parallel.denial?.info?.code, 'MSE_STAGE_RECALL_DEFERRED')
+    await host.emit('tools/result', parallel.exec, { isError: true,
+      error: { message: parallel.denial.reason, info: parallel.denial.info } })
+    assert.equal(host.engine.store.read().turnFacts.find(row => row.sessionId === id)?.failures, 0)
+    const next = await host.enter(session, 1, 2, [])
+    assert.equal(includesAdvice(next, rule), true, 'the model sees the rule before it can retry')
+    assert.equal(host.engine.store.read().entries.find(entry => entry.instruction === rule).injected, 1)
+    const retry = await host.proposeEdit(session, { turn: 1, step: 2, callId: 'next-style-write',
+      path, fileText: content })
+    assert.equal(retry.denial, undefined, 'a historic rule is a one-time reminder, even if this edit is intentional')
+    assert.equal(includesAdvice(await host.enter(session, 1, 3, []), rule), false)
+  } finally { host.fiber.dispose() }
+})
+
+test('configuration reminders use the owning project and step budget', async () => {
+  const id = 'mse-config-stage'
+  const host = await makeNativeHost([id])
+  try {
+    const session = host.sessions.get(id)
+    const saved = '编辑项目配置文件时必须保留已有自定义参数。'
+    const foreign = '项目配置文件必须生成隔壁项目的参数。'
+    for (const [text, projectKey] of [[saved, host.dir], [foreign, join(host.dir, 'another-project')]]) {
+      assert.ok(host.engine.recordCorrection({ sessionId: id, turnId: 'saved', text, projectKey }).ok)
+    }
+    const { decision: first } = await host.start(session, 1, '把手头的工作接着完成')
+    assert.equal(includesAdvice(first, saved), false)
+    const edit = (callId, path) => host.proposeEdit(session, { turn: 1, step: 1, callId, path,
+      fileText: '{ "compilerOptions": { "strict": true } }' })
+    assert.equal((await edit('foreign-edit', join(workRoot, 'tsconfig.json'))).denial, undefined)
+    const local = await edit('local-edit', join(host.dir, 'tsconfig.json'))
+    assert.equal(local.denial?.info?.code, 'MSE_STAGE_RECALL_DEFERRED')
+    const next = await host.enter(session, 1, 2, [])
+    assert.ok(includesAdvice(next, saved))
+    assert.equal(includesAdvice(next, foreign), false)
+  } finally { host.fiber.dispose() }
+})
+
+test('a full method budget never holds a write for advice that cannot be delivered', async () => {
+  const id = 'mse-stage-full-budget'
+  const host = await makeNativeHost([id])
+  try {
+    const session = host.sessions.get(id)
+    for (const text of ['运行 Node 测试前确认本轮只验证涉及的测试套件。',
+      'Node 测试输出用原始断言结果，不用总结来代替。',
+      '禁止使用紫色渐变。']) {
+      assert.ok(host.engine.recordCorrection({ sessionId: id, turnId: 'saved', projectKey: host.dir, text }).ok)
+    }
+    await host.start(session, 1, '继续处理 Node 测试套件与断言结果')
+    assert.equal(host.engine.store.read().receipts.at(-1)?.offered.filter(row => row.mode === 'method').length, 2)
+    const edit = await host.proposeEdit(session, { turn: 1, step: 1, callId: 'no-room-to-remind',
+      path: join(host.dir, 'button.css'), fileText: '.btn { background: linear-gradient(purple, white); }' })
+    assert.equal(edit.denial, undefined)
+    assert.equal(includesAdvice(await host.enter(session, 1, 2, []), '禁止使用紫色渐变。'), false)
+  } finally { host.fiber.dispose() }
+})
 
 test('public diagnostic fixture categories are closed and do not invent a JSON cause', () => {
   const categories = JSON.parse(readFileSync(

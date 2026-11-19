@@ -2,17 +2,14 @@
  * mse-rebuild · DSH plugin entry — the thin native wiring, on the released bundle's real
  * contracts (same plugin identity `mse-learning`, upgraded to the slim chain).
  *
- *   ctx.on('agent/pre-step')  — trusted CURRENT-turn user messages only (role user, source kind
- *                              user, never an MSE-produced or plugin message), only step 1:
- *                              「记住/以后/下次/纠正/不要再…」-style corrections are stored
- *                              immediately as long-term rules (global by default; an explicit
- *                              「仅本项目/这个仓库」 binds scope to session.header.cwd — there is
- *                              no such thing as session.projectKey), then recall injection ≤2/768B
- *                              with the host's own createUserMessage shape.
+ *   ctx.on('agent/pre-step')  — first-step recall and trusted user corrections; later stages use
+ *                              the same turn's remaining advice budget.
+ *   ctx.tools.guard()        — direct native style/config edits can wait once for a saved rule.
  *   ctx.on('tools/result')    — rc.4 facts: cancelled/timeout/error/exit precedence; development
  *                              checks stay count-only and pending until the session's exact
  *                              tool/result event is durable.
- *   ctx.on('session/event')   — validates that persisted call/result pair; turn/end credits only
+ *   ctx.on('session/event')   — reads active todo stages and validates persisted call/result pairs.
+ *                              turn/end credits only
  *                              durable checks and settles reason.kind (aborted → cancelled).
  *   ctx.provide('mseRebuild') + ./remote Remotes — status read face and the human control face.
  *   idle wake — reflection/revision first, then the daily digest at/after local 23:00; persistent
@@ -26,7 +23,7 @@
 import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { FAILURE_LESSON_MAX_BYTES } from '../src/failure-lessons.mjs'
 import { usageTokens } from '../adapters/dsh/usage.mjs'
@@ -37,7 +34,8 @@ import { readModel, mseMessageSource, isMseSource } from './llm.mjs'
 import { SENSITIVE_PATTERN, AUTHORITY_PATTERN } from '../src/failure-evidence.mjs'
 import { runChecker, runDevelopmentChecker } from './checker.mjs'
 import { adaptiveTaskFeatures, adaptiveTaskFeatureLabels } from './adaptive-recall.mjs'
-import { classifyMidTurnFailure, midTurnOperation, midTurnRecallPrompt } from './mid-turn-recall.mjs'
+import { classifyMidTurnFailure, fileRecallStages, midTurnOperation, midTurnRecallPrompt,
+  nativeFileChange, plannedRecallStage } from './mid-turn-recall.mjs'
 import { verifyPythonJsonLoader } from './python-verifier.mjs'
 import { verifyPythonReceiptContract } from './python-receipt-verifier.mjs'
 import { apply as applyRemotes } from './remote.mjs'
@@ -48,6 +46,9 @@ import { ENTRY_LIMIT } from './memory.mjs'
 
 export const name = 'mse-learning'
 export const inject = ['agents', 'tools', 'llm', 'dshHomePath', 'workspaceRegistry']
+
+const STAGE_RECALL_DEFERRED = 'MSE_STAGE_RECALL_DEFERRED'
+const STAGE_RECALL_LIMIT = 16
 
 // Harmless lead-ins (记住/以后/下次/纠正) may be stripped; NEGATIONS (不要再/别再) are part of
 // the rule's meaning and must survive into storage and recall — stripping them inverts what the
@@ -490,6 +491,7 @@ export function apply(ctx, config = {}) {
   const MID_TURN_RESULTS_LIMIT = 64
   const midTurnStates = new Map() // bounded, ephemeral full-turn budget and safe task labels
   const pendingMidTurnResults = new Map() // exact native call/result candidates; never raw output
+  const deferredStageCalls = new WeakSet()
   const closedMidTurnKeys = new Set() // replay/cancel/end tombstones prevent budget reinitialization
   const midTurnKey = (sessionId, turnId) => `${sessionId}\u0000${String(turnId)}`
   const dropMidTurnState = key => {
@@ -994,6 +996,89 @@ export function apply(ctx, config = {}) {
     return manualReceipt(text, globalScope ? null : source.cwd, source.sessionId, condition)
   }
 
+  const remainingRecall = (state, reserved = []) => {
+    if (state.budget?.unit !== engine.recallBudget?.unit) return null
+    const tokenMode = state.budget?.unit === RECALL_TOKEN_UNIT
+    const maxBytes = tokenMode ? 0 : Math.max(0,
+      Math.min(768, state.maxBytes, engine.maxContextBytes, engine.recallBudget?.limit ?? 768)
+      - state.usedBytes - reserved.reduce((sum, selection) => sum + selection.bytes, 0))
+    const maxTokens = tokenMode ? Math.max(0,
+      Math.min(state.maxTokens, engine.recallBudget.limit)
+      - state.usedTokens - reserved.reduce((sum, selection) => sum + selection.contextTokens, 0)) : undefined
+    const pendingOffers = reserved.flatMap(selection => selection.offered)
+    return {
+      ...(tokenMode ? { maxTokens } : { maxBytes }),
+      maxMethods: Math.max(0, 2 - state.methodCount - pendingOffers.filter(row => row.mode === 'method').length),
+      maxGuards: Math.max(0, 1 - state.guardCount - pendingOffers.filter(row => row.mode === 'guard').length),
+      excludeOffers: [...state.offered, ...pendingOffers],
+    }
+  }
+  const recallFits = (selection, budget) => selection?.ok === true && budget !== null
+    && selection.offered.length > 0
+    && selection.bytes === Buffer.byteLength(selection.context, 'utf8')
+    && (budget.maxTokens === undefined ? selection.bytes <= budget.maxBytes
+      : Number.isSafeInteger(selection.contextTokens) && selection.contextTokens <= budget.maxTokens)
+    && selection.offered.filter(row => row.mode === 'method').length <= budget.maxMethods
+    && selection.offered.filter(row => row.mode === 'guard').length <= budget.maxGuards
+    && !selection.offered.some(offer => budget.excludeOffers.some(row => row.id === offer.id
+      && row.version === offer.version))
+  const selectSupplement = (session, state, prompt, { onlyUserRules = false, reserved = [],
+    reportMiss = false } = {}) => {
+    const budget = remainingRecall(state, reserved)
+    if (budget === null) return null
+    if (!reportMiss && ((budget.maxTokens ?? budget.maxBytes) === 0
+      || (budget.maxMethods === 0 && budget.maxGuards === 0))) return null
+    const selected = engine.prepareMidTurnRecall({ sessionId: state.sessionId, turnId: state.turnId,
+      projectKey: cwdOf(session), prompt, ...budget, onlyUserRules })
+    if (recallFits(selected, budget)) return selected
+    if (reportMiss) engine.noteCollectionSkip(selected.reason ?? 'mid_turn_recall_budget_rejected')
+    return null
+  }
+  const deliverSupplement = (decision, state, selected) => {
+    if (!recallFits(selected, remainingRecall(state))) return
+    const recorded = engine.recordMidTurnInjection({ sessionId: state.sessionId,
+      turnId: state.turnId, offered: selected.offered })
+    if (recorded.ok !== true) return
+    if (state.budget?.unit === RECALL_TOKEN_UNIT) state.usedTokens += selected.contextTokens
+    else state.usedBytes += selected.bytes
+    state.methodCount += selected.offered.filter(row => row.mode === 'method').length
+    state.guardCount += selected.offered.filter(row => row.mode === 'guard').length
+    state.offered.push(...selected.offered)
+    decision.messages = [...decision.messages, createUserMessage({
+      content: [{ type: 'text', text: `${RECALL_INJECTION_PREFIX}${selected.context}` }],
+      source: mseMessageSource('instructions') })]
+  }
+  const rememberStage = (state, key) => {
+    if (state.checkedStages.has(key) || state.checkedStages.size >= STAGE_RECALL_LIMIT) return false
+    state.checkedStages.add(key)
+    return true
+  }
+  const activeStageState = session => {
+    const sessionId = sessionIdOf(session)
+    const turn = foregroundTurns.get(sessionId)
+    if (turn === undefined) return null
+    const state = midTurnStates.get(midTurnKey(sessionId, turn))
+    return state !== undefined && nativeTurnIsActive(session, Number(turn), state.startSeq) ? state : null
+  }
+  const captureActivePlan = (session, todos) => {
+    const state = activeStageState(session)
+    if (state === null || !Array.isArray(todos)) return
+    // A todo/write event replaces the whole plan. Completed or removed stages
+    // must stop contributing hints immediately.
+    state.plannedStages.clear()
+    const roots = workspaceRoots()?.filter(root => root.sessionIds.has(state.sessionId)) ?? []
+    const cwd = cwdOf(session)
+    if (!realInside(cwd, roots)) return
+    for (const item of todos.slice(0, 64)) {
+      if (item?.status !== 'in_progress') continue
+      const stage = plannedRecallStage(item.content)
+      if (stage === null || state.checkedStages.has(stage.key) || SENSITIVE_PATTERN.test(stage.prompt)
+        || AUTHORITY_PATTERN.test(stage.prompt) || textMentionsOutside(stage.prompt, roots, cwd)) continue
+      state.plannedStages.set(stage.key, stage.prompt)
+      if (state.plannedStages.size >= 4) break
+    }
+  }
+
   // ── trusted user facts + recall injection ──────────────────────────────────────────────────
   disposers.push(ctx.on('agent/pre-step', async (payload, next) => {
     const session = payload?.agent?.session
@@ -1019,58 +1104,40 @@ export function apply(ctx, config = {}) {
       const turnNumber = Number(turn)
       const key = midTurnKey(sessionId, turn)
       const state = midTurnStates.get(key)
-      if (state === undefined || state.pendingCategories.length === 0) return decision
+      if (state === undefined || (state.pendingCategories.length === 0 && state.plannedStages.size === 0
+        && state.deferredStages.length === 0)) return decision
       if (!ensureStoreReady()) return decision
       const roots = workspaceRoots()
       if (!nativeTurnIsActive(session, turnNumber, state.startSeq)
         || roots === null || !attribution(sessionId, roots)) {
         state.pendingCategories.length = 0
+        state.plannedStages.clear()
+        state.deferredStages.length = 0
         engine.noteCollectionSkip(roots === null ? 'mid_turn_source_unavailable' : 'mid_turn_source_refused',
           roots?.length ?? 0)
         return decision
       }
-      const triggers = state.pendingCategories.splice(0)
-      const prompt = midTurnRecallPrompt(state.taskLabels, triggers)
-      const tokenMode = state.budget?.unit === RECALL_TOKEN_UNIT
       if (state.budget?.unit !== engine.recallBudget?.unit) {
+        state.pendingCategories.length = 0
+        state.plannedStages.clear()
+        state.deferredStages.length = 0
         engine.noteCollectionSkip('mid_turn_budget_unit_changed')
         return decision
       }
-      const ceiling = tokenMode
-        ? Math.min(state.maxTokens, engine.recallBudget.limit)
-        : Math.min(768, state.maxBytes, engine.maxContextBytes,
-          engine.recallBudget?.unit === 'bytes' ? engine.recallBudget.limit : 768)
-      const remainingBytes = tokenMode ? 0 : Math.max(0, ceiling - state.usedBytes)
-      const remainingTokens = tokenMode ? Math.max(0, ceiling - state.usedTokens) : 0
-      const methodsLeft = Math.max(0, 2 - state.methodCount)
-      const guardsLeft = Math.max(0, 1 - state.guardCount)
-      const selected = engine.prepareMidTurnRecall({ sessionId, turnId: String(turn),
-        projectKey: cwdOf(session), prompt,
-        ...(tokenMode ? { maxTokens: remainingTokens } : { maxBytes: remainingBytes }),
-        maxMethods: methodsLeft, maxGuards: guardsLeft, excludeOffers: state.offered })
-      if (selected.ok !== true || selected.offered.length === 0) {
-        engine.noteCollectionSkip(selected.reason ?? '没有新增中途经验')
-        return decision
+      // A dispatched write was paused for this exact selection. Deliver it first,
+      // then offer the same turn's result-driven and current-plan reminders.
+      for (const { selection } of state.deferredStages.splice(0)) deliverSupplement(decision, state, selection)
+      const triggers = state.pendingCategories.splice(0)
+      if (triggers.length > 0) {
+        const prompt = midTurnRecallPrompt(state.taskLabels, triggers)
+        deliverSupplement(decision, state, selectSupplement(session, state, prompt, { reportMiss: true }))
       }
-      if ((!tokenMode && selected.bytes > remainingBytes)
-        || tokenMode && selected.contextTokens > remainingTokens
-        || Buffer.byteLength(selected.context, 'utf8') !== selected.bytes
-        || selected.offered.filter(row => row.mode === 'guard').length > guardsLeft
-        || selected.offered.filter(row => row.mode !== 'guard').length > methodsLeft) {
-        engine.noteCollectionSkip('mid_turn_recall_budget_rejected')
-        return decision
+      for (const [key, prompt] of state.plannedStages) {
+        if (rememberStage(state, key)) {
+          deliverSupplement(decision, state, selectSupplement(session, state, prompt))
+        }
       }
-      const recorded = engine.recordMidTurnInjection({ sessionId, turnId: String(turn), offered: selected.offered })
-      if (recorded.ok !== true) return decision
-      if (tokenMode) state.usedTokens += selected.contextTokens
-      else state.usedBytes += selected.bytes
-      state.methodCount += selected.offered.filter(row => row.mode !== 'guard').length
-      state.guardCount += selected.offered.filter(row => row.mode === 'guard').length
-      state.offered.push(...selected.offered.map(({ id, version, mode }) => ({ id, version, mode })))
-      decision.messages = [...decision.messages, createUserMessage({
-        content: [{ type: 'text',
-          text: `${RECALL_INJECTION_PREFIX}${selected.context}` }],
-        source: mseMessageSource('instructions') })]
+      state.plannedStages.clear()
       return decision
     }
     if (!Number.isSafeInteger(Number(turn)) || !ensureStoreReady()) return decision
@@ -1280,7 +1347,7 @@ export function apply(ctx, config = {}) {
         guardCount: offered.filter(row => row.mode === 'guard').length,
         failureScheduled: false, failurePendingCallId: null,
         operationCounts: new Map(), operationEvents: new Set(), operationTriggered: new Set(),
-        pendingCategories: [],
+        pendingCategories: [], checkedStages: new Set(), plannedStages: new Map(), deferredStages: [],
       })
     }
     if (prepared.context !== '') {
@@ -1333,18 +1400,6 @@ export function apply(ctx, config = {}) {
     const rows = map.get(key) ?? []
     return (map.has(key) || map.size < 64) && rows.length < 16
       && !rows.some(row => row.callId === callId)
-  }
-  const isJsonMutation = exec => {
-    const args = exec?.arguments
-    if (typeof args !== 'object' || args === null) return null
-    if (exec.name === 'write' && typeof args.file_path === 'string' && typeof args.content === 'string') {
-      return args.file_path
-    }
-    if (exec.name === 'edit' && typeof args.file_path === 'string' && typeof args.old_string === 'string'
-      && typeof args.new_string === 'string') return args.file_path
-    if (exec.name === 'str_replace_editor' && ['create', 'str_replace', 'insert'].includes(args.command)
-      && typeof args.path === 'string') return args.path
-    return null
   }
   // Queued OLD material (candidates, failure problems, daily facts) is re-checked against the
   // CURRENT host attribution before any provider dispatch: unverified sources keep history,
@@ -1467,7 +1522,7 @@ export function apply(ctx, config = {}) {
       }
     }
     const cwd = session?.header?.cwd
-    const rel = isJsonMutation(exec)
+    const rel = nativeFileChange(exec)?.path ?? null
     // Real write/edit calls commonly carry ABSOLUTE paths: normalize absolute/relative under the
     // session's trusted cwd into one controlled relative target; outside cwd stays refused.
     let relTarget = rel
@@ -1494,6 +1549,50 @@ export function apply(ctx, config = {}) {
   }
   const callEventOf = (exec, session) => callEventLocationOf(
     exec.rootCallId ?? exec.callId, session)?.event ?? null
+
+  if (typeof ctx.tools?.guard === 'function') disposers.push(ctx.tools.guard(exec => {
+    if (disposed || exec?.signal?.aborted || exec?.parent !== undefined) return
+    const change = nativeFileChange(exec)
+    if (change === null || change.path.length === 0 || change.path.length > 512
+      || /[\u0000-\u001f]/u.test(change.path)) return
+    const stages = fileRecallStages(change)
+    if (stages.length === 0) return
+    const session = exec.agent?.session
+    const state = activeStageState(session)
+    if (state === null) return
+    const call = callEventOf(exec, session)?.data
+    if (call?.name !== exec.name || String(call?.turn) !== state.turnId) return
+    const cwd = cwdOf(session)
+    if (!isAbsolutePath(cwd)) return
+    const target = isAbsolutePath(change.path) ? change.path : resolve(cwd, change.path)
+    const rel = relativeInside(target, cwd)
+    if (rel === null || rel === '') return
+    const owned = workspaceRoots()?.some(root => {
+      if (!root.sessionIds.has(state.sessionId)) return false
+      const realCwd = routeCwdIdentity(cwd, root)
+      return realCwd !== null && realInside(target, [{ path: realCwd }])
+    })
+    if (owned !== true) return
+
+    const defer = () => {
+      deferredStageCalls.add(exec)
+      return { reason: 'MSE 有适用于这一步的已保存规则。请先参考下一步收到的经验，再按本轮用户要求继续。',
+        info: { code: STAGE_RECALL_DEFERRED } }
+    }
+    // Parallel writes to the same stage wait for the same reminder. Distinct
+    // stages reserve from the same budget until the next request is admitted.
+    const pending = state.deferredStages.find(row => stages.some(stage => row.keys.includes(stage.key)))
+    if (pending !== undefined && recallFits(pending.selection, remainingRecall(state))) return defer()
+    const fresh = stages.filter(stage => rememberStage(state, stage.key))
+    if (fresh.length === 0) return
+    const selection = selectSupplement(session, state, fresh.map(stage => stage.prompt).join(' '), {
+      onlyUserRules: true, reserved: state.deferredStages.map(row => row.selection),
+    })
+    if (selection === null) return
+    state.deferredStages.push({ keys: fresh.map(stage => stage.key), selection })
+    return defer()
+  }))
+
   const developmentCallOf = (exec, session, sessionId) => {
     const callId = exec?.rootCallId ?? exec?.callId
     if (!DEVELOPMENT_CHECK_TOOLS.has(exec?.name) || typeof callId !== 'string' || callId.length === 0
@@ -1678,6 +1777,8 @@ export function apply(ctx, config = {}) {
   }))
 
   disposers.push(ctx.on('tools/result', (exec, result) => {
+    if (deferredStageCalls.delete(exec) && result?.isError === true
+      && result.error?.info?.code === STAGE_RECALL_DEFERRED) return
     const earlySession = exec?.agent?.session
     const earlyId = sessionIdOf(earlySession)
     if (earlyId !== undefined) {
@@ -2130,6 +2231,7 @@ export function apply(ctx, config = {}) {
 
   disposers.push(ctx.on('session/event', (session, event) => {
     const sessionId = sessionIdOf(session)
+    if (!disposed && event?.type === 'todo/write') captureActivePlan(session, event.data?.todos)
     if (sessionId !== undefined && (event?.type === 'turn/end' || event?.type === 'turn/cancel')
       && event.data?.turn !== undefined) clearPythonGuidanceTurn(sessionId, event.data.turn)
     capturePersistedDevelopmentResult(session, event, sessionId)

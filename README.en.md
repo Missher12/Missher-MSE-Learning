@@ -2,7 +2,9 @@
 
 ![MSE Learning · 持久学习（品牌插画）](docs/images/cover-v2.webp)
 
-MSE learns reusable corrections and failure lessons for DSH. **1.4.4** aligns the recall limit with DSH Memory's token estimate, defaults to 512, and allows 128–1024. Existing settings below 768 B remain byte limits until Token is explicitly selected. First-step recall, failure follow-ups, and repeated-operation follow-ups share one per-turn budget; receipts keep their actual UTF-8 byte counts. Trusted tool failures and repeated, explicitly classified checks can add relevant lessons at the next model step within the existing source boundaries. Recall policies activate or roll back based on observed evidence.
+MSE learns reusable corrections and failure lessons for DSH. **1.4.5** looks up relevant experience when a task becomes active in the plan. Native writes and replacements also check saved user rules before changing gradients, colors, layout, typography, motion, or project configuration. When a new rule fits the budget, the first edit waits for the next model step to receive the reminder.
+
+Opening and mid-turn recall share **512 estimated tokens** by default, configurable from 128 to 1024, with up to two methods and one warning. Smaller legacy byte settings remain in effect until a token limit is chosen. Recall policies activate or roll back based on observed evidence.
 
 Checks run one restricted snapshot through a native tool and require Python plus a host sandbox reporting full read-only enforcement. Exit code 0, hard-coded success, cancellation, stale versions, and unpaired results do not establish a pass. Other Python scripts and business contracts remain unverified.
 
@@ -29,7 +31,7 @@ MSE learns standing corrections and lessons from actual failures in DSH. **1.2.2
 
 Ordinary user corrections no longer require a remember keyword. Suspected corrections enter a bounded, source-bound extraction after the turn; concrete reusable rules persist and recall in later related sessions/projects. Negations and project limits are retained; one-off requests, questions and quoted logs are not automatically promoted. The status page shows saved, pending and ignored extraction results. This uses the existing learning model route and switches, not a model call for every message.
 
-Explicit user corrections persist across sessions and projects, with project constraints retained. Two independent failures can produce a concrete unvalidated lesson. Related turns recall it again with at most 2 methods plus 1 guard warning inside 768 UTF-8 bytes; attributed recurrence requests a material revision or retires an ineffective version. Daily consolidation runs while idle after local 23:00, with durable processing boundaries and catch-up.
+Explicit user corrections persist across sessions and projects, with project constraints retained. Two independent failures can produce a concrete unvalidated lesson. Opening recall, relevant work stages, and the first concrete failure share the same per-turn budget, with at most 2 methods and 1 guard warning. Attributed recurrence requests a material revision or retires an ineffective version. Daily consolidation runs while idle after local 23:00, with durable processing boundaries and catch-up.
 
 The slim runtime preserves source model routes, a single background slot, bounded calls, durable pause and unknown-cost no-replay. It does not self-award validated status or enable paid evaluation. Objective results can include JSON parsing, precisely paired Node test runner output and TypeScript `--noEmit` checks. Only real foreground calls with supported exact commands and matching result evidence are counted; MSE does not run extra checks. Each result proves only its own check, while assistant success claims, wrapper commands, zero-test runs and arbitrary exit0 do not verify the full task.
 

@@ -2906,7 +2906,7 @@ export class RebuildEngine {
   // ── recall ──────────────────────────────────────────────────────────────────────────────────
   /** Read-only same-turn selection. It deliberately writes no receipt, turn usage, or RRSI data. */
   prepareMidTurnRecall({ sessionId, turnId, projectKey, environmentId = null, prompt, maxBytes, maxTokens,
-    maxMethods, maxGuards, excludeOffers = [] }) {
+    maxMethods, maxGuards, excludeOffers = [], onlyUserRules = false }) {
     check(typeof prompt === 'string' && prompt.length <= 512, 'invalid_prompt')
     check((this.recallBudget?.unit === RECALL_TOKEN_UNIT
       ? Number.isSafeInteger(maxTokens) && maxTokens >= 0 && maxTokens <= 1024
@@ -2923,7 +2923,7 @@ export class RebuildEngine {
           && row.outcome !== undefined)) {
         return { ok: false, context: '', bytes: 0, offered: [], reason: '当前回合已经结束' }
       }
-      if (this.#materialOk(prompt, null) !== true) {
+      if (this.#materialOk(prompt, projectKey) !== true) {
         return { ok: false, context: '', bytes: 0, offered: [], reason: '当前召回条件未通过材料检查' }
       }
       const tokenMode = this.recallBudget?.unit === RECALL_TOKEN_UNIT
@@ -2934,8 +2934,12 @@ export class RebuildEngine {
         maxBytes: tokenMode ? undefined : max, maxTokens: tokenMode ? max : undefined,
         maxMethods, maxGuards, excludeOffers, now: this.now(),
         guardAdmit: text => this.#materialOk(text, null) }
-      const selection = tokenMode ? selectMidTurnRecallByTokens(doc.entries, options)
-        : selectMidTurnRecall(doc.entries, options)
+      // An editor may pause once for an explicit saved rule. A suggested automatic
+      // lesson can ride an active todo cue without holding a tool dispatch.
+      const entries = onlyUserRules ? doc.entries.filter(row => row.type === 'rule'
+        && row.status === 'user_rule' && this.#materialOk(row.instruction, projectKey)) : doc.entries
+      const selection = tokenMode ? selectMidTurnRecallByTokens(entries, options)
+        : selectMidTurnRecall(entries, options)
       if (selection.offered.length === 0) return { ok: true, context: '', bytes: 0, offered: [],
         ...(tokenMode ? { contextTokens: 0, budget: { ...this.recallBudget } } : {}),
         reason: max === 0 || (maxMethods === 0 && maxGuards === 0)
@@ -2961,19 +2965,21 @@ export class RebuildEngine {
         if (doc.receipts.some(row => row.turnKey === turnKey && row.settled === true)
           || doc.turnFacts.some(row => row.turnKey === turnKey && row.outcome !== null
             && row.outcome !== undefined)) return { ok: false, injected: 0 }
-        let injected = 0
-        for (const offer of offered) {
-          const entry = doc.entries.find(row => row.id === offer?.id && row.version === offer?.version
-            && row.status !== 'retired')
-          if (entry === undefined || !['method', 'guard'].includes(offer.mode)) continue
+        const entries = offered.map(offer => ['method', 'guard'].includes(offer?.mode)
+          ? doc.entries.find(row => row.id === offer.id && row.version === offer.version
+            && row.status !== 'retired') : undefined)
+        // A prepared stage reminder can become stale between the tool guard and pre-step.
+        // Count none when the whole message can no longer be delivered.
+        if (entries.some(entry => entry === undefined)) return noCommit({ ok: false, injected: 0 })
+        for (const [index, entry] of entries.entries()) {
+          const offer = offered[index]
           entry.injected += 1
           entry.lastInjectedAt = this.now()
           if (offer.mode !== 'guard' && offer.version === entry.version) {
             ensureMethodStats(entry, this.now()).injected += 1
           }
-          injected += 1
         }
-        return { ok: injected === offered.length, injected }
+        return { ok: true, injected: entries.length }
       })
     } catch (error) {
       if (!storageFailure(error)) throw error

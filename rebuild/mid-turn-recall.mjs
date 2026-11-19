@@ -33,6 +33,65 @@ const OPERATION_FIXTURES = Object.freeze({
   'python-receipt-contract-v1': { category: 'receipt_check', taskFeatures: ['acceptance', 'record', 'receipt'], label: 'receipt contract validation' },
 })
 
+const CONFIGURATION_STAGE = {
+  key: 'project_configuration',
+  todo: /配置文件|项目配置|构建配置|依赖设置|\b(?:project config|build config|configuration files?)\b/iu,
+  prompt: '编辑项目配置 配置文件 参数 构建设置 project configuration',
+}
+
+const STYLE_STAGES = [
+  { key: 'gradient', todo: /渐变|\bgradients?\b/iu,
+    change: /\b(?:repeating-)?(?:linear|radial|conic)-gradient\s*\(|\bbg-(?:gradient-|linear-|radial\b|conic\b)|\bvar\(\s*--[\w-]{0,64}gradient\b/iu,
+    prompt: '界面配色 背景渐变 按钮渐变 CSS gradient palette' },
+  { key: 'color', todo: /配色|颜色|色板|主题色|\b(?:palette|colou?rs?|theme colors?)\b/iu,
+    change: /\b(?:color|background(?:-color)?|border-color|fill|stroke)\s*:|\b(?:bg|text|border)-(?:primary|secondary|[a-z]+-\d{2,3})\b/iu,
+    prompt: '界面配色 颜色 主题色 背景颜色 color palette' },
+  { key: 'layout', todo: /布局|对齐|间距|\b(?:layout|alignment|spacing)\b/iu,
+    change: /\b(?:display|grid-template(?:-columns)?|align-items|justify-content|gap|padding|margin)\s*:|\b(?:grid-cols|justify|items|gap)-[a-z0-9]/iu,
+    prompt: '界面布局 对齐 间距 排列 layout alignment spacing' },
+  { key: 'typography', todo: /字体|字号|行距|排版|\b(?:typography|font size)\b/iu,
+    change: /\b(?:font(?:-family|-size|-weight)?|line-height|letter-spacing)\s*:|\btext-(?:xs|sm|base|lg|xl|\dxl)\b/iu,
+    prompt: '界面字体 字号 排版 行距 typography font size' },
+  { key: 'motion', todo: /动画|动效|过渡|\b(?:animations?|transitions?|motion)\b/iu,
+    change: /\b(?:animation|transition)(?:-[a-z-]+)?\s*:|\b(?:animate|transition|duration)-[a-z0-9]/iu,
+    prompt: '界面动画 动效 过渡 animation transition motion' },
+]
+
+/** A live todo gives a search phrase even for stages with no file-specific detector. */
+export function plannedRecallStage(title) {
+  if (typeof title !== 'string' || title.length > 160 || /[\u0000-\u001f\u007f]/u.test(title)) return null
+  const text = title.normalize('NFKC').trim().replace(/\s+/gu, ' ')
+  if (text.length < 4 || text.length > 160) return null
+  const stage = [...STYLE_STAGES, CONFIGURATION_STAGE].find(row => row.todo.test(text))
+  return { key: stage?.key ?? `todo:${text.toLowerCase()}`,
+    prompt: stage === undefined ? text : `${text} ${stage.prompt}` }
+}
+
+/** Only parsed native file mutations provide an actionable write-before-recall signal. */
+export function nativeFileChange(exec) {
+  const args = exec?.arguments
+  if (args === null || typeof args !== 'object') return null
+  if (exec.name === 'write' && typeof args.file_path === 'string' && typeof args.content === 'string') {
+    return { path: args.file_path, text: args.content }
+  }
+  if (exec.name === 'edit' && typeof args.file_path === 'string' && typeof args.old_string === 'string'
+    && typeof args.new_string === 'string') return { path: args.file_path, text: args.new_string }
+  if (exec.name !== 'str_replace_editor' || !['create', 'str_replace', 'insert'].includes(args.command)
+    || typeof args.path !== 'string') return null
+  const text = args.command === 'create' ? args.file_text : args.new_str
+  return { path: args.path, text: typeof text === 'string' ? text : '' }
+}
+
+export function fileRecallStages(change) {
+  const name = change.path.split(/[\\/]/u).at(-1)
+  if (/^(?:package\.json|[jt]sconfig(?:\.[a-z0-9_-]+)?\.json|(?:[a-z0-9_-]+\.)?config\.(?:[cm]?[jt]s|json|ya?ml|toml))$/iu.test(name)) {
+    return [CONFIGURATION_STAGE]
+  }
+  if (!/\.(?:css|scss|sass|less|[jt]sx?|vue|svelte|astro|html)$/iu.test(name)) return []
+  const text = change.text.slice(0, 65_536)
+  return STYLE_STAGES.filter(stage => stage.change.test(text))
+}
+
 export const MID_TURN_OPERATION_FIXTURE_IDS = Object.freeze(Object.keys(OPERATION_FIXTURES))
 export const MID_TURN_FAILURE_FIXTURE_IDS = Object.freeze(Object.keys(FAILURE_LABELS))
 
