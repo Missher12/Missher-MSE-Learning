@@ -19,8 +19,8 @@
  *    negative evidence.
  *  • Deduplication is by the host's own stable event identity (a call id), with a bounded
  *    retention window. Replays inside the window are idempotent; a real second execution with a
- *    new call id is a new independent failure. A full window refuses new facts instead of
- *    evicting live ids and silently re-counting them later.
+ *    new call id is a new independent failure. The active window is page-backed and never rotates
+ *    live identities due to a total-count cap; only expired identities may be pruned.
  *  • A problem becomes eligible for method reflection only after INDEPENDENT_THRESHOLD distinct
  *    evidence entries, and an attempted reflection is bound to the exact `evidenceRevision` it
  *    saw, so abstention or interruption cannot be re-charged without new evidence.
@@ -33,7 +33,7 @@
 import { createHash } from 'node:crypto'
 import { check } from './store.mjs'
 import {
-  capsuleValid, appendCapsuleToRow, enforceCapsuleBudget, CAPSULES_PER_PROBLEM,
+  capsuleValid, appendCapsuleToRow, CAPSULES_PER_PROBLEM,
   SENSITIVE_PATTERN, AUTHORITY_PATTERN,
 } from './failure-evidence.mjs'
 
@@ -43,13 +43,13 @@ export { SENSITIVE_PATTERN, AUTHORITY_PATTERN }
 
 /** One field under schema-2 `state.problemLoop`; an absent field is the empty read-only view. */
 export const PROBLEM_FORMAT = 1
-/** Max aggregated problem rows in one store. */
-export const PROBLEM_LIMIT = 128
+/** Historical threshold kept for compatibility in diagnostics; format 6 stores this as pages. */
+export const PROBLEM_LIMIT = 4096
 /** Max recent evidence references kept per problem; eviction is display-only, the cumulative count stays. */
 export const EVIDENCE_LIMIT = 16
 /** A problem must be seen independently this many times before method reflection may consume budget. */
 export const INDEPENDENT_THRESHOLD = 2
-/** Max deduplicated event identities held in the active window. */
+/** Historical threshold kept for compatibility in diagnostics; active identities are page-backed. */
 export const SEEN_EVENT_LIMIT = 1024
 /** How long an event identity stays in the active dedupe window before it may be pruned. */
 export const SEEN_EVENT_TTL_MS = 90 * 24 * 60 * 60_000
@@ -326,8 +326,8 @@ export function problemLoopValid(state) {
   const loop = state.problemLoop
   check(isPlainObject(loop) && Object.keys(loop).every(key => ['format', 'problems', 'seenEvents'].includes(key))
     && loop.format === PROBLEM_FORMAT
-    && Array.isArray(loop.problems) && loop.problems.length <= PROBLEM_LIMIT
-    && Array.isArray(loop.seenEvents) && loop.seenEvents.length <= SEEN_EVENT_LIMIT, 'invalid_problem_loop')
+    && Array.isArray(loop.problems)
+    && Array.isArray(loop.seenEvents), 'invalid_problem_loop')
   const ids = new Set()
   for (const row of loop.problems) {
     check(problemRowValid(row) && !ids.has(row.id), 'invalid_problem_loop')
@@ -373,17 +373,12 @@ export function observeInState(state, now, input) {
     // Same host event identity, inside the active window: an idempotent replay, never a new fact.
     return { ok: true, duplicate: true, id, ready: false }
   }
-  if (loop.seenEvents.length >= SEEN_EVENT_LIMIT) {
-    // The window is provably full AFTER pruning: refuse rather than evict live ids and re-count.
-    check(false, 'problem_ledger_saturated')
-  }
   loop.seenEvents.push({ eventId: identity, at: now })
   // The binding travels with the observation that produced this revision: the source of the
   // CURRENT revision is the evidence that actually made it attemptable, never the first one.
   const origin = problemOriginOf({ ...input, turnHash, routeId: input.routeId ?? null }, now)
   let row = loop.problems.find(problem => problem.id === id)
   if (row === undefined) {
-    check(loop.problems.length < PROBLEM_LIMIT, 'problem_ledger_full')
     row = { id, key: id, kind, state: 'observed', source, scope, environment, owner,
       taskClass: taskClass ?? null, toolName: toolName ?? null, failureClass: failureClass ?? null,
       signature,
@@ -401,7 +396,6 @@ export function observeInState(state, now, input) {
     check(capsuleValid(input.failure) && (input.failure.signature ?? null) === signature
       && input.failure.failureClass === (failureClass ?? ''), 'invalid_problem')
     appendCapsuleToRow(row, input.failure)
-    enforceCapsuleBudget(loop)
   }
   const entry = { eventId: identity, turnHash, at: now }
   const appended = row.evidence.length >= EVIDENCE_LIMIT
@@ -658,7 +652,7 @@ export function problemStatusView(loop, { now, owner, scope, limit = 20, recover
   return { ok: true, format: loop.format, total: loop.problems.length, scoped: scoped.length,
     recoverable: scoped.filter(row => problemRecoverable(row, authorizationFor(row))).length,
     due: scoped.filter(row => reflectionReady(row, now, authorizationFor(row))).length,
-    dedupeWindow: SEEN_EVENT_TTL_MS, dedupeCapacity: SEEN_EVENT_LIMIT, dedupeActive: loop.seenEvents.length,
+    dedupeWindow: SEEN_EVENT_TTL_MS, dedupeCapacity: null, dedupeActive: loop.seenEvents.length,
     byState, rows: scoped.slice(-limit).map(view) }
 }
 

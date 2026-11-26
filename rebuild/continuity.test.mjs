@@ -117,7 +117,7 @@ function auditDocument() {
   return doc
 }
 
-test('large audit history is stored losslessly without deleting rows or widening the file limit', () => {
+test('large audit history is lossless across bounded format 6 objects', () => {
   const root = mkdtempSync(join(tmpdir(), 'mse-continuity-'))
   try {
     const doc = auditDocument()
@@ -130,7 +130,7 @@ test('large audit history is stored losslessly without deleting rows or widening
     assert.ok(statSync(store.path).size < MAX_STORE_BYTES)
     const bytes = readFileSync(store.path)
     store.transaction(() => noCommit(true))
-    assert.deepEqual(readFileSync(store.path), bytes, 'a no-op does not repack or rewrite the snapshot')
+    assert.deepEqual(readFileSync(store.path), bytes, 'a no-op does not repack or rewrite the manifest')
     const exportPath = join(root, 'export.json')
     const copyPath = join(root, 'copy')
     for (const args of [['export', '--state-root', root, '--output', exportPath],
@@ -163,17 +163,19 @@ test('packed audit corruption and over-declared expansion fail closed without re
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('expanded audit growth still has a hard limit and preserves the prior library on refusal', () => {
+test('expanded audit growth beyond the legacy aggregate limit preserves every row', () => {
   const root = mkdtempSync(join(tmpdir(), 'mse-audit-bound-'))
   try {
     const store = new MemoryStore({ stateRoot: root })
     const doc = auditDocument()
     store.transaction(current => { Object.assign(current, structuredClone(doc)) })
-    const before = readFileSync(store.path)
-    assert.throws(() => store.transaction(current => {
+    store.transaction(current => {
       for (let i = 64; i < 80; i++) current.requests.push({ ...structuredClone(doc.requests[0]), ticket: `audit-${i}` })
-    }), error => error.code === 'capacity')
-    assert.deepEqual(readFileSync(store.path), before)
+    })
+    const requests = store.listRequests()
+    assert.equal(requests.length, 80)
+    assert.ok(Buffer.byteLength(JSON.stringify(requests), 'utf8') > MAX_STORE_BYTES)
+    assert.ok(statSync(store.path).size < MAX_STORE_BYTES, 'the manifest remains individually bounded')
     assert.deepEqual(store.read().materials, doc.materials, 'unknown-cost replay holds remain intact')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })

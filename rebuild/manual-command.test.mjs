@@ -483,7 +483,7 @@ test('aborted command signal, malformed model output, and insufficient context n
   assert.equal(insufficient.engine.store.read().entries.length, 0)
 })
 
-test('capacity refusal leaves the existing library intact', async t => {
+test('manual /mse adds a rule beyond the former 4,096-entry limit', async t => {
   const h = await createManualCommandHarness()
   t.after(() => h.close())
   const seed = h.engine.recordCorrection({ text: '已有规则必须保留用户配置', sessionId: h.session.id,
@@ -497,14 +497,12 @@ test('capacity refusal leaves the existing library intact', async t => {
     }
     return true
   })
-  const before = h.engine.store.read()
   const result = await h.run('/mse 新规则应保留当前项目原有的配置字段')
-  assert.equal(result.result.kind, 'error')
-  assert.match(result.result.text, /容量/u)
+  assert.equal(result.result.kind, 'success')
   const afterDoc = h.engine.store.read()
-  assert.equal(afterDoc.entries.length, ENTRY_LIMIT)
-  assert.deepEqual(afterDoc.entries, before.entries)
-  assert.equal(afterDoc.corrections.length, 0)
+  assert.equal(afterDoc.entries.length, ENTRY_LIMIT + 1)
+  assert.ok(afterDoc.entries.some(entry => entry.instruction === '新规则应保留当前项目原有的配置字段'))
+  assert.equal(afterDoc.corrections.length, 0, 'manual saves do not create correction candidates')
 })
 
 test('a 1.3.10-format user-rule store loads and survives a manual command', async t => {

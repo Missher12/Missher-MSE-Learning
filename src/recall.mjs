@@ -129,11 +129,43 @@ const cjkForms = ALIAS_GROUPS.flatMap(group => group.forms
   .map(form => [form, group]))
 
 const cache = new Map()
+let cacheBytes = 0
 const MAX_WORDS = 24
 const MAX_ALIASES = 12
 const MAX_BIGRAMS = 32
 const TOKEN_LIMIT = 48
-const CACHE_LIMIT = 1024
+const CACHE_BYTES_LIMIT = 16 * 1024 * 1024
+const CACHE_ITEM_LIMIT = 16_384
+const utf8 = new TextEncoder()
+
+function viewCacheWeight(text, view) {
+  let bytes = utf8.encode(text).byteLength + utf8.encode(view.raw).byteLength + 192
+  const addStrings = values => {
+    for (const value of values) bytes += utf8.encode(value).byteLength + 16
+  }
+  addStrings(view.semantic)
+  addStrings(view.bigrams)
+  addStrings(view.formats)
+  addStrings(view.ambiguousFormats)
+  addStrings(view.keys)
+  // Sets, arrays, format-mention records, and the map entry itself have bounded per-item cost.
+  return bytes + view.semantic.length * 8 + view.bigrams.length * 8
+    + view.formatMentions.length * 32
+}
+
+function rememberView(text, view) {
+  const weight = viewCacheWeight(text, view)
+  if (weight > CACHE_BYTES_LIMIT) return view
+  cache.set(text, { view, weight })
+  cacheBytes += weight
+  while (cache.size > CACHE_ITEM_LIMIT || cacheBytes > CACHE_BYTES_LIMIT) {
+    const oldestKey = cache.keys().next().value
+    const oldest = cache.get(oldestKey)
+    cache.delete(oldestKey)
+    cacheBytes -= oldest.weight
+  }
+  return view
+}
 
 /** Normalize presentation without changing meaning or case-sensitivity of code. */
 export function normalizeText(text) {
@@ -233,7 +265,11 @@ function cjkRuns(text) {
  */
 export function analyze(text) {
   const cached = cache.get(text)
-  if (cached) return cached
+  if (cached !== undefined) {
+    cache.delete(text)
+    cache.set(text, cached)
+    return cached.view
+  }
   const normalized = normalizeText(text)
   const words = []
   for (const part of segmenter.segment(normalized)) {
@@ -287,9 +323,7 @@ export function analyze(text) {
     bigrams,
     keys: [...aliases.map(id => `@${id}`), ...semantic, ...bigrams.map(bigram => `\u00a7${bigram}`)].slice(0, TOKEN_LIMIT),
   }
-  if (cache.size >= CACHE_LIMIT) cache.clear()
-  cache.set(text, view)
-  return view
+  return rememberView(text, view)
 }
 
 function intersect(left, right) {

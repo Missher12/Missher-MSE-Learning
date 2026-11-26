@@ -74,7 +74,10 @@ test('engine.prepare stores 3 offers (2 methods + 1 guard), keeps method stats/g
   const rows = Object.fromEntries(doc.entries.map(row => [row.id, row]))
   assert.equal(rows[m1.id].methodStats.injected, 1)
   assert.equal(rows[m2.id].methodStats.injected, 1)
-  assert.equal(rows[guard.id].methodStats, null, 'guard never gains methodStats')
+  assert.ok(rows[guard.id].methodStats === null || rows[guard.id].methodStats === undefined,
+    'legacy null and format-5 missing fields both mean a guard has no methodStats')
+  assert.equal(rows[guard.id].methodStats?.checkPasses ?? 0, 0, 'a guard earns no method successes')
+  assert.equal(rows[guard.id].methodStats?.injected ?? 0, 0, 'a guard earns no method injection count')
   const again = engine.prepare({ sessionId: 's1', turnId: 't1', projectKey: 'p1',
     prompt: '处理缓存超时并检查 JSON' })
   assert.equal(again.reason, 'same_turn_dedup')

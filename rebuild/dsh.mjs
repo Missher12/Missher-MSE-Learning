@@ -42,7 +42,6 @@ import { apply as applyRemotes } from './remote.mjs'
 import { localDayKey } from './time.mjs'
 import { isMemoryStorageError } from './storage.mjs'
 import { isAbsolutePath, relativeInside } from './paths.mjs'
-import { ENTRY_LIMIT } from './memory.mjs'
 
 export const name = 'mse-learning'
 export const inject = ['agents', 'tools', 'llm', 'dshHomePath', 'workspaceRegistry']
@@ -114,7 +113,7 @@ function sourceTurnRoutes(session, candidates, signal) {
     const turn = Number(candidate.turnId)
     if (!Number.isSafeInteger(turn) || String(turn) !== candidate.turnId) continue
     const state = states.get(turn) ?? { turn, starts: 0, stepStarts: 0, ended: 0,
-      firstStepOpen: false, routeAtStepStart: null, headerCount: 0, stepRoute: null,
+      firstStepOpen: false, stepRoute: null,
       messageCount: 0, messageSource: null, interrupted: false, reason: null }
     state.candidates ??= []
     state.candidates.push(candidate)
@@ -128,17 +127,13 @@ function sourceTurnRoutes(session, candidates, signal) {
     if ((index & 255) === 0) signal?.throwIfAborted()
     const event = session.eventAt(index)
     if (event?.type === 'request/header') {
+      // A new invalid/unknown snapshot clears the effective route. Never reuse an older
+      // route after a header explicitly changed but failed the recovery safety checks.
       activeRoute = routeFromRequestHeader(event)
-      const state = states.get(activeTurn)
-      if (state !== undefined) {
-        state.headerCount += 1
-        if (state.firstStepOpen && state.headerCount === 1) state.stepRoute = activeRoute
-      }
       continue
     }
     if (event?.type === 'turn/start' && Number.isSafeInteger(event.data?.turn)) {
       activeTurn = event.data.turn
-      activeRoute = null
       const state = states.get(activeTurn)
       if (state !== undefined) state.starts += 1
       continue
@@ -149,13 +144,13 @@ function sourceTurnRoutes(session, candidates, signal) {
       state.stepStarts += 1
       if (state.stepStarts === 1) {
         state.firstStepOpen = true
-        state.routeAtStepStart = state.headerCount === 1 ? activeRoute : null
       }
       continue
     }
     if (state?.firstStepOpen && event?.data?.turn === activeTurn && event.data?.step === 1
       && event.type === 'assistant/message') {
       state.messageCount += 1
+      if (state.messageCount === 1) state.stepRoute = activeRoute
       state.messageSource = event.data?.message?.source ?? null
       state.interrupted ||= event.data?.interrupted === true
       state.firstStepOpen = false
@@ -179,7 +174,7 @@ function sourceTurnRoutes(session, candidates, signal) {
   signal?.throwIfAborted()
   const recovered = []
   for (const state of states.values()) {
-    const route = state.headerCount === 1 ? state.stepRoute ?? state.routeAtStepStart : null
+    const route = state.stepRoute
     if (state.starts !== 1 || state.stepStarts !== 1 || state.ended !== 1
       || state.reason !== 'completed' || state.messageCount !== 1 || state.interrupted
       || route === null || state.messageSource?.kind !== 'model'
@@ -322,7 +317,8 @@ export function apply(ctx, config = {}) {
     'policy_stale', 'insufficient_safe_features', 'already_tracked', 'candidate_not_additive',
     'ambiguous_native_failure', 'baseline_explains_failure', 'stale_probe', 'probe_capacity',
     'independent_unmatched_objective', 'awaiting_negative_control', 'strategy_disabled',
-    'revision_limit', 'same_mechanism_rejected', 'counterexample_child', 'policy_disabled',
+    'revision_limit', 'same_mechanism_rejected', 'active_policy_capacity',
+    'counterexample_child', 'policy_disabled',
   ])
   const RSI_TRACE_RESULTS = new Set(['created', 'holdout_hit', 'negative_control', 'approved',
     'rejected', 'isolated', 'unknown', 'feature_refused'])
@@ -909,14 +905,6 @@ export function apply(ctx, config = {}) {
         return manualCommandError('模型任务槽当前忙碌，未保存；请稍后重试，或使用 /mse <经验> 直接输入。')
       }
       if (!ensureStoreReady()) return manualCommandError('学习库当前不可用，未保存。')
-      try {
-        if (engine.store.read().entries.length >= ENTRY_LIMIT) {
-          return manualCommandError('学习库已达到容量上限，未保存。')
-        }
-      } catch (error) {
-        if (isMemoryStorageError(error)) return manualCommandError('学习库当前不可用，未保存。')
-        throw error
-      }
       const collected = collectCorrectionContext(session, undefined, undefined, turnState.turn + 1, source.roots)
       if (collected.reasons.some(reason => ['context_too_long', 'context_total_exceeded',
         'context_material_outside', 'context_no_turn_boundary', 'context_current_turn'].includes(reason))) {

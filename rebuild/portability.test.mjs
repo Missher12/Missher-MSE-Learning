@@ -31,10 +31,14 @@ test('native store round trip preserves Unicode, unknown fields, and a read-only
   assert.deepEqual(reopened.read().portableSentinel, { text: '用户原文 😀', n: [1, 2, 3] })
   assert.deepEqual(readFileSync(store.path), before)
   assert.equal(store.lastCommitDurability, 'confirmed')
-  assert.deepEqual(readdirSync(root), ['memory-v1.json'])
+  const files = readdirSync(root)
+  assert.ok(files.includes('memory-v1.json'))
+  const objects = files.filter(name => name.startsWith('.memory-v1-object-'))
+  assert.ok(objects.length > 0)
+  assert.ok(files.every(name => name === 'memory-v1.json' || objects.includes(name)))
   if (process.platform !== 'win32') {
     assert.equal(statSync(root).mode & 0o777, 0o700)
-    assert.equal(statSync(store.path).mode & 0o777, 0o600)
+    for (const name of files) assert.equal(statSync(join(root, name)).mode & 0o777, 0o600)
   }
 })
 
@@ -53,7 +57,7 @@ test('native format3 upgrade preserves old fields and leaves legacy source bytes
   assert.equal(readFileSync(store.path, 'utf8'), original)
   store.transaction(current => { current.controls.userPaused = true; return true })
   const migrated = new MemoryStore({ stateRoot: root }).read()
-  assert.equal(migrated.format, 4)
+  assert.equal(migrated.format, 6)
   assert.deepEqual(migrated.portableOldField, { version: 1, text: '旧文保留' })
   assert.equal(migrated.controls.userPaused, true)
   assert.deepEqual(readFileSync(legacy), legacyBytes)

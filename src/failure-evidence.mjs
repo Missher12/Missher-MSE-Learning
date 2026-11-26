@@ -14,10 +14,9 @@
  * Bounds are part of the contract, not tuning:
  *  • one serialized capsule is at most CAPSULE_MAX_BYTES (2048 UTF-8 B);
  *  • each problem keeps at most the newest CAPSULES_PER_PROBLEM (3) distinct-event capsules;
- *  • the WHOLE ledger keeps at most CAPSULES_TOTAL_BYTES (128 KiB) of capsules. Crossing that line
- *    evicts the OLDEST capsules through `enforceCapsuleBudget` — an explicit bounded diagnostic
- *    window. Problem identities, cumulative counts, summaries and the ledger itself survive; the
- *    store is never silently cleared, and every eviction is counted in `capsuleDropped`.
+ *  • each problem keeps its newest CAPSULES_PER_PROBLEM (3) distinct-event capsules. There is no
+ *    ledger-wide capsule quota: adding an unrelated problem must not erase evidence from an older
+ *    one. The chunked store bounds each object independently.
  *
  * Identity rules:
  *  • a capsule id is deterministic from (host event id, tool, failure class, diagnostic signature),
@@ -32,7 +31,6 @@ import { createHash } from 'node:crypto'
 export const FAILURE_EVIDENCE_FORMAT = 1
 export const CAPSULE_MAX_BYTES = 2048
 export const CAPSULES_PER_PROBLEM = 3
-export const CAPSULES_TOTAL_BYTES = 128 * 1024
 export const CAPSULE_MESSAGE_CHARS = 512
 export const CAPSULE_COMMAND_CHARS = 160
 
@@ -423,28 +421,4 @@ export function appendCapsuleToRow(row, capsule) {
   if (dropped > 0) row.capsuleDropped = (row.capsuleDropped ?? 0) + dropped
   row.capsules = kept
   return 'appended'
-}
-
-/**
- * The ledger-wide bounded diagnostic window. When the capsule total crosses the 128 KiB budget the
- * OLDEST capsules are evicted (across rows, oldest `at` first) until the total fits; the newest
- * evidence can never be the one evicted while older evidence remains. Only capsule text leaves:
- * problem identities, counts, summaries and the ledger itself stay intact, and each row counts
- * exactly how much it lost.
- */
-export function enforceCapsuleBudget(loop) {
-  let evicted = 0
-  while (capsulesByteTotal(loop) > CAPSULES_TOTAL_BYTES) {
-    let oldest = null
-    for (const row of loop.problems) {
-      const capsules = row.capsules ?? []
-      if (capsules.length === 0) continue
-      if (oldest === null || capsules[0].at < oldest.row.capsules[0].at) oldest = { row }
-    }
-    if (oldest === null) break
-    oldest.row.capsules = oldest.row.capsules.slice(1)
-    oldest.row.capsuleDropped = (oldest.row.capsuleDropped ?? 0) + 1
-    evicted += 1
-  }
-  return evicted
 }

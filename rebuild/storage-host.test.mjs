@@ -45,119 +45,25 @@ function pendingEntry() {
     factDigest: null, digestDay: null, importedFrom: null }
 }
 
-test('a full user-rule-only library rejects a new direct rule with a readable reason and no write', () => {
+test('direct rules grow beyond the former 4,096-entry limit', () => {
   const root = temporaryRoot()
   const engine = new RebuildEngine({ stateRoot: root })
   try {
     addRules(engine, ENTRY_LIMIT)
-    const before = readFileSync(engine.store.path)
     const result = engine.recordCorrection({ text: ruleText(ENTRY_LIMIT), sessionId: 'capacity-test',
       turnId: String(ENTRY_LIMIT) })
-    assert.deepEqual(result, { ok: false, reason: 'entry_capacity' })
-    assert.deepEqual(readFileSync(engine.store.path), before)
-    assert.equal(engine.store.read().entries.length, ENTRY_LIMIT)
+    assert.equal(result.ok, true)
+    const entries = engine.store.read().entries
+    assert.equal(entries.length, ENTRY_LIMIT + 1)
+    assert.ok(entries.some(row => row.instruction === ruleText(ENTRY_LIMIT)))
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('a full library preserves its pending entry when refusing a new direct rule', () => {
-  const root = temporaryRoot()
-  const engine = new RebuildEngine({ stateRoot: root })
-  try {
-    addRules(engine, ENTRY_LIMIT - 1)
-    const pending = pendingEntry()
-    engine.store.transaction(doc => { doc.entries.push(pending); return true })
-    const before = readFileSync(engine.store.path)
-    const result = engine.recordCorrection({ text: ruleText(ENTRY_LIMIT - 1),
-      sessionId: 'capacity-test', turnId: String(ENTRY_LIMIT - 1) })
-    assert.deepEqual(result, { ok: false, reason: 'entry_capacity' })
-    assert.deepEqual(readFileSync(engine.store.path), before)
-    const after = engine.store.read()
-    assert.equal(after.entries.length, ENTRY_LIMIT)
-    assert.equal(after.entries.find(entry => entry.id === pending.id)?.instruction, pending.instruction)
-  } finally { rmSync(root, { recursive: true, force: true }) }
-})
-
-test('a duplicate user rule remains successful when the library is full', () => {
+test('eligible reflection writes a lesson beyond the former 4,096-entry limit', () => {
   const root = temporaryRoot()
   const engine = new RebuildEngine({ stateRoot: root })
   try {
     addRules(engine, ENTRY_LIMIT)
-    const duplicate = engine.recordCorrection({ text: ruleText(0), sessionId: 'capacity-test',
-      turnId: 'duplicate' })
-    assert.equal(duplicate.ok, true)
-    assert.equal(duplicate.duplicate, true)
-    assert.equal(engine.store.read().entries.length, ENTRY_LIMIT)
-  } finally { rmSync(root, { recursive: true, force: true }) }
-})
-
-test('a full library keeps a new natural correction pending without paying for extraction', () => {
-  const root = temporaryRoot()
-  const engine = new RebuildEngine({ stateRoot: root })
-  try {
-    addRules(engine, ENTRY_LIMIT)
-    engine.setRoute({ provider: 'fake', model: 'm1' })
-    engine.recordCorrectionCandidate({ sessionId: 'capacity-test', turnId: 'queued',
-      userText: '不对，插件版本应该先读取实际加载信息。', cwd: '/repo/alpha' })
-    assert.equal(engine.beginWork(), null)
-    const doc = engine.store.read()
-    assert.equal(doc.corrections.at(-1).status, 'pending')
-    assert.equal(doc.requests.length, 0)
-    assert.equal(doc.digest.waitReason, 'entry_capacity')
-    assert.equal(doc.entries.length, ENTRY_LIMIT)
-  } finally { rmSync(root, { recursive: true, force: true }) }
-})
-
-test('an already-dispatched extraction that reaches capacity settles as entry_capacity', () => {
-  const root = temporaryRoot()
-  const engine = new RebuildEngine({ stateRoot: root })
-  try {
-    addRules(engine, ENTRY_LIMIT - 1)
-    engine.setRoute({ provider: 'fake', model: 'm1' })
-    engine.recordCorrectionCandidate({ sessionId: 'capacity-test', turnId: 'raced',
-      userText: '不对，插件版本应该读取实际加载信息。', cwd: '/repo/alpha' })
-    const work = engine.beginWork()
-    assert.ok(work)
-    engine.markDispatched(work.ticket)
-    engine.store.transaction(doc => { doc.entries.push(seededRule(ENTRY_LIMIT - 1)); return true })
-    const result = engine.finishWork({ ticket: work.ticket, usage: { total: 12 },
-      result: { schema: 'mse-correction-extract-v1', corrections: [{
-        durability: 'durable', scope: 'global', basis: 'stable workflow', reason: '可复用',
-        evidence: '插件版本应该读取实际加载信息', instruction: '插件版本应该读取实际加载信息',
-        applicability: '核对插件版本时' }] } })
-    assert.equal(result.reason, 'entry_capacity')
-    const doc = engine.store.read()
-    assert.equal(doc.entries.length, ENTRY_LIMIT)
-    assert.equal(doc.requests.find(row => row.ticket === work.ticket).settled, true)
-    assert.equal(doc.requests.find(row => row.ticket === work.ticket).terminal, 'entry_capacity')
-    assert.equal(doc.corrections.at(-1).status, 'ignored')
-    assert.equal(doc.corrections.at(-1).reason, 'entry_capacity')
-  } finally { rmSync(root, { recursive: true, force: true }) }
-})
-
-test('a full library keeps eligible reflection evidence waiting without a provider request', () => {
-  const root = temporaryRoot()
-  const engine = new RebuildEngine({ stateRoot: root })
-  try {
-    addRules(engine, ENTRY_LIMIT)
-    engine.setRoute({ provider: 'fake', model: 'm1' })
-    for (const [sessionId, turnId] of [['s-a', '1'], ['s-b', '1']]) {
-      engine.observeToolFailure({ sessionId, turnId, projectKey: '/repo/alpha',
-        callId: `failure-${sessionId}`, toolName: 'node', failureCode: 'tool_nonzero_exit',
-        exitCode: 1, stderr: 'SyntaxError: Unexpected token in configuration file' })
-    }
-    assert.equal(engine.beginWork(), null)
-    const doc = engine.store.read()
-    assert.equal(doc.requests.length, 0)
-    assert.equal(doc.digest.waitReason, 'entry_capacity')
-    assert.equal(doc.problemLoop.problems.some(row => row.ticket !== null), false)
-  } finally { rmSync(root, { recursive: true, force: true }) }
-})
-
-test('a dispatched reflection that reaches capacity settles without leaving its problem in flight', () => {
-  const root = temporaryRoot()
-  const engine = new RebuildEngine({ stateRoot: root })
-  try {
-    addRules(engine, ENTRY_LIMIT - 1)
     engine.setRoute({ provider: 'fake', model: 'm1' })
     for (const [sessionId, turnId] of [['s-a', '1'], ['s-b', '1']]) {
       engine.observeToolFailure({ sessionId, turnId, projectKey: '/repo/alpha',
@@ -167,7 +73,6 @@ test('a dispatched reflection that reaches capacity settles without leaving its 
     const work = engine.beginWork()
     assert.ok(work && work.kind === 'reflect')
     engine.markDispatched(work.ticket)
-    engine.store.transaction(doc => { doc.entries.push(seededRule(ENTRY_LIMIT - 1)); return true })
     const evidenceId = engine.store.read().requests.find(row => row.ticket === work.ticket).evidenceIds[0]
     const result = engine.finishWork({ ticket: work.ticket, usage: { total: 18 },
       result: { schema: 'mse-failure-lesson-v1', applicability: '处理配置文件时',
@@ -176,15 +81,12 @@ test('a dispatched reflection that reaches capacity settles without leaving its 
         repairSteps: ['先解析配置文本并定位语法错误'],
         verification: { check: '用 JSON.parse 解析配置', expected: '解析成功' },
         instruction: '写入配置前先用 JSON.parse 验证语法有效' } })
-    assert.deepEqual(result, { ok: false, code: 'entry_capacity', settled: true })
+    assert.equal(result.ok, true)
     const doc = engine.store.read()
-    assert.equal(doc.entries.length, ENTRY_LIMIT)
-    const request = doc.requests.find(row => row.ticket === work.ticket)
-    assert.equal(request.settled, true)
-    assert.equal(request.terminal, 'entry_capacity')
-    const problem = doc.problemLoop.problems.find(row => row.id === work.problemId)
-    assert.equal(problem.ticket, null)
-    assert.equal(problem.reason, 'entry_capacity')
+    assert.equal(doc.entries.length, ENTRY_LIMIT + 1)
+    assert.equal(doc.entries.at(-1).type, 'lesson')
+    assert.equal(doc.problemLoop.problems[0].lessonId, doc.entries.at(-1).id)
+    assert.equal(doc.requests.find(row => row.ticket === work.ticket).settled, true)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

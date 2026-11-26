@@ -14,6 +14,8 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
   const NS = 'mse-learning'
   const BUNDLE = '@missher/dsh-mse-learning'
   const SETTINGS_ID = 'mse-learning'
+  const RECALL_TOKEN_MIN = 128
+  const RECALL_TOKEN_MAX = 16384
   const TABS = ['overview', 'lessons', 'recall', 'tasks', 'usage', 'activity']
   const tabLabel = (id, dict) => id === 'overview' ? dict.tabOverview : id === 'lessons' ? dict.tabLessons
     : id === 'recall' ? dict.tabRecall : id === 'tasks' ? dict.tabTasks
@@ -76,10 +78,13 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     learning: '自动学习', pauseControl: '后台任务',
     pause: '暂停', resume: '恢复',
     settingsSaveFailed: '保存失败，请重试。', saveSetting: '保存', cancelSetting: '取消',
+    saveSettings: '保存设置', cancelChanges: '取消修改',
     wakeInterval: '空闲检查间隔', minuteUnit: '分钟', invalidWake: '请输入 1–60 分钟。',
     dailyHour: '每日总结时间', dailyLocalTime: '本机时间，空闲时运行',
-    recallBytes: '每轮召回上限',
-    recallTokenEstimate: 'Token 估算', recallLegacyBytes: '旧设置',
+    recallBytes: '每轮召回上限', recallTokenUnit: 'Token',
+    recallTokenEstimate: 'Token 估算',
+    recallLegacyActive: '旧设置仍生效：{bytes} B（当前字节上限 {effective} B）；保存 Token 值后切换。',
+    recallTokenRange: '请输入 128–16384 的整数 Token。',
     adaptiveByteEvidence: '旧版字节证据（≤768 B）',
     modelSettings: '后台模型', modelFromSource: '随来源会话', modelProvider: '服务商 ID',
     modelId: '模型 ID', reasoningEffort: '推理强度', defaultEffort: '默认',
@@ -129,6 +134,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     rsiReasonProbeCapacity: '探针容量已满', rsiReasonUnmatchedObjective: '目标不匹配',
     rsiReasonAwaitingControl: '等待负向对照', rsiReasonStrategyDisabled: '策略已停用',
     rsiReasonRevisionLimit: '策略修订次数已满', rsiReasonSameMechanism: '修订机制重复',
+    rsiReasonPolicyCapacity: '当前或验证中的策略已占满名额',
     rsiReasonCounterexampleChild: '反例修订已建立',
     settledYes: '已结算', settledNo: '在途', historicalEntry: '历史经验', fullId: '完整标识',
     summaryLabel: '摘要', requestLabel: '请求标识', rawCode: '原始结果码',
@@ -176,10 +182,13 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     effectiveRunning: 'Running', effectivePaused: 'Paused', effectiveOff: 'Off',
     learning: 'Automatic learning', pauseControl: 'Background work', pause: 'Pause', resume: 'Resume',
     settingsSaveFailed: 'Save failed. Try again.', saveSetting: 'Save',
-    cancelSetting: 'Cancel', wakeInterval: 'Idle check interval', minuteUnit: 'min',
+    cancelSetting: 'Cancel', saveSettings: 'Save settings', cancelChanges: 'Cancel changes',
+    wakeInterval: 'Idle check interval', minuteUnit: 'min',
     invalidWake: 'Enter 1–60 minutes.', dailyHour: 'Daily summary time',
     dailyLocalTime: 'Local time, while idle', recallBytes: 'Per-turn recall limit',
-    recallTokenEstimate: 'Token estimate', recallLegacyBytes: 'legacy setting',
+    recallTokenUnit: 'Token', recallTokenEstimate: 'Token estimate',
+    recallLegacyActive: 'The legacy {bytes} B setting remains active (current byte cap {effective} B) until a Token value is saved.',
+    recallTokenRange: 'Enter an integer Token budget from 128 to 16384.',
     adaptiveByteEvidence: 'Legacy byte evidence (≤768 B)',
     modelSettings: 'Background model', modelFromSource: 'Source session', modelProvider: 'Provider ID',
     modelId: 'Model ID', reasoningEffort: 'Reasoning effort', defaultEffort: 'Default',
@@ -227,7 +236,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     rsiReasonStaleProbe: 'Probe expired', rsiReasonProbeCapacity: 'Probe capacity reached',
     rsiReasonUnmatchedObjective: 'Objective did not match', rsiReasonAwaitingControl: 'Awaiting negative control',
     rsiReasonStrategyDisabled: 'Strategy disabled', rsiReasonRevisionLimit: 'Revision limit reached',
-    rsiReasonSameMechanism: 'Repeated revision mechanism', rsiReasonCounterexampleChild: 'Counterexample revision created',
+    rsiReasonSameMechanism: 'Repeated revision mechanism',
+    rsiReasonPolicyCapacity: 'Current or in-validation policies occupy all slots',
+    rsiReasonCounterexampleChild: 'Counterexample revision created',
     settledYes: 'Settled', settledNo: 'In progress', historicalEntry: 'Historical lesson', fullId: 'Full ID',
     summaryLabel: 'Summary', requestLabel: 'Request ID', rawCode: 'Result code',
     tasksSection: 'Background requests', retryGuide: 'Retry rules',
@@ -442,6 +453,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     candidate_rejected: '纠正审计写入被既有字段边界拒绝（已按 UTF-16 单位裁剪；仍未入库）',
     store_unavailable: '学习库暂时不可读写（已跳过本次审计写入，不影响当前步骤）',
     entry_capacity: '学习库条目已满，新条目已等待或拒收，现有条目保留',
+    recall_strategy_capacity: '当前或验证中的召回策略已占满名额，现有召回仍可用',
     turn_facts_rejected: '回合事实写入被既有字段边界拒绝，不影响当前回合',
     temp_workspace_excluded: '临时工作区未采集',
     user_correction: '用户纠正停用',
@@ -535,6 +547,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     incomparable_evidence: '候选历史不一致', round_not_selected: '本轮选择了其他候选',
     awaiting_negative_control: zh.rsiReasonAwaitingControl, strategy_disabled: zh.rsiReasonStrategyDisabled,
     revision_limit: zh.rsiReasonRevisionLimit, same_mechanism_rejected: zh.rsiReasonSameMechanism,
+    active_policy_capacity: zh.rsiReasonPolicyCapacity,
     counterexample_child: zh.rsiReasonCounterexampleChild }
   const RSI_REASON_EN = { probe_created: 'Real probe recorded', failure_admitted: 'Failure evidence accepted',
     failure_duplicate: 'Duplicate failure evidence', failure_rejected: 'Failure evidence rejected',
@@ -555,6 +568,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     probe_capacity: 'Probe capacity reached', independent_unmatched_objective: 'Objective did not match',
     awaiting_negative_control: 'Awaiting negative control', strategy_disabled: 'Strategy disabled',
     revision_limit: 'Revision limit reached', same_mechanism_rejected: 'Repeated revision mechanism',
+    active_policy_capacity: 'Current or in-validation policies occupy all slots',
     counterexample_child: 'Counterexample revision created' }
   // Chinese reads first; the original code stays in parentheses for tracing.
   const TERMINAL_ZH = { saved: '已保存', committed: '已入库', linked: '已关联', skipped: '已跳过',
@@ -609,13 +623,17 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-panel-message,.mse-details .mse-empty{padding:12px 14px;border-radius:10px;background:var(--dsw-alias-bg-module-platform)}
 .mse-details .mse-empty{color:var(--dsw-alias-label-secondary);font-size:13px}
 .mse-details .mse-panel-message{margin-bottom:12px}
-.mse-details .mse-control-list{border:1px solid var(--dsw-alias-border-l2);border-radius:12px;padding:0 14px;background:var(--dsw-alias-bg-layer-3)}
-.mse-details .mse-settings>.mse-section-title{margin:16px 0 6px;font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary)}
+.mse-details .mse-control-list{border:0;border-radius:0;padding:0;background:transparent}
+.mse-details .mse-settings>.mse-section-title{margin:0 0 4px;font-size:15px;line-height:22px;color:var(--dsw-alias-label-primary);font-weight:600}
 .mse-details .mse-settings>.mse-section-title:first-child{margin-top:0}
-.mse-details .mse-settings>.mse-control-list+.mse-control-list{margin-top:12px}
-.mse-details .mse-control-list>.mse-row,.mse-details .mse-control-list>.mse-disclosure>summary{min-height:46px;padding-block:8px}
+.mse-details .mse-settings>.mse-control-list+.mse-section-title{margin-top:20px}
+.mse-details .mse-settings>.mse-control-list+.mse-control-list{margin-top:24px}
+.mse-details .mse-control-list>.mse-row,.mse-details .mse-control-list>.mse-disclosure>summary{min-height:52px;padding-block:10px}
 .mse-details .mse-control-list>.mse-disclosure:last-child{border-bottom:0}
+.mse-settings{--mse-control-width:min(44%,176px)}
 .mse-details .mse-row { display: flex; gap: 20px; align-items: center; padding: 10px 0; border-bottom: 0.5px solid var(--dsw-alias-border-l2); min-width: 0; }
+.mse-details .mse-settings .mse-row{gap:12px}
+.mse-details .mse-settings>.mse-control-list>.mse-row{min-height:44px;padding-block:6px}
 .mse-details .mse-row-top{align-items:flex-start}
 .mse-details .mse-row-stacked{display:block}
 .mse-details .mse-row-stacked .mse-row-side{display:flex;flex:initial;width:100%;justify-content:flex-start;flex-wrap:wrap;gap:8px 18px;max-width:100%;margin-top:8px;white-space:normal;overflow-wrap:anywhere}
@@ -628,8 +646,19 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-settings .mse-picker{width:7rem}
 .mse-details .mse-settings .mse-picker-trigger{width:100%}
 .mse-details .mse-setting-number{width:70px;min-width:0;font-variant-numeric:tabular-nums}
+.mse-details .mse-settings-value-row .mse-row-side{width:var(--mse-control-width);flex:0 0 var(--mse-control-width);max-width:100%}
+.mse-details .mse-numeric-control{position:relative;width:100%;height:32px;min-width:0}
+.mse-details .mse-settings-value-row .mse-numeric-control .mse-setting-number{display:flex;align-items:center;box-sizing:border-box;width:100%;height:32px;min-width:0;padding:0;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md,8px);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary)}
+.mse-details .mse-settings-value-row .mse-numeric-control .mse-setting-number input[type=number]{display:block;box-sizing:border-box;flex:1 1 auto;width:100%;height:100%;min-width:0;padding-inline:34px;border:0;border-radius:inherit;background:transparent;color:inherit;font:inherit;font-variant-numeric:tabular-nums;text-align:center;appearance:textfield}
+.mse-details .mse-settings-value-row .mse-numeric-control .mse-setting-number input[type=number]::-webkit-inner-spin-button,.mse-details .mse-settings-value-row .mse-numeric-control .mse-setting-number input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+.mse-details .mse-numeric-control .mse-unit{position:absolute;inset-inline-end:10px;top:50%;transform:translateY(-50%);pointer-events:none;white-space:nowrap}
+.mse-details .mse-settings-value-row .mse-picker{width:100%}
+.mse-details .mse-settings-value-row .mse-picker-trigger{width:100%;height:32px;min-height:32px;border:1px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md,8px);background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-primary)}
 .mse-details .mse-setting-text{width:218px;max-width:100%;min-width:0}
 .mse-details .mse-settings-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:10px}
+.mse-details .mse-overview-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:8px;padding-top:10px;border-top:0.5px solid var(--dsw-alias-border-l2)}
+.mse-details .mse-settings>.mse-control-list.mse-settings-advanced{margin-top:16px;border:0;border-top:0.5px solid var(--dsw-alias-border-l2);padding:8px 0 0}
+.mse-details .mse-settings-advanced>.mse-disclosure>summary{min-height:40px;padding-block:8px}
 .mse-details .mse-settings .mse-detail-body>.mse-hint{margin-top:8px}
 .mse-details .mse-unit{color:var(--dsw-alias-label-tertiary);font-size:12px}
 .mse-details .mse-section-title{margin:20px 0 8px;font-size:15px;line-height:22px;color:var(--dsw-alias-label-primary);font-weight:600;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;min-width:0}
@@ -718,6 +747,7 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 }
 @container(max-width:450px){
 .mse-details .mse-row { gap: 12px; padding: 10px 0; }
+.mse-details .mse-settings .mse-row{gap:10px}
 .mse-details .mse-metrics>div{padding:10px}
 .mse-details .mse-disclosure>summary>.mse-meta{max-width:45%}
 .mse-details .mse-meta>span{white-space:normal;overflow-wrap:anywhere}
@@ -725,9 +755,13 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
 .mse-details .mse-activity-grid,.mse-details .mse-activity-months{column-gap:2px}
 }
 @container(max-width:300px){
-.mse-details .mse-settings .mse-row{align-items:flex-start;flex-direction:column;gap:4px}
-.mse-details .mse-settings .mse-row-side{width:100%;max-width:100%;justify-content:flex-start}
+.mse-details .mse-settings .mse-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,65%);align-items:center;gap:4px 8px}
+.mse-details .mse-settings{--mse-control-width:min(58%,176px)}
+.mse-details .mse-settings .mse-settings-value-row{grid-template-columns:minmax(0,1fr) var(--mse-control-width)}
+.mse-details .mse-settings .mse-row-side{width:100%;max-width:100%;justify-content:flex-end;flex-wrap:wrap;gap:6px}
+.mse-details .mse-settings .mse-settings-value-row .mse-row-side{flex:initial}
 .mse-details .mse-setting-text{width:100%}
+.mse-details .mse-settings .mse-picker{max-width:100%}
 .mse-details .mse-activity-header{flex-wrap:wrap;gap:6px}
 }
 .mse-details .mse-picker-trigger { position: relative; justify-content: center; padding-inline: 28px; }
@@ -888,7 +922,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       material_outside_reference: 'Material referenced an external file', tool_material_outside: 'Tool material referenced an external path',
       tool_output_outside: 'Failure output referenced an external path', source_unverified: 'Source could not be verified',
       material_unverified: 'External material could not be verified', store_unavailable: 'Memory is unavailable; write skipped',
-      entry_capacity: 'Memory is full; entry was held or rejected', user_correction: 'Rule retired after user correction',
+      entry_capacity: 'Memory is full; entry was held or rejected',
+      recall_strategy_capacity: 'Current or in-validation recall strategies occupy all slots; existing recall remains available',
+      user_correction: 'Rule retired after user correction',
       temporary_scope: 'Temporary scope; not saved as a rule', model_uncertain: 'Durability uncertain; not saved',
       scope_uncertain: 'Scope unclear; not saved' } : REASON_ZH
     const revisionLabels = locale === 'en' ? { matched_recurrence: 'Similar failure recurred',
@@ -928,6 +964,9 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     // Three-state like the original: "we could not read it" is NOT "it is running".
     const [controlState, setControlState] = React.useState({ status: 'unknown', paused: null })
     const [wakeDraft, setWakeDraft] = React.useState(null)
+    const [wakeError, setWakeError] = React.useState(null)
+    const [recallDraft, setRecallDraft] = React.useState(null)
+    const [recallError, setRecallError] = React.useState(null)
     const [modelDraft, setModelDraft] = React.useState(null)
     const [saveState, setSaveState] = React.useState(null)
     const generation = React.useRef(0)
@@ -1030,13 +1069,41 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       }
     }
     const savedInterval = settings == null ? null : (settings.wakeIntervalMs ?? 600_000)
-    const saveWake = async () => {
-      const minutes = Number(wakeDraft)
-      if (!Number.isFinite(minutes) || minutes < 1 || minutes > 60) {
-        setSaveState({ kind: 'error', detail: dict.invalidWake })
-        return
+    const hasOverviewSettingsDraft = wakeDraft !== null || recallDraft !== null
+    const saveOverviewSettings = async () => {
+      const values = {}
+      let valid = true
+      if (wakeDraft !== null) {
+        const minutes = Number(wakeDraft)
+        if (!Number.isFinite(minutes) || minutes < 1 || minutes > 60) {
+          setWakeError(dict.invalidWake)
+          valid = false
+        } else {
+          setWakeError(null)
+          values.wakeIntervalMs = Math.round(minutes * 60_000)
+        }
       }
-      if (await mutateSettings({ wakeIntervalMs: Math.round(minutes * 60_000) })) setWakeDraft(null)
+      if (recallDraft !== null) {
+        const value = String(recallDraft).trim()
+        const tokens = Number(value)
+        if (!/^\d+$/u.test(value) || !Number.isSafeInteger(tokens)
+          || tokens < RECALL_TOKEN_MIN || tokens > RECALL_TOKEN_MAX) {
+          setRecallError(dict.recallTokenRange)
+          valid = false
+        } else {
+          setRecallError(null)
+          values.maxContextTokens = tokens
+        }
+      }
+      if (!valid) return false
+      if (await mutateSettings(values)) {
+        setWakeDraft(null)
+        setWakeError(null)
+        setRecallDraft(null)
+        setRecallError(null)
+        return true
+      }
+      return false
     }
     const savedModel = {
       modelProvider: settings?.modelProvider ?? '',
@@ -1074,15 +1141,17 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
     const legacyRecallBytes = settings?.maxContextBytes ?? 768
     const configuredRecallTokens = settings?.maxContextTokens
     const recallTokenLimit = Number.isSafeInteger(configuredRecallTokens)
-      && configuredRecallTokens >= 128 && configuredRecallTokens <= 1024
+      && configuredRecallTokens >= RECALL_TOKEN_MIN && configuredRecallTokens <= RECALL_TOKEN_MAX
       ? configuredRecallTokens : legacyRecallBytes >= 768 ? 512 : null
-    const recallValue = recallTokenLimit === null ? `bytes:${legacyRecallBytes}` : `tokens:${recallTokenLimit}`
-    const recallChoices = [...new Set([128, 256, 384, 512, 640, 768, 896, 1024,
-      ...(recallTokenLimit === null ? [] : [recallTokenLimit])])].sort((a, b) => a - b).map(tokens => ({
-      id: `tokens:${tokens}`, label: `${tokens} ${dict.recallTokenEstimate}`,
-    }))
-    if (recallTokenLimit === null) recallChoices.unshift({ id: `bytes:${legacyRecallBytes}`,
-      label: `${legacyRecallBytes} B · ${dict.recallLegacyBytes}` })
+    const effectiveLegacyRecallBytes = Number.isSafeInteger(legacyRecallBytes)
+      ? Math.min(768, Math.max(128, legacyRecallBytes)) : 768
+    const recallHint = recallError !== null
+      ? h('span', { id: 'mse-recall-error', className: 'mse-error', role: 'alert' }, recallError)
+      : recallTokenLimit === null
+        ? h('span', { id: 'mse-recall-hint' },
+          dict.recallLegacyActive.replace('{bytes}', String(legacyRecallBytes))
+            .replace('{effective}', String(effectiveLegacyRecallBytes)))
+        : null
     const clockChoices = Array.from({ length: 24 }, (_, hour) => ({
       id: String(hour), label: `${String(hour).padStart(2, '0')}:00`,
     }))
@@ -1099,29 +1168,40 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
       ]),
       h('h2', { key: 'schedule-group', className: 'mse-section-title' }, dict.scheduleGroup),
       h('div', { key: 'schedule-settings', className: 'mse-control-list' }, [
-        row('wake', dict.wakeInterval, null, [
-          h(Input, { key: 'i', type: 'number', min: 1, max: 60, step: 'any', inputMode: 'decimal',
-            className: 'mse-setting-number', 'aria-label': dict.wakeInterval,
-            value: wakeDraft ?? (savedInterval === null ? '' : String(savedInterval / 60_000)),
-            disabled: !canEdit, onChange: event => setWakeDraft(event.currentTarget.value) }),
-          h('span', { key: 'u', className: 'mse-unit' }, dict.minuteUnit),
-          h(Button, { key: 'b', variant: 'outline', size: 'sm', onClick: saveWake,
-            'aria-label': `${dict.saveSetting} · ${dict.wakeInterval}`,
-            disabled: !canEdit || wakeDraft === null }, dict.saveSetting),
-        ]),
+        row('wake', dict.wakeInterval, wakeError === null ? null
+          : h('span', { id: 'mse-wake-error', className: 'mse-error', role: 'alert' }, wakeError),
+          h('div', { key: 'numeric-control', className: 'mse-numeric-control' }, [
+            h(Input, { key: 'i', type: 'number', min: 1, max: 60, step: 'any', inputMode: 'decimal',
+              className: 'mse-setting-number', 'aria-label': dict.wakeInterval,
+              'aria-invalid': wakeError !== null,
+              'aria-describedby': wakeError !== null ? 'mse-wake-error' : undefined,
+              value: wakeDraft ?? (savedInterval === null ? '' : String(savedInterval / 60_000)),
+              disabled: !canEdit, onChange: event => {
+                setWakeDraft(event.currentTarget.value)
+                setWakeError(null)
+              } }),
+            h('span', { key: 'u', className: 'mse-unit' }, dict.minuteUnit),
+          ]), { className: 'mse-settings-value-row' }),
         row('daily-hour', dict.dailyHour, null,
           h(Picker, { label: dict.dailyHour, value: String(settings?.dailyHour ?? 23), options: clockChoices,
             testId: 'daily-hour', disabled: !canEdit,
             triggerProps: { title: dict.dailyLocalTime, 'aria-description': dict.dailyLocalTime },
-            onChange: value => mutateSettings({ dailyHour: Number(value) }) })),
-        row('recall-limit', dict.recallBytes, null,
-          h(Picker, { label: dict.recallBytes, value: recallValue, options: recallChoices,
-            testId: 'recall-limit', disabled: !canEdit,
-            onChange: value => String(value).startsWith('tokens:')
-              ? mutateSettings({ maxContextTokens: Number(String(value).slice(7)) })
-              : mutateSettings({ maxContextBytes: Number(String(value).slice(6)), maxContextTokens: null }) })),
+            onChange: value => mutateSettings({ dailyHour: Number(value) }) }),
+          { className: 'mse-settings-value-row' }),
+        row('recall-limit', dict.recallBytes, recallHint,
+          h('div', { key: 'numeric-control', className: 'mse-numeric-control' }, [
+            h(Input, { key: 'i', type: 'number', min: RECALL_TOKEN_MIN, max: RECALL_TOKEN_MAX, step: 1,
+              inputMode: 'numeric', className: 'mse-setting-number', 'aria-label': dict.recallBytes,
+              'aria-invalid': recallError !== null,
+              'aria-describedby': recallError !== null ? 'mse-recall-error'
+                : recallTokenLimit === null ? 'mse-recall-hint' : undefined,
+              value: recallDraft ?? (recallTokenLimit === null ? '' : String(recallTokenLimit)),
+              disabled: !canEdit,
+              onChange: event => { setRecallDraft(event.currentTarget.value); setRecallError(null) } }),
+            h('span', { key: 'u', className: 'mse-unit' }, dict.recallTokenUnit),
+          ]), { className: 'mse-settings-value-row' }),
       ]),
-      h('div', { key: 'advanced-settings', className: 'mse-control-list' }, [
+      h('div', { key: 'advanced-settings', className: 'mse-control-list mse-settings-advanced' }, [
         disclosure('background-model', dict.modelSettings, [
           row('provider', dict.modelProvider, null, h(Input, { key: 'i', className: 'mse-setting-text',
             'aria-label': dict.modelProvider, value: model.modelProvider, maxLength: 32,
@@ -1148,21 +1228,37 @@ window.__ModuleLoader__.load({ id: '@missher/dsh-mse-learning', factory: (requir
         disclosure('more-how', dict.moreSection, h('p', { className: 'mse-hint' }, dict.moreHow),
           { id: 'more-how' }),
       ]),
+      h('div', { key: 'overview-actions', className: 'mse-overview-actions' }, [
+        h(Button, { key: 'cancel', variant: 'ghost', size: 'sm',
+          'aria-label': dict.cancelChanges,
+          disabled: !canEdit || !hasOverviewSettingsDraft,
+          onClick: () => {
+            setWakeDraft(null)
+            setWakeError(null)
+            setRecallDraft(null)
+            setRecallError(null)
+          } }, dict.cancelChanges),
+        h(Button, { key: 'save', variant: 'outline', size: 'sm',
+          'aria-label': dict.saveSettings,
+          disabled: !canEdit || !hasOverviewSettingsDraft,
+          onClick: saveOverviewSettings }, dict.saveSettings),
+      ]),
     ] : null
     const overviewPanel = tab === 'overview' ? h(React.Fragment, { key: 'overview' }, [
       h('div', { key: 'settings', className: 'mse-settings', 'aria-busy': saving }, runtimeSettings),
       view?.daily?.lastSummary?.summary || dailyBacklog.length > 0 || dailyPartial.length > 0
         ? h('h2', { key: 'sec', className: 'mse-section-title' }, dict.dailySection) : null,
       view === null || (dailyBacklog.length === 0 && dailyPartial.length === 0) ? null
-        : disclosure('daily-detail', `${dict.backlogDays} · ${dailyBacklog.length + dailyPartial.length}`,
+        : disclosure('daily-detail', dict.backlogDays,
           definition('daily-audit', [
             [dict.backlogDays, dailyBacklog.length === 0 ? dict.none : dailyBacklog.join(listSeparator)],
             dailyPartial.length === 0 ? null : [dict.dailyPartialLine,
               dailyPartial.map(item => `${item.day} (${dict.dailyExcludedLine} ${item.excluded})`).join(listSeparator)],
-          ], { left: true }), { id: 'daily-detail' }),
+          ], { left: true }), { id: 'daily-detail', meta: String(dailyBacklog.length) }),
       view?.daily?.lastSummary?.summary
-        ? disclosure('summary', `${dict.lastSummaryLine} · ${view.daily.lastSummary.day}`,
-          h('p', { className: 'mse-detail-text' }, view.daily.lastSummary.summary), { id: 'last-summary' })
+        ? disclosure('summary', dict.lastSummaryLine,
+          h('p', { className: 'mse-detail-text' }, view.daily.lastSummary.summary),
+          { id: 'last-summary', meta: view.daily.lastSummary.day })
         : null,
     ]) : null
 

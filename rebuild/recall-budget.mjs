@@ -3,6 +3,9 @@ import { methodNeedsGuard } from './evolution.mjs'
 import { MAX_GUARDS_PER_TURN, MAX_METHODS_PER_TURN, MAX_RECALL_TOTAL,
   packRecall, rankForRecall, rankForRecallNormalized, NORMALIZATION_RULE, normalizedView }
   from './recall.mjs'
+import { MAX_RECALL_TOKEN_BUDGET, MIN_RECALL_TOKEN_BUDGET } from './recall-budget-constants.mjs'
+
+export { MAX_RECALL_TOKEN_BUDGET, MIN_RECALL_TOKEN_BUDGET } from './recall-budget-constants.mjs'
 
 export const RECALL_TOKEN_UNIT = 'dsh-memory-estimated-tokens-v1'
 export const DEFAULT_RECALL_TOKENS = 512
@@ -27,14 +30,15 @@ export function estimateRecallTokens(text) {
 }
 
 export function resolveRecallBudget({ maxContextBytes = 768, maxContextTokens = null } = {}) {
-  if (Number.isSafeInteger(maxContextTokens) && maxContextTokens >= 128 && maxContextTokens <= 1024) {
+  if (Number.isSafeInteger(maxContextTokens) && maxContextTokens >= MIN_RECALL_TOKEN_BUDGET
+    && maxContextTokens <= MAX_RECALL_TOKEN_BUDGET) {
     return { unit: RECALL_TOKEN_UNIT, limit: maxContextTokens }
   }
   if (Number.isSafeInteger(maxContextBytes) && maxContextBytes >= 128 && maxContextBytes < 768) {
     return { unit: 'bytes', limit: maxContextBytes }
   }
-  // 768 was the shipped default byte setting. Preserve that default as the matching 512-token
-  // estimate instead of interpreting the old number itself as a token count.
+  // Only old values below the shipped 768-byte default remain explicit byte profiles. At 768 B
+  // and above, preserve the existing 512-token default instead of reinterpreting the old number.
   return { unit: RECALL_TOKEN_UNIT, limit: DEFAULT_RECALL_TOKENS }
 }
 
@@ -50,7 +54,8 @@ const offerKey = row => `${row.id}\u0000${row.version}\u0000${row.mode ?? 'metho
 
 function selectPacked(ranked, { maxTokens, maxMethods = MAX_METHODS_PER_TURN,
   maxGuards = MAX_GUARDS_PER_TURN, excludeOffers = [], now = Date.now(), guardAdmit = null } = {}) {
-  const limit = Math.max(0, Math.min(1024, Number.isSafeInteger(maxTokens) ? maxTokens : DEFAULT_RECALL_TOKENS))
+  const limit = Math.max(0, Math.min(MAX_RECALL_TOKEN_BUDGET,
+    Number.isSafeInteger(maxTokens) ? maxTokens : DEFAULT_RECALL_TOKENS))
   const excluded = new Set(excludeOffers.map(versionKey))
   const rows = (ranked ?? []).filter(row => !excluded.has(versionKey({
     id: row.entry.id, version: row.entry.version,

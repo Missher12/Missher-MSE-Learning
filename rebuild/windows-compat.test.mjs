@@ -59,8 +59,11 @@ test('Windows store opens existing data without POSIX UID/mode or directory hand
     assert.equal(reopened.controls.userPaused, true)
     assert.deepEqual(reopened.privateSentinel, doc.privateSentinel)
     assert.equal(store.lastCommitDurability, 'confirmed')
-    assert.deepEqual(operations, ['file-sync', 'rename', 'file-sync'])
-    assert.deepEqual(actual.readdirSync(root), ['memory-v1.json'])
+    assert.deepEqual(operations.slice(-3), ['file-sync', 'rename', 'file-sync'],
+      'the manifest publish retains its file-sync/rename/file-sync order')
+    const files = actual.readdirSync(root)
+    assert.ok(files.includes('memory-v1.json'))
+    assert.ok(files.some(name => name.startsWith('.memory-v1-object-')))
   `)
 })
 

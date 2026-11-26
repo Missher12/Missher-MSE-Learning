@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { apply } from './dsh.mjs'
 import { RebuildEngine } from './engine.mjs'
+import { createDoc } from './memory.mjs'
 import { MAX_STORE_BYTES } from '../src/store.mjs'
 
 const FIXED_NOW = 1_798_000_000_000
@@ -21,7 +22,9 @@ function tempRoot(t) {
 function seededSnapshot(root) {
   const engine = new RebuildEngine({ stateRoot: root, now: () => FIXED_NOW })
   engine.recordCorrection({ text: RULE, sessionId: 'performance-test-seed', turnId: 'seed' })
-  return readFileSync(engine.store.path)
+  const legacy = engine.store.read()
+  legacy.format = 4
+  return Buffer.from(JSON.stringify(legacy))
 }
 
 function installSnapshot(root, bytes) {
@@ -53,10 +56,14 @@ function trackStore(engine) {
     commits += 1
     previousOnCommit?.(durability)
   }
-  const transaction = store.transaction.bind(store)
-  store.transaction = (...args) => { transactions += 1; return transaction(...args) }
+  for (const method of ['transaction', 'transactionRecall', 'transactionWithoutRequests']) {
+    const original = store[method].bind(store)
+    store[method] = (...args) => { transactions += 1; return original(...args) }
+  }
   const read = store.read.bind(store)
   store.read = (...args) => { reads += 1; return read(...args) }
+  const readLight = store.readLight.bind(store)
+  store.readLight = (...args) => { reads += 1; return readLight(...args) }
   return { snapshot: () => ({ transactions, reads, commits }) }
 }
 
@@ -165,7 +172,7 @@ test('deduplicated prepare still commits format3 migration and validation defaul
   engine.recordCorrection({ text: RULE, sessionId: 'seed', turnId: 'seed' })
   const first = engine.prepare({ sessionId: 's1', turnId: '1', projectKey: '/repo/mse', prompt: PROMPT })
   assert.ok(first.offered.length > 0)
-  const legacy = JSON.parse(readFileSync(engine.store.path, 'utf8'))
+  const legacy = engine.store.read()
   legacy.format = 3
   delete legacy.methodHistory
   delete legacy.corrections
@@ -176,11 +183,11 @@ test('deduplicated prepare still commits format3 migration and validation defaul
   reopened.store.onCommit = () => { commits += 1 }
 
   const duplicate = reopened.prepare({ sessionId: 's1', turnId: '1', projectKey: '/repo/mse', prompt: PROMPT })
-  const persisted = JSON.parse(readFileSync(reopened.store.path, 'utf8'))
+  const persisted = reopened.store.read()
 
   assert.equal(duplicate.reason, 'same_turn_dedup')
   assert.equal(commits, 1)
-  assert.equal(persisted.format, 4)
+  assert.equal(persisted.format, 6)
   assert.ok(Array.isArray(persisted.methodHistory))
   assert.ok(Array.isArray(persisted.corrections))
 })
@@ -192,7 +199,8 @@ test('deduplicated prepare persists format4 defaults injected while validating t
   engine.recordCorrection({ text: RULE, sessionId: 'seed', turnId: 'seed' })
   const first = engine.prepare({ sessionId: 's1', turnId: '1', projectKey: '/repo/mse', prompt: PROMPT })
   assert.ok(first.offered.length > 0)
-  const oldShape = JSON.parse(readFileSync(engine.store.path, 'utf8'))
+  const oldShape = engine.store.read()
+  oldShape.format = 4
   delete oldShape.methodHistory
   delete oldShape.corrections
   delete oldShape.recallStrategy.adaptive
@@ -202,11 +210,11 @@ test('deduplicated prepare persists format4 defaults injected while validating t
   reopened.store.onCommit = () => { commits += 1 }
 
   const duplicate = reopened.prepare({ sessionId: 's1', turnId: '1', projectKey: '/repo/mse', prompt: PROMPT })
-  const persisted = JSON.parse(readFileSync(reopened.store.path, 'utf8'))
+  const persisted = reopened.store.read()
 
   assert.equal(duplicate.reason, 'same_turn_dedup')
   assert.equal(commits, 1)
-  assert.equal(persisted.format, 4)
+  assert.equal(persisted.format, 6)
   assert.ok(Array.isArray(persisted.methodHistory))
   assert.ok(Array.isArray(persisted.corrections))
 })
@@ -234,41 +242,30 @@ test('real step1 uses the batched facts-route write and step2 exits before store
   assert.deepEqual(tracked.snapshot(), beforeStep2)
 })
 
-function capacityPartialSuccessSnapshot(root) {
-  const baseRoot = join(root, 'capacity-base')
-  const seed = new RebuildEngine({ stateRoot: baseRoot, now: () => FIXED_NOW })
-  seed.store.transaction(() => true)
-  const baseBytes = readFileSync(seed.store.path)
-  const factRoot = join(root, 'capacity-fact')
-  const factEngine = makeEngine(factRoot, baseBytes)
-  factEngine.recordTurnFacts({ sessionId: 's1', turnId: '1', taskSummary: PROMPT })
-  const factBytes = readFileSync(factEngine.store.path)
-  const routeRoot = join(root, 'capacity-route')
-  const routeEngine = new RebuildEngine({ stateRoot: routeRoot, now: () => FIXED_NOW })
-  mkdirSync(routeRoot, { mode: 0o700 })
-  writeFileSync(routeEngine.store.path, factBytes, { mode: 0o600 })
-  routeEngine.observeRoute({ sessionId: 's1', route: ROUTE })
-  const routeBytes = readFileSync(routeEngine.store.path)
-  const paddedBase = JSON.parse(baseBytes.toString('utf8'))
-  paddedBase.performancePadding = ''
-  const paddingOverhead = Buffer.byteLength(JSON.stringify(paddedBase)) - baseBytes.length
-  const factDelta = factBytes.length - baseBytes.length
-  const routeDelta = routeBytes.length - factBytes.length
-  const paddingBytes = MAX_STORE_BYTES - (baseBytes.length + paddingOverhead + factDelta)
-    - Math.floor(routeDelta / 2)
-  assert.ok(paddingBytes > 0)
-  const padded = JSON.parse(baseBytes.toString('utf8'))
-  padded.performancePadding = 'x'.repeat(paddingBytes)
+function aggregateGrowthSnapshot() {
+  const padded = createDoc()
+  padded.format = 4
+  padded.performancePadding = ''
+  const baseBytes = Buffer.byteLength(JSON.stringify(padded))
+  const example = structuredClone(padded)
+  example.turnFacts.push({ id: 'a'.repeat(64), turnKey: 'a'.repeat(64), sessionId: 's1',
+    day: '2026-11-22', at: FIXED_NOW, taskSummary: PROMPT, outcome: null,
+    evidenceBrief: null, evidenceHash: null, failures: 0, cancellations: 0 })
+  example.routes.push({ sessionId: 's1', at: FIXED_NOW, route: ROUTE })
+  const growth = Buffer.byteLength(JSON.stringify(example)) - baseBytes
+  const targetBytes = MAX_STORE_BYTES - Math.floor(growth / 2)
+  padded.performancePadding = 'x'.repeat(targetBytes - baseBytes)
   const result = Buffer.from(JSON.stringify(padded))
-  assert.ok(result.length + factDelta <= MAX_STORE_BYTES)
-  assert.ok(result.length + factDelta + routeDelta > MAX_STORE_BYTES)
+  assert.equal(result.length, targetBytes)
+  assert.ok(result.length < MAX_STORE_BYTES)
+  assert.ok(result.length + growth > MAX_STORE_BYTES)
   return result
 }
 
-test('capacity fallback keeps the fact if route would exceed the store limit', async t => {
+test('format 6 stores facts and route when their combined logical snapshot exceeds the file limit', async t => {
   const root = tempRoot(t)
   const { plugin, preStep } = adapterFixture(t)
-  const fixture = capacityPartialSuccessSnapshot(root)
+  const fixture = aggregateGrowthSnapshot()
   writeFileSync(plugin.engine.store.path, fixture, { mode: 0o600 })
 
   const decision = await preStep(1)
@@ -277,6 +274,7 @@ test('capacity fallback keeps the fact if route would exceed the store limit', a
   assert.equal(decision.kind, 'enter')
   assert.equal(doc.turnFacts.length, 1)
   assert.equal(doc.turnFacts[0].taskSummary, PROMPT)
-  assert.equal(doc.routes.length, 0)
-  assert.equal(doc.receipts.length, 0)
+  assert.equal(doc.routes.length, 1)
+  assert.equal(plugin.engine.store.stats().format, 6)
+  assert.ok(doc.performancePadding.length > 1_000_000, 'the unrelated large field remains intact')
 })

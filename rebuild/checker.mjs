@@ -209,9 +209,14 @@ function pythonReceiptGuardCapsuleSupported(capsule, command, sourceAdmitted) {
 
 function committedReceiptBirthRequests(doc, { entryId, version, problemId }) {
   if (!Array.isArray(doc?.requests)) return null
-  return doc.requests.filter(row => row?.kind === 'revise' && row.settled === true
+  const rows = typeof doc.__requestSummaries === 'function'
+    ? doc.__requestSummaries(row => row?.kind === 'revise' && row.settled === true
+      && row.terminal === 'committed' && row.entryId === entryId && row.problemId === problemId
+      && row.parentVersion === version - 1)
+    : doc.requests.filter(row => row?.kind === 'revise' && row.settled === true
     && row.terminal === 'committed' && row.entryId === entryId && row.problemId === problemId
     && row.parentVersion === version - 1)
+  return rows
 }
 
 function sameEvidenceIds(left, right) {

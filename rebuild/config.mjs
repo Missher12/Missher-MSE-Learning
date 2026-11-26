@@ -8,6 +8,7 @@
  * reflectionEnabled:false keeps reflection, revision and daily summaries OFF after the upgrade.
  */
 import z from '@deepseek-ai/schemastery'
+import { MAX_RECALL_TOKEN_BUDGET, MIN_RECALL_TOKEN_BUDGET } from './recall-budget-constants.mjs'
 
 export const SETTINGS_DEFAULTS = Object.freeze({
   enabled: true,
@@ -31,7 +32,7 @@ export const Config = z.object({
   reasoningEffort: z.union([z.const(''), z.const('low'), z.const('medium'), z.const('high')])
     .default('').volatile(),
   maxContextBytes: z.number().min(128).max(1536).step(1).default(SETTINGS_DEFAULTS.maxContextBytes).volatile(),
-  maxContextTokens: z.union([z.number().min(128).max(1024).step(1), z.const(null)])
+  maxContextTokens: z.union([z.number().min(MIN_RECALL_TOKEN_BUDGET).max(MAX_RECALL_TOKEN_BUDGET).step(1), z.const(null)])
     .default(SETTINGS_DEFAULTS.maxContextTokens).volatile(),
   dailyHour: z.number().min(0).max(23).step(1).default(SETTINGS_DEFAULTS.dailyHour).volatile(),
   wakeIntervalMs: z.number().min(60_000).max(3_600_000).step(1).default(SETTINGS_DEFAULTS.wakeIntervalMs).volatile(),

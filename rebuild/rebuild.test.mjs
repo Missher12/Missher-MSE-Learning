@@ -6,10 +6,10 @@
  * No plugin real-provider regression, no network.
  */
 import test from 'node:test'
-import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync, realpathSync, symlinkSync } from 'node:fs'
 import { after } from 'node:test'
-after(() => { try { rmSync(PROBES, { recursive: true, force: true }) } catch { /* best effort */ } })
+import assert from 'node:assert/strict'
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync,
+  readFileSync, realpathSync, statSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -27,7 +27,24 @@ import { apply } from './dsh.mjs'
 
 const PROBES = fileURLToPath(new URL('.probes', import.meta.url))
 mkdirSync(PROBES, { recursive: true })
-const root = () => mkdtempSync(join(PROBES, 'mse-rebuild-'))
+const PROBE_RUN = mkdtempSync(join(PROBES, 'mse-rebuild-run-'))
+after(() => { try { rmSync(PROBE_RUN, { recursive: true, force: true }) } catch { /* best effort */ } })
+const root = () => mkdtempSync(join(PROBE_RUN, 'mse-rebuild-'))
+const privateDir = path => {
+  mkdirSync(path, { recursive: true, mode: 0o700 })
+  if (process.platform !== 'win32') chmodSync(path, 0o700)
+  return path
+}
+const writePrivateFile = (path, content) => {
+  writeFileSync(path, content, { mode: 0o600 })
+  if (process.platform !== 'win32') chmodSync(path, 0o600)
+  return path
+}
+const copyPrivateFile = (source, target) => {
+  copyFileSync(source, target)
+  if (process.platform !== 'win32') chmodSync(target, 0o600)
+  return target
+}
 const hashFile = path => createHash('sha256').update(readFileSync(path)).digest('hex')
 const freezeTestDate = t => t.mock.timers.enable({ apis: ['Date'], now: new Date(2026, 10, 14, 10, 0, 0) })
 
@@ -1405,7 +1422,7 @@ test('N6 memory-v1 format 3 without the new corrections table loads with default
   await w.turn(w.mk('sOld', '/r'), 1, '你又没跑检查就交付了，要先跑检查再交付。')
   assert.equal(w.plugin.engine.store.read().entries.length, 1)
   const file = join(dir, 'mse-learning', 'memory-v1.json')
-  const doc = JSON.parse(readFileSync(file, 'utf8'))
+  const doc = w.plugin.engine.store.read()
   // EVOLUTION016: a pre-rebuild.6 library really is format 3, so the simulation must say so.
   doc.format = 3
   delete doc.methodHistory
@@ -1416,9 +1433,9 @@ test('N6 memory-v1 format 3 without the new corrections table loads with default
   assert.equal(engine2.store.read().format, 3, 'format 3 loads as-is')
   assert.equal(engine2.store.read().entries.length, 1, 'the old rule is intact')
   assert.deepEqual(engine2.store.read().corrections, [], 'the missing table defaults to empty')
-  // The first REAL write migrates the same file to format 4 and keeps the rule.
+  // The first REAL write migrates the same file to format 6 and keeps the rule.
   engine2.store.transaction(state => { state.controls.userPaused = false; return true })
-  assert.equal(engine2.store.read().format, 4)
+  assert.equal(engine2.store.read().format, 6)
   assert.equal(engine2.store.read().entries.length, 1, 'migration keeps the old rule')
 })
 
@@ -1579,7 +1596,70 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
     assert.equal(clientModule.__test.zh.settingsTitle, '自我进化', 'the original title, no 精简 suffix')
     assert.equal(clientModule.__test.zh.tabUsage, '学习状态')
     assert.equal(clientModule.__test.zh.rsiStageSettled, '回合结算')
+    assert.equal(clientModule.__test.zh.saveSettings, '保存设置')
+    assert.equal(clientModule.__test.zh.cancelChanges, '取消修改')
+    assert.equal(clientModule.__test.en.saveSettings, 'Save settings')
+    assert.equal(clientModule.__test.en.cancelChanges, 'Cancel changes')
     assert.match(clientModule.__test.STYLE, /SegmentedTabs|\.mse-disclosure|@media\(max-width:620px\)/u)
+    assert.match(clientModule.__test.STYLE,
+      /\.mse-control-list\{border:0;border-radius:0;padding:0;background:transparent\}/u,
+      'ordinary settings groups are flat')
+    assert.match(clientModule.__test.STYLE,
+      /\.mse-settings>\.mse-section-title\{margin:0 0 4px;font-size:15px;line-height:22px;color:var\(--dsw-alias-label-primary\);font-weight:600\}/u,
+      'settings group titles use the DSH native hierarchy')
+    assert.match(clientModule.__test.STYLE,
+      /\.mse-settings>\.mse-control-list\+\.mse-section-title\{margin-top:20px\}/u,
+      'Overview group spacing stays compact')
+    assert.match(clientModule.__test.STYLE,
+      /\.mse-control-list>\.mse-row,[^}]*min-height:52px;padding-block:10px\}/u,
+      'other pages retain the shared row spacing')
+    assert.match(clientModule.__test.STYLE,
+      /\.mse-settings>\.mse-control-list>\.mse-row\{min-height:44px;padding-block:6px\}/u,
+      'only Overview setting rows use the compact 44px height')
+    assert.match(clientModule.__test.STYLE,
+      /\.mse-details \.mse-row \{ display: flex; gap: 20px/u,
+      'the general row gap stays unchanged outside Overview')
+    assert.match(clientModule.__test.STYLE,
+      /\.mse-settings\{--mse-control-width:min\(44%,176px\)\}/u,
+      'ordinary setting values share the reference 176px control column')
+    assert.match(clientModule.__test.STYLE,
+      /\.mse-settings-value-row \.mse-row-side\{[^}]*width:var\(--mse-control-width\)[^}]*\}/u,
+      'idle interval, daily time and recall use the shared right column')
+    assert.match(clientModule.__test.STYLE,
+      /\.mse-settings-value-row \.mse-numeric-control \.mse-setting-number\{[^}]*display:flex;[^}]*box-sizing:border-box;[^}]*width:100%;height:32px;min-width:0;padding:0;[^}]*background:var\(--dsw-alias-bg-module-platform\)/u,
+      'the host Input wrapper keeps its flex layout, theme fill and 32px frame')
+    assert.match(clientModule.__test.STYLE,
+      /\.mse-setting-number input\[type=number\]\{[^}]*box-sizing:border-box;[^}]*flex:1 1 auto;[^}]*width:100%;height:100%;min-width:0;padding-inline:34px;[^}]*text-align:center;[^}]*appearance:textfield/u,
+      'only the actual number input receives centered text and symmetric unit clearance')
+    assert.match(clientModule.__test.STYLE,
+      /input\[type=number\]::-webkit-inner-spin-button,[^}]*input\[type=number\]::-webkit-outer-spin-button\{-webkit-appearance:none;margin:0\}/u,
+      'the inner number input hides visual spinners while retaining number semantics')
+    assert.match(clientModule.__test.STYLE,
+      /\.mse-numeric-control \.mse-unit\{[^}]*position:absolute;[^}]*pointer-events:none/u,
+      'units sit over the same full-width control without shifting its value')
+    assert.match(clientModule.__test.STYLE,
+      /\.mse-settings-value-row \.mse-picker-trigger\{[^}]*height:32px;min-height:32px;[^}]*background:var\(--dsw-alias-bg-module-platform\)/u,
+      'daily time uses the same 32px control width and host fill')
+    assert.match(clientModule.__test.STYLE,
+      /\.mse-settings-advanced>\.mse-disclosure>summary\{min-height:40px;padding-block:8px\}/u,
+      'the two advanced disclosure rows stay compact')
+    assert.match(clientModule.__test.STYLE,
+      /\.mse-settings>\.mse-control-list\.mse-settings-advanced\{margin-top:16px;border:0;border-top:0\.5px solid var\(--dsw-alias-border-l2\)/u,
+      'backend model and details override the wide sibling gap with a light divider')
+    assert.match(clientModule.__test.STYLE,
+      /\.mse-overview-actions\{[^}]*justify-content:flex-end/u,
+      'overview edits use one ordinary right-aligned footer')
+    assert.match(clientModule.__test.STYLE,
+      /@container\(max-width:300px\)\{[^}]*mse-settings \.mse-row\{display:grid;grid-template-columns:minmax\(0,1fr\) minmax\(0,65%\)/u,
+      'narrow settings keep the label and control on the same row')
+    const narrowOverviewStyle = clientModule.__test.STYLE.slice(
+      clientModule.__test.STYLE.indexOf('@container(max-width:300px)'))
+    assert.match(narrowOverviewStyle,
+      /\.mse-settings\{--mse-control-width:min\(58%,176px\)\}/u,
+      'narrow Overview keeps enough input width for digits and unit')
+    assert.match(narrowOverviewStyle,
+      /\.mse-settings \.mse-settings-value-row\{grid-template-columns:minmax\(0,1fr\) var\(--mse-control-width\)\}/u,
+      'narrow value rows keep the shared control column on one line')
 
     // (1) $mount must receive full contributions; the OLD string form fails like the real host.
     const mounted = []
@@ -1615,9 +1695,14 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
         dispatchedAt: 1350, usageTotal: 800, usageUnknown: false, sourceSessionId: 'sQ1' }],
       usageAudit: { since: '24h', byKind: { extract: { calls: 1, knownTokens: 0, unknownCost: 1 } },
         settled: 1, total: 1 },
-      daily: { lastDoneDay: '2026-10-28', lastRunAt: 1, waitReason: 'no_activity', backlog: [],
+      daily: { lastDoneDay: '2026-10-28', lastRunAt: 1, waitReason: 'no_activity',
+        backlog: Array.from({ length: 14 }, (_, index) =>
+          '2026-11-' + String(index + 1).padStart(2, '0')),
         lastSummary: { day: '2026-10-28', summary: '演示日总结', entryIds: [] },
-        daysProcessed: [{ day: '2026-10-28', status: 'done' }] },
+        daysProcessed: Array.from({ length: 14 }, (_, index) => ({
+          day: '2026-11-' + String(index + 1).padStart(2, '0'),
+          status: 'partial', partial: true, excluded: 1,
+        })) },
       inFlight: [], unknownCostHeld: ['ab12cd34ef56'],
       revisions: [{ id: 'mem_9120f3a144d3a52375952a4f', version: 1, currentVersion: 1,
         status: 'retired', reason: 'user_correction', at: 1793280000000 }],
@@ -1756,6 +1841,28 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
       assert.match(overview, /Switch/u, 'the learning switch uses the host Switch control')
       assert.match(overview, /常规|经验|召回|任务|活动|用量\/学习状态/u, 'all six settings tabs')
       assert.match(overview, /演示日总结/u, 'daily summary shows the persisted host data')
+      const backlogDisclosure = findUi(overviewTree,
+        node => node.props['data-mse-disclosure'] === 'daily-detail')
+      const backlogSummary = findUi(backlogDisclosure, node => node.type === 'summary')
+      const backlogTitle = findUi(backlogSummary,
+        node => node.type === 'span' && node.props.className === 'mse-summary')
+      const backlogCount = findUi(backlogSummary,
+        node => node.type === 'span' && node.props.className === 'mse-meta')
+      assert.deepEqual(backlogTitle.children, ['待补日'], 'the backlog title has no inline count')
+      assert.match(JSON.stringify(backlogCount), /"14"/u, 'the actual backlog count sits at the row tail')
+      assert.doesNotMatch(JSON.stringify(backlogSummary), /部分完成/u,
+        'partial-day detail stays inside the disclosure')
+      assert.match(overview, /部分完成/u, 'partial-day detail remains available when expanded')
+      assert.match(overview, /2026-11-01/u, 'backlog dates remain in the disclosure details')
+      const summaryDisclosure = findUi(overviewTree,
+        node => node.props['data-mse-disclosure'] === 'last-summary')
+      const summaryHeader = findUi(summaryDisclosure, node => node.type === 'summary')
+      const summaryTitle = findUi(summaryHeader,
+        node => node.type === 'span' && node.props.className === 'mse-summary')
+      const summaryDate = findUi(summaryHeader,
+        node => node.type === 'span' && node.props.className === 'mse-meta')
+      assert.deepEqual(summaryTitle.children, ['总结'], 'summary title and date occupy separate columns')
+      assert.match(JSON.stringify(summaryDate), /2026-10-28/u, 'summary date sits at the row tail')
       assert.doesNotMatch(overview, /600000|普通纠正何时保存|工作原理/u)
       const input = (tree, label) => findUi(tree, node => node.type === 'Input' && node.props['aria-label'] === label)
       const button = (tree, label) => findUi(tree, node => node.type === 'Button' && node.props['aria-label'] === label)
@@ -1763,14 +1870,44 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
       const render = () => { cursor = 0; return section.Page(props) }
       const change = (tree, label, value) => input(tree, label).props.onChange({ currentTarget: { value } })
       assert.equal(input(overviewTree, '空闲检查间隔').props.value, '10')
-      const recallPicker = menu(overviewTree, 'recall-limit')
-      assert.equal(recallPicker.props.selectedId, 'tokens:512',
-        'the shipped 768-byte default resolves to 512 Token estimate')
-      assert.ok(recallPicker.props.items.some(option => option.label === '512 Token 估算'))
+      const recallInput = input(overviewTree, '每轮召回上限')
+      assert.ok(recallInput, 'the ordinary settings row uses the host numeric Input')
+      assert.equal(recallInput.props.type, 'number')
+      assert.equal(recallInput.props.min, 128)
+      assert.equal(recallInput.props.max, 16384)
+      assert.equal(recallInput.props.step, 1)
+      assert.equal(recallInput.props.inputMode, 'numeric')
+      assert.equal(recallInput.props.value, '512', 'the shipped default remains 512 Token')
+      assert.equal(button(overviewTree, '保存设置').props.disabled, true,
+        'the shared footer remains disabled until a numeric setting changes')
+      assert.equal(button(overviewTree, '取消修改').props.disabled, true)
+      assert.ok(findUi(overviewTree, node => node.type === 'span' && node.props.className === 'mse-unit'
+        && node.children.includes('Token')), 'the field labels the value as Token')
+      const idleControl = findUi(overviewTree,
+        node => node.props.className === 'mse-numeric-control'
+          && findUi(node, child => child.type === 'Input' && child.props['aria-label'] === '空闲检查间隔') !== null)
+      assert.equal(idleControl.children[0].length, 2,
+        'the visible input and unit share one full-width control box')
+      assert.equal(findUi(idleControl,
+        node => node.type === 'span' && node.props.className === 'mse-unit').children[0], '分钟')
+      const settingsNode = findUi(overviewTree, node => node.props.className === 'mse-settings')
+      const advancedNode = findUi(settingsNode,
+        node => node.props.className === 'mse-control-list mse-settings-advanced')
+      const settingsFooter = findUi(settingsNode,
+        node => node.props.className === 'mse-overview-actions')
+      const settingsOrder = []
+      walkUi(settingsNode, node => settingsOrder.push(node))
+      assert.ok(settingsOrder.indexOf(settingsFooter) > settingsOrder.indexOf(advancedNode),
+        'the shared save footer follows all regular and advanced settings')
       change(overviewTree, '空闲检查间隔', '2.5')
-      await button(render(), '保存 · 空闲检查间隔').props.onClick()
+      assert.equal(button(render(), '保存 · 空闲检查间隔'), null,
+        'the idle interval no longer has its own save button')
+      await button(render(), '保存设置').props.onClick()
       await menu(render(), 'daily-hour').props.onSelect('9')
-      await menu(render(), 'recall-limit').props.onSelect('tokens:512')
+      change(render(), '每轮召回上限', '512')
+      assert.equal(button(render(), '保存 · 每轮召回上限'), null,
+        'the recall limit no longer has its own save button')
+      await button(render(), '保存设置').props.onClick()
       change(render(), '服务商 ID', 'test-provider')
       await button(render(), '保存 · 后台模型').props.onClick()
       assert.equal(writes.length, 3, 'a partial model route never writes')
@@ -1781,22 +1918,100 @@ test('UI wiring: six-tab design, full contributions, gated binding, real data re
         { wakeIntervalMs: 150_000 }, { dailyHour: 9 }, { maxContextTokens: 512 },
         { modelProvider: 'test-provider', modelId: 'test-model', reasoningEffort: 'high' },
       ])
+
+      settingsSnapshot = { ...settingsSnapshot, value: { ...settingsSnapshot.value, maxContextTokens: 1024 } }
+      settingsChanged()
+      assert.equal(input(render(), '每轮召回上限').props.value, '1024',
+        'the already saved 1024 Token value remains unchanged')
+
+      settingsSnapshot = { ...settingsSnapshot, value: { ...settingsSnapshot.value,
+        maxContextBytes: 1024, maxContextTokens: null } }
+      settingsChanged()
+      assert.equal(input(render(), '每轮召回上限').props.value, '512',
+        'the old 1024 B setting keeps the existing default 512 Token behavior')
+
       settingsSnapshot = { ...settingsSnapshot, value: { ...settingsSnapshot.value,
         maxContextBytes: 512, maxContextTokens: null } }
       settingsChanged()
-      const legacyRecall = menu(render(), 'recall-limit')
-      assert.equal(legacyRecall.props.selectedId, 'bytes:512', 'an old sub-768 value remains a byte limit')
-      assert.ok(legacyRecall.props.items.some(option => option.id === 'bytes:512'
-        && option.label.includes('旧设置')))
-      await legacyRecall.props.onSelect('tokens:384')
-      assert.deepEqual(writes.at(-1), { maxContextTokens: 384 },
-        'choosing Token leaves the legacy byte setting untouched')
-      settingsSnapshot = { ...settingsSnapshot, value: { ...settingsSnapshot.value, maxContextTokens: 500 } }
+      assert.equal(input(render(), '每轮召回上限').props.value, '',
+        'a legacy byte profile is not silently presented as a Token number')
+      assert.match(JSON.stringify(render()), /旧设置仍生效：512 B（当前字节上限 512 B）/u,
+        'the old byte setting stays visible before an explicit Token save')
+
+      settingsSnapshot = { ...settingsSnapshot, value: { ...settingsSnapshot.value,
+        maxContextBytes: 1024, maxContextTokens: null } }
       settingsChanged()
-      const customTokenLimit = menu(render(), 'recall-limit')
-      assert.equal(customTokenLimit.props.selectedId, 'tokens:500')
-      assert.ok(customTokenLimit.props.items.some(option => option.id === 'tokens:500'
-        && option.label === '500 Token 估算'), 'the current valid non-preset limit remains selectable')
+      assert.equal(input(render(), '每轮召回上限').props.value, '512',
+        'an old 1024 B setting still resolves to the existing Token default')
+      const writesBeforeCustomBudget = writes.length
+      const revisionBeforeCustomBudget = settingsSnapshot.revision
+      change(render(), '每轮召回上限', '16385')
+      await button(render(), '保存设置').props.onClick()
+      const invalidRecall = render()
+      assert.equal(input(invalidRecall, '每轮召回上限').props.value, '16385',
+        'an invalid draft is not clipped to the maximum')
+      assert.equal(input(invalidRecall, '每轮召回上限').props['aria-invalid'], true)
+      assert.equal(input(invalidRecall, '每轮召回上限').props['aria-describedby'], 'mse-recall-error')
+      assert.equal(findUi(invalidRecall, node => node.props.id === 'mse-recall-error').props.className,
+        'mse-error')
+      assert.match(JSON.stringify(invalidRecall), /128–16384/u, 'range validation is shown inline')
+      assert.equal(writes.length, writesBeforeCustomBudget, 'an invalid value never reaches ConfigForm')
+      change(invalidRecall, '每轮召回上限', '1537')
+      assert.equal(settingsSnapshot.value.maxContextTokens, null,
+        'typing a Token value does not change the saved unit')
+      assert.equal(settingsSnapshot.value.maxContextBytes, 1024)
+      await button(render(), '保存设置').props.onClick()
+      assert.deepEqual(writes.at(-1), { maxContextTokens: 1537 },
+        'the revision-fenced save writes only the explicit Token override')
+      assert.equal(settingsSnapshot.value.maxContextTokens, 1537)
+      assert.equal(settingsSnapshot.value.maxContextBytes, 1024,
+        'the legacy byte setting remains intact behind the saved Token override')
+      assert.equal(settingsSnapshot.revision, revisionBeforeCustomBudget + 1,
+        'the host form commits through one revision-fenced update')
+
+      const writesBeforeCancel = writes.length
+      change(render(), '空闲检查间隔', '3')
+      change(render(), '每轮召回上限', '2048')
+      await button(render(), '取消修改').props.onClick()
+      assert.equal(writes.length, writesBeforeCancel, 'cancel only clears the pending drafts')
+      assert.equal(input(render(), '空闲检查间隔').props.value, '2.5')
+      assert.equal(input(render(), '每轮召回上限').props.value, '1537')
+      assert.equal(button(render(), '保存设置').props.disabled, true)
+
+      change(render(), '空闲检查间隔', '3')
+      change(render(), '每轮召回上限', '2048')
+      const revisionBeforeCombinedSave = settingsSnapshot.revision
+      await button(render(), '保存设置').props.onClick()
+      assert.deepEqual(writes.at(-1), { wakeIntervalMs: 180_000, maxContextTokens: 2048 },
+        'both changed numeric fields commit together in one form mutation')
+      assert.equal(settingsSnapshot.revision, revisionBeforeCombinedSave + 1,
+        'the combined save keeps the existing single revision fence')
+
+      const writesBeforeInvalidPair = writes.length
+      change(render(), '空闲检查间隔', '61')
+      change(render(), '每轮召回上限', '16385')
+      await button(render(), '保存设置').props.onClick()
+      const invalidPair = render()
+      assert.equal(input(invalidPair, '空闲检查间隔').props['aria-invalid'], true)
+      assert.equal(input(invalidPair, '每轮召回上限').props['aria-invalid'], true)
+      assert.equal(findUi(invalidPair, node => node.props.id === 'mse-wake-error').props.className,
+        'mse-error', 'idle errors are shown next to their field')
+      assert.equal(findUi(invalidPair, node => node.props.id === 'mse-recall-error').props.className,
+        'mse-error', 'Token errors are shown next to their field')
+      assert.equal(writes.length, writesBeforeInvalidPair,
+        'one invalid field rejects the whole combined submission')
+      assert.equal(settingsSnapshot.value.wakeIntervalMs, 180_000)
+      assert.equal(settingsSnapshot.value.maxContextTokens, 2048)
+      assert.equal(input(invalidPair, '空闲检查间隔').props.value, '61')
+      assert.equal(input(invalidPair, '每轮召回上限').props.value, '16385')
+      change(invalidPair, '空闲检查间隔', '4')
+      await button(render(), '保存设置').props.onClick()
+      assert.equal(writes.length, writesBeforeInvalidPair,
+        'a still-invalid Token draft prevents a valid idle field from partially saving')
+      await button(render(), '取消修改').props.onClick()
+      assert.equal(input(render(), '空闲检查间隔').props.value, '3')
+      assert.equal(input(render(), '每轮召回上限').props.value, '2048')
+
       settingsSnapshot = { ...settingsSnapshot, value: { ...settingsSnapshot.value, reflectionEnabled: false } }
       settingsChanged()
       const disabledLearning = render()
@@ -2321,10 +2536,12 @@ test('L1 real live-copy scenario: an un-startable old reflection must not starve
   // candidate 370a… from session-490e71da with its source route present). Nothing here is
   // hand-copied pretend: the file lives in this repo at delivery/rebuild/live-queue-scenario.json.
   const dir = root()
-  const stateRoot = join(dir, 'mse-learning')
-  mkdirSync(stateRoot, { recursive: true })
-  writeFileSync(join(stateRoot, 'memory-v1.json'),
-    readFileSync(liveQueueFixture))
+  const stateRoot = privateDir(join(dir, 'mse-learning'))
+  const snapshotPath = writePrivateFile(join(stateRoot, 'memory-v1.json'), readFileSync(liveQueueFixture))
+  if (process.platform !== 'win32') {
+    assert.equal(statSync(stateRoot).mode & 0o777, 0o700, 'a copied state directory is private')
+    assert.equal(statSync(snapshotPath).mode & 0o777, 0o600, 'a copied state file is private')
+  }
   const engine = new RebuildEngine({ stateRoot })
   const doc = engine.store.read()
   const problem = doc.problemLoop.problems.find(row => row.id.startsWith('711e'))
@@ -2579,10 +2796,8 @@ test('R3 admission gate, scope isolation, same-turn dedup and the 768B cap keep 
 test('R4 real-state copy diagnosis (opt-in via MSE_RECALL_RANK_FIXTURE; never bundled)', async (t) => {
   const fixture = process.env.MSE_RECALL_RANK_FIXTURE
   if (!fixture) return t.skip('private diagnosis fixture not provided in this environment')
-  const { cpSync } = await import('node:fs')
-  const stateRoot = stateDirFor(fixture)
-  mkdirSync(stateRoot, { recursive: true })
-  cpSync(fixture, join(stateRoot, 'memory-v1.json'))
+  const stateRoot = stateDirFor()
+  copyPrivateFile(fixture, join(stateRoot, 'memory-v1.json'))
   const { readFileSync } = await import('node:fs')
   const captured = JSON.parse(readFileSync(join(stateRoot, 'memory-v1.json'), 'utf8'))
   if (!captured.entries.some(row => row.id === 'mem_7ac6a5956b6a55b47b7c14de')) {
@@ -2599,7 +2814,7 @@ test('R4 real-state copy diagnosis (opt-in via MSE_RECALL_RANK_FIXTURE; never bu
   assert.equal(offered[0], 'mem_7ac6a5956b6a55b47b7c14de',
     'the fresh concrete rule leads on the REAL captured state')
 })
-function stateDirFor(fixture) { return join(mkdtempSync(join(tmpdir(), 'mse-rank-fixture-')), 'mse-learning') }
+function stateDirFor() { return privateDir(join(root(), 'mse-learning')) }
 function scopeOfFor(projectKey) {
   return createHash('sha256').update(JSON.stringify(projectKey === null || projectKey === undefined
     ? ['instance'] : ['project', String(projectKey)])).digest('hex')
@@ -2781,8 +2996,7 @@ test('M6 the REAL learning library (read-only copy) reads and writes under the n
   const home = process.env.MSE_LIVE_LIBRARY
   if (home === undefined) return t.skip('set MSE_LIVE_LIBRARY to a copied memory-v1.json to run')
   const copy = root()
-  mkdirSync(copy, { recursive: true })
-  writeFileSync(join(copy, 'memory-v1.json'), readFileSync(home))
+  writePrivateFile(join(copy, 'memory-v1.json'), readFileSync(home))
   const engine = new RebuildEngine({ stateRoot: copy })
   const view = engine.statusView()
   assert.ok(Array.isArray(view.entries))
@@ -3583,11 +3797,11 @@ test('A22b an overlong retraction sentence keeps a readable safe reason and reti
 test('D21a the frozen real library copy selects a trusted owner route and prepares a digest (no provider)', async t => {
   const src = process.env.MSE_LIVE_LIBRARY
   if (src === undefined) return t.skip('set MSE_LIVE_LIBRARY to a copied memory-v1.json to run')
-  const { copyFileSync, mkdirSync } = await import('node:fs')
+  const { mkdirSync } = await import('node:fs')
   const { join } = await import('node:path')
   const dir = root()
   mkdirSync(dir, { recursive: true })
-  copyFileSync(src, join(dir, 'memory-v1.json'))
+  copyPrivateFile(src, join(dir, 'memory-v1.json'))
   const engine = new RebuildEngine({ stateRoot: dir })
   const doc = engine.store.read()
   const routes = new Set(doc.routes.map(row => row.sessionId))
@@ -5035,8 +5249,8 @@ test('E1 format3 is read byte-for-byte; the first real write migrates once keepi
   // First REAL write: one atomic migration, old rows preserved verbatim.
   const changed = store.transaction(doc => { doc.controls.userPaused = true; return true })
   assert.equal(changed, true)
-  const after = JSON.parse(readFileSync(file, 'utf8'))
-  assert.equal(after.format, 4)
+  const after = store.read()
+  assert.equal(after.format, 6)
   assert.equal(after.format, MEMORY_FORMAT)
   assert.deepEqual(after.entries, [entry], 'original text/status/counters are byte-identical')
   assert.deepEqual(after.receipts, [receipt], 'old receipts keep their exact shape')
@@ -5044,7 +5258,7 @@ test('E1 format3 is read byte-for-byte; the first real write migrates once keepi
   assert.deepEqual(after.methodHistory, [], 'nothing is fabricated without a superseded snapshot')
   // A second write never re-migrates anything.
   store.transaction(doc => { doc.controls.userPaused = false; return true })
-  const again = JSON.parse(readFileSync(file, 'utf8'))
+  const again = store.read()
   assert.deepEqual(again.entries, seeded.entries)
   assert.deepEqual(again.methodHistory, [])
 })
@@ -5064,7 +5278,7 @@ test('E1b migration moves only lesson superseded snapshots (partial), keeps reti
   const store = new MemoryStore({ stateRoot: dir })
   store.transaction(doc => { doc.digest.waitReason = 'probe'; return true })
   const doc = store.read()
-  assert.equal(doc.format, 4)
+  assert.equal(doc.format, 6)
   assert.deepEqual(doc.methodHistory.map(row => [row.entryId, row.version, row.status]),
     [[supersededLesson.id, 1, 'legacy_partial']], 'only the lesson snapshot becomes partial history')
   const history = doc.methodHistory[0]
@@ -5094,7 +5308,9 @@ test('E1b migration moves only lesson superseded snapshots (partial), keeps reti
   const tooManyHistory = structuredClone(good)
   tooManyHistory.methodHistory = Array.from({ length: 129 },
     (_, index) => e16HistoryRow({ label: `many-${index}`, version: index + 1 }))
-  assert.throws(() => validateDoc(tooManyHistory), error => error.code === 'invalid_memory')
+  assert.doesNotThrow(() => validateDoc(tooManyHistory))
+  assert.equal(tooManyHistory.methodHistory.length, 129,
+    'method history keeps accepted editions beyond the former fixed limit')
   const duplicatedHistory = structuredClone(good)
   duplicatedHistory.methodHistory.push(e16HistoryRow({ label: 'h1', version: 1 }))
   assert.throws(() => validateDoc(duplicatedHistory), error => error.code === 'invalid_memory')
@@ -5388,7 +5604,9 @@ test('E3b history/stat/schema changes never change the material identity; closed
   fail('fx-3', 't3', 's5')
   const copy = () => {
     const dir = root()
-    writeFileSync(join(dir, 'memory-v1.json'), readFileSync(engine.store.path))
+    const legacy = engine.store.read()
+    legacy.format = 4
+    writeFileSync(join(dir, 'memory-v1.json'), JSON.stringify(legacy))
     const next = new RebuildEngine({ stateRoot: dir })
     next.setRoute({ provider: 'demo', model: 'm1' })
     return next
@@ -5607,8 +5825,8 @@ const e16InflateDoc = (doc, targetBytes, { historyRows = 128 } = {}) => {
       status: 'needs_revision', reason: 'matched_recurrence', archivedAt: 1000 + row, evidenceHash: null })
     row += 1
   }
-  // Fine-tune the legal size with digest-day identities (factKeys ≤1024 × 256 chars per day),
-  // binary-searching the largest number of keys that still fits under the REAL 2 MiB bound.
+  // Fine-tune the logical snapshot size with digest-day identities. Format 5 stores this core
+  // object separately, so the whole logical document may exceed the per-object bound.
   const filler = index => Array.from({ length: 1024 }, (_, position) => `d${index}-${position}-`.padEnd(256, 'x'))
   const size = () => Buffer.byteLength(JSON.stringify(doc), 'utf8')
   let dayIndex = 0
@@ -5624,7 +5842,7 @@ const e16InflateDoc = (doc, targetBytes, { historyRows = 128 } = {}) => {
     while (low <= high) {
       const mid = Math.floor((low + high) / 2)
       day.factKeys = pool.slice(0, mid)
-      if (size() <= MAX_STORE_BYTES) { best = mid; low = mid + 1 } else high = mid - 1
+      if (size() <= targetBytes) { best = mid; low = mid + 1 } else high = mid - 1
     }
     day.factKeys = pool.slice(0, best)
     if (best === 0) break
@@ -5633,7 +5851,50 @@ const e16InflateDoc = (doc, targetBytes, { historyRows = 128 } = {}) => {
   return doc
 }
 
-test('E5 a legal temp store actually reaches the 128-row and 2 MiB refusals without a half update', () => {
+const e16InflateDigestCore = (doc, targetBytes) => {
+  const inflated = structuredClone(doc)
+  let dayIndex = 0
+  const size = () => Buffer.byteLength(JSON.stringify(inflated.digest), 'utf8')
+  while (size() < targetBytes && inflated.digest.days.length < 31) {
+    const day = { day: `2026-08-${String(dayIndex + 1).padStart(2, '0')}`,
+      throughAt: 1000, status: 'summarized', summary: null, entryIds: [], factKeys: [] }
+    inflated.digest.days.push(day)
+    const pool = Array.from({ length: 1024 }, (_, index) => `v5-${dayIndex}-${index}-`.padEnd(256, 'x'))
+    let low = 0
+    let high = pool.length
+    let best = 0
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2)
+      day.factKeys = pool.slice(0, mid)
+      if (size() <= targetBytes) { best = mid; low = mid + 1 } else high = mid - 1
+    }
+    day.factKeys = pool.slice(0, best)
+    const remainder = targetBytes - size()
+    if (best === 0) {
+      if (remainder < 0) { inflated.digest.days.pop(); break }
+      if (remainder >= 3 && remainder <= 258) day.factKeys.push('t'.repeat(remainder - 2))
+      break
+    }
+    if (best < pool.length && remainder >= 4 && remainder <= 259) {
+      day.factKeys.push('t'.repeat(remainder - 3))
+    }
+    dayIndex += 1
+  }
+  assert.ok(size() <= targetBytes, `digest core stays below ${targetBytes} bytes (${size()})`)
+  assert.ok(targetBytes - size() < 256, `digest core reaches the target (${size()} / ${targetBytes})`)
+  return inflated.digest
+}
+
+const e16V6CoreObjectBytes = (engine, name) => {
+  const manifest = JSON.parse(readFileSync(engine.store.path, 'utf8'))
+  assert.equal(manifest.storageSchema, 'mse-growth-store-v1')
+  const digestHash = manifest.coreRefs[name]
+  assert.match(digestHash, /^[a-f0-9]{64}$/u)
+  return readFileSync(join(dirname(engine.store.path), `.memory-v1-object-${digestHash}.json`))
+    .byteLength
+}
+
+test('E5 method history grows past 128 while format 6 stores a >2 MiB logical snapshot', () => {
   const { engine, entryId, entry } = e16Lifecycle()
   engine.prepare({ sessionId: 's5', turnId: 't3', projectKey: 'p1', prompt: e16Prompt })
   engine.recordCheck({ checkId: 'json-file-parses-v1', passed: false, evidence: { reason: 'bad' },
@@ -5654,45 +5915,39 @@ test('E5 a legal temp store actually reaches the 128-row and 2 MiB refusals with
     }
     return true
   })
-  const file = engine.store.path
-  const hashBefore = hashFile(file)
-  const historyBefore = engine.store.read().methodHistory.length
   const lesson = lessonFor(JSON.parse(revision.request.text).evidenceIds,
     '生成 JSON 前先整体解析校验并删除尾随逗号再写入',
     ['整体 JSON.parse 校验', '删除尾随逗号后写入'])
-  const refused = engine.finishWork({ ticket: revision.ticket, usage: { total: 30 }, result: lesson })
-  assert.equal(refused.ok, false)
-  assert.equal(refused.code, 'method_history_full')
-  assert.equal(hashFile(file), hashBefore, 'the store file is byte-identical after the refusal')
-  assert.equal(engine.store.read().methodHistory.length, historyBefore, 'nothing is silently deleted')
-  assert.equal(engine.store.read().requests.find(row => row.ticket === revision.ticket).settled, false,
-    'the request stays unsettled: no half settlement')
-  assert.equal(entry().version, 1)
-  // The in-flight request still owns the slot; once it ends, the pre-flight read path stops the
-  // NEXT revision before any model call.
-  engine.abortWork({ ticket: revision.ticket, failure: 'aborted', usage: { total: 10 } })
-  assert.equal(engine.pendingWork(), null)
-  assert.equal(engine.store.read().digest.waitReason, 'method_history_full')
-  assert.equal(engine.store.read().requests.filter(row => row.kind === 'revise'
-    && row.ticket !== revision.ticket).length, 0)
-  // A realistic legal store just under 2 MiB: the capacity pre-flight refuses readably first.
+  const saved = engine.finishWork({ ticket: revision.ticket, usage: { total: 30 }, result: lesson })
+  assert.equal(saved.ok, true)
+  assert.equal(saved.revision, 'replaced')
+  assert.equal(entry().version, 2)
+  assert.equal(engine.store.read().methodHistory.length, 129,
+    'the old 128 rows and the new archived edition all remain')
+  assert.equal(engine.store.read().requests.find(row => row.ticket === revision.ticket).settled, true)
+
+  // A realistic logical store above 2 MiB: independent pages and core objects remain bounded.
   const { engine: engine2, entryId: entryId2 } = e16Lifecycle()
   engine2.prepare({ sessionId: 's5', turnId: 't3', projectKey: 'p1', prompt: e16Prompt })
   engine2.recordCheck({ checkId: 'json-file-parses-v1', passed: false, evidence: { reason: 'bad' },
     sessionId: 's5', turnId: 't3', entryId: entryId2, entryVersion: 1, eventId: 'e5-fail-2' })
-  const inflated = e16InflateDoc(engine2.store.read(), MAX_STORE_BYTES - 4096, { historyRows: 8 })
+  const inflated = e16InflateDoc(engine2.store.read(), MAX_STORE_BYTES + 64 * 1024, { historyRows: 8 })
   const bytes = Buffer.byteLength(JSON.stringify(inflated), 'utf8')
-  assert.ok(bytes <= MAX_STORE_BYTES, `inflated doc is legal (${bytes})`)
-  assert.ok(bytes > MAX_STORE_BYTES - 8192, `inflated doc is near the real bound (${bytes})`)
+  assert.ok(bytes > MAX_STORE_BYTES, `logical snapshot exceeds the former aggregate limit (${bytes})`)
+  assert.ok(Buffer.byteLength(JSON.stringify(inflated.digest), 'utf8') < MAX_STORE_BYTES,
+    'the digest core remains an individually legal object')
   engine2.store.transaction(doc => {
     doc.entries = inflated.entries
     doc.methodHistory = inflated.methodHistory
     doc.digest.days = inflated.digest.days
     return true
   })
+  assert.ok(Buffer.byteLength(JSON.stringify(engine2.store.read()), 'utf8') > MAX_STORE_BYTES,
+    'format 6 reloads the complete logical snapshot above 2 MiB')
+  assert.ok(e16V6CoreObjectBytes(engine2, 'digest') <= MAX_STORE_BYTES,
+    'the stored digest object remains within its real 2 MiB bound')
   const requestsBefore = engine2.store.read().requests.length
-  assert.equal(engine2.pendingWork(), null)
-  assert.equal(engine2.store.read().digest.waitReason, 'storage_capacity')
+  assert.equal(engine2.pendingWork()?.kind, 'revise', 'bounded chunks keep the legal work schedulable')
   assert.equal(engine2.store.read().requests.length, requestsBefore, 'no request was prepared')
   assert.equal(engine2.store.read().entries.find(row => row.id === entryId2).version, 1)
 })
@@ -5708,7 +5963,7 @@ test('E5b emoji history, prompt bounds, restart dedupe and the unknown-cost hold
   const store = new MemoryStore({ stateRoot: dir })
   store.transaction(doc => { doc.controls.userPaused = false; return true })
   const migrated = store.read()
-  assert.equal(migrated.format, 4)
+  assert.equal(migrated.format, 6)
   const emojiRow = migrated.methodHistory[0]
   assert.equal(Buffer.byteLength(emojiRow.instruction, 'utf8'), 480)
   assert.equal([...emojiRow.instruction].length, 120)
@@ -5769,18 +6024,18 @@ test('E5c the read-only real old library backup loads and migrates in a temp cop
   if (live === undefined) return t.skip('set MSE_EVOLUTION016_LIVE_LIBRARY to a copied memory-v1.json')
   const copy = root()
   const original = JSON.parse(readFileSync(live, 'utf8'))
-  writeFileSync(join(copy, 'memory-v1.json'), JSON.stringify(original))
+  writePrivateFile(join(copy, 'memory-v1.json'), JSON.stringify(original))
   const liveStore = new MemoryStore({ stateRoot: copy })
   const readOld = liveStore.read()
   assert.equal(readOld.format, 3)
   assert.deepEqual(readOld.entries, original.entries, 'every old row loads unchanged')
   liveStore.transaction(doc => { doc.controls.userPaused = doc.controls.userPaused; return true })
-  const migratedLive = JSON.parse(readFileSync(join(copy, 'memory-v1.json'), 'utf8'))
-  assert.equal(migratedLive.format, 4)
+  const migratedLive = liveStore.read()
+  assert.equal(migratedLive.format, 6)
   assert.deepEqual(migratedLive.entries, original.entries, 'migration keeps every old row verbatim')
   const lessonSnapshots = original.entries.filter(entry => entry.type === 'lesson'
     && entry.superseded !== null && entry.superseded !== undefined)
-  assert.equal(migratedLive.methodHistory.length, Math.min(lessonSnapshots.length, 128))
+  assert.equal(migratedLive.methodHistory.length, lessonSnapshots.length)
   for (const row of migratedLive.methodHistory) {
     assert.equal(row.status, 'legacy_partial')
     assert.equal(row.stats, null, 'no invented statistics')
@@ -6175,7 +6430,7 @@ test('E7i a freshly generated daily lesson owns a complete window from birth', (
   assert.equal(entry().methodStats.injected, 1)
 })
 
-test('E7j the archive-row preview drives early capacity refusal; impossible rows are refused', () => {
+test('E7j the archive-row preview refuses before dispatch when one format-6 core is full; impossible rows are refused', () => {
   const { engine, entry, fail } = e16Lifecycle()
   e7Prepare(engine, 't3')
   fail('fx-7j', 't3', 's5')
@@ -6197,20 +6452,26 @@ test('E7j the archive-row preview drives early capacity refusal; impossible rows
     sessionId: 's5', turnId: 't3', entryId: entryId2, entryVersion: 1, eventId: 'e7j-check' })
   const pendingEntry = structuredClone(engine2.store.read().entries.find(row => row.id === entryId2))
   const rowPreview = historyRowPreview(pendingEntry, { now: 5000, provenanceSessions: ['s1'] })
-  const inflated = e16InflateDoc(engine2.store.read(), MAX_STORE_BYTES - rowPreview.bytes - 512,
-    { historyRows: 0 })
-  const bytes = Buffer.byteLength(JSON.stringify(inflated), 'utf8')
-  assert.ok(bytes <= MAX_STORE_BYTES, `inflated store stays legal (${bytes})`)
+  const targetBytes = MAX_STORE_BYTES - Math.max(0, rowPreview.bytes - 256)
+  const inflatedDigest = e16InflateDigestCore(engine2.store.read(), targetBytes)
+  const digestBytes = Buffer.byteLength(JSON.stringify(inflatedDigest), 'utf8')
+  assert.ok(digestBytes <= MAX_STORE_BYTES, `digest core stays a legal object (${digestBytes})`)
+  assert.ok(MAX_STORE_BYTES - digestBytes < rowPreview.bytes,
+    'the stored core has less remaining room than the exact archive row')
   engine2.store.transaction(doc => {
-    doc.entries = inflated.entries
-    doc.methodHistory = inflated.methodHistory
-    doc.digest.days = inflated.digest.days
+    doc.digest = inflatedDigest
     return true
   })
+  assert.equal(e16V6CoreObjectBytes(engine2, 'digest'), digestBytes,
+    'the forecast input is the actual persisted format-6 core object')
+  const entryBefore = structuredClone(engine2.store.read().entries.find(row => row.id === entryId2))
   const requestsBefore = engine2.store.read().requests.length
   assert.equal(engine2.pendingWork(), null)
   assert.equal(engine2.store.read().digest.waitReason, 'storage_capacity')
   assert.equal(engine2.store.read().requests.length, requestsBefore, 'no model request was prepared')
+  assert.equal(engine2.store.read().requests.some(row => !row.settled), false)
+  assert.deepEqual(engine2.store.read().entries.find(row => row.id === entryId2), entryBefore,
+    'the old method version and evidence stay intact')
 })
 
 // ── EVOLUTION016 REVIEW-FIX2: shared feedback admission, birth source snapshots, full guard,
@@ -6321,35 +6582,17 @@ test('E8d guard names the concrete failure; the 0.16.1 policy appends at most on
   assert.ok(Buffer.byteLength(recalled.context, 'utf8') <= 768)
 })
 
-test('E8e the REAL transaction is forecast: a legal near-capacity store waits before dispatch', () => {
-  const { engine, entryId, entry, fail } = e16Lifecycle()
+test('E8e the real forecast blocks a legal 2 MiB format-6 core before dispatch without half accounting', () => {
+  const { engine, entryId, fail } = e16Lifecycle()
   e7Prepare(engine, 't3')
   fail('fx-8e', 't3', 's5')
-  const preview = historyRowPreview(entry(), { now: 2000 })
-  const doc = engine.store.read()
-  const target = MAX_STORE_BYTES - preview.bytes - 1100
-  const size = () => Buffer.byteLength(JSON.stringify(doc))
-  for (let i = 1; i <= 20 && size() + 400 < target; i++) {
-    const day = { day: `2026-09-${String(i).padStart(2, '0')}`, throughAt: 1000,
-      status: 'summarized', summary: null, entryIds: [], factKeys: [] }
-    doc.digest.days.push(day)
-    const pool = Array.from({ length: 1024 }, (_, j) => `case-${i}-${j}-`.padEnd(256, 'x'))
-    let low = 0, high = 1024, best = 0
-    while (low <= high) {
-      const mid = (low + high) >> 1
-      day.factKeys = pool.slice(0, mid)
-      if (size() <= target) { best = mid; low = mid + 1 } else high = mid - 1
-    }
-    day.factKeys = pool.slice(0, best)
-    const delta = target - size()
-    if (best < 1024 && delta > 10 && delta <= 259) {
-      day.factKeys.push('tail-'.padEnd(delta - 3, 'x'))
-      break
-    }
-    if (best < 1024) break
-  }
-  validateDoc(doc)
-  writeFileSync(engine.store.path, JSON.stringify(doc))
+  const inflatedDigest = e16InflateDigestCore(engine.store.read(), MAX_STORE_BYTES - 690)
+  const plannedBytes = Buffer.byteLength(JSON.stringify(inflatedDigest), 'utf8')
+  assert.ok(plannedBytes <= MAX_STORE_BYTES && MAX_STORE_BYTES - plannedBytes <= 690,
+    `one legal digest object is within 690 bytes of its limit (${plannedBytes})`)
+  engine.store.transaction(doc => { doc.digest = inflatedDigest; return true })
+  assert.equal(e16V6CoreObjectBytes(engine, 'digest'), plannedBytes,
+    'the format-6 manifest references that exact legal object')
   const before = structuredClone(engine.store.read())
   const work = engine.beginWork()
   assert.equal(work, null, 'the forecast refuses before the provider instead of throwing at commit')
@@ -6357,9 +6600,8 @@ test('E8e the REAL transaction is forecast: a legal near-capacity store waits be
   assert.equal(engine.store.read().requests.length, before.requests.length,
     'no request row was half-written (existing settled audit rows stay)')
   assert.equal(engine.store.read().requests.some(row => !row.settled), false)
-  assert.equal(engine.store.read().entries.find(row => row.id === entryId).version, before.entries
-    .find(row => row.id === entryId).version)
-  assert.equal(engine.store.read().entries.find(row => row.id === entryId).status, 'needs_revision')
+  assert.deepEqual(engine.store.read().entries.find(row => row.id === entryId),
+    before.entries.find(row => row.id === entryId), 'the original pending method remains unchanged')
 })
 
 test('E8f Unicode survives snapshots and guard bounds without replacement characters', () => {
@@ -6670,7 +6912,7 @@ test('CS7 old candidate rows without new fields stay valid; emoji/overlong conte
   assert.match(rows[1].contextOmitted ?? '', /context_too_long/u)
   // A legacy row (no context/decisions) in the same document must remain valid after later writes.
   const doc = engine.store.read()
-  assert.equal(doc.format, 4)
+  assert.equal(doc.format, 6)
   assert.ok(engine.store.read().corrections.every(row => row.context === undefined
     || (Array.isArray(row.context) && row.context.length <= 4)))
 })

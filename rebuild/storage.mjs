@@ -1,4 +1,4 @@
-/** Small, bounded, private-file I/O for the format-3/4 MemoryStore. */
+/** Small, bounded, private-file I/O for the atomic format-3/4/5 MemoryStore. */
 import { randomUUID } from 'node:crypto'
 import {
   chmodSync, closeSync, constants, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync,
@@ -9,6 +9,12 @@ import { gzipSync, gunzipSync } from 'node:zlib'
 import { LearningError, MAX_STORE_BYTES, check } from '../src/store.mjs'
 
 export const REQUEST_AUDIT_LIMIT = 96
+
+export function syncMemoryDirectory(path) {
+  if (WINDOWS) return
+  try { syncDirectory(path) }
+  catch (error) { throw learningError(ioCode(error)) }
+}
 
 /** Lossless wire encoding only. The engine still receives the exact original request rows.
  * Each file stays <=2 MiB, and all expanded request audits together stay <=2 MiB, so a read
@@ -194,7 +200,7 @@ export function resolveMemoryDirectory(path) {
 /** Open without following the final link, prove regular-file identity, then read at most limit+1. */
 export function readBoundedMemoryFileBytes(path, limit = MAX_STORE_BYTES) {
   let before
-  try { before = lstatSync(path) }
+  try { before = lstatSync(path, { bigint: true }) }
   catch (error) { throw error }
   if (before.isSymbolicLink() || !before.isFile()) {
     const invalid = learningError('invalid_store')
@@ -205,25 +211,35 @@ export function readBoundedMemoryFileBytes(path, limit = MAX_STORE_BYTES) {
   try {
     const flags = constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0)
     fd = openSync(path, flags)
-    const opened = fstatSync(fd)
-    if (!opened.isFile() || !sameIdentity(before, opened) || opened.size > limit) {
+    const opened = fstatSync(fd, { bigint: true })
+    if (!opened.isFile() || !sameIdentity(before, opened) || opened.size > BigInt(limit)) {
       const invalid = learningError('invalid_store')
       invalid.storePresent = true
       throw invalid
     }
-    const buffer = Buffer.alloc(limit + 1)
+    // Most store objects are small chunks. Allocate from the verified file size, retaining one
+    // extra byte to detect a concurrent growth beyond that size or the caller's limit.
+    const expectedSize = Number(opened.size)
+    const buffer = Buffer.alloc(expectedSize + 1)
     let offset = 0
     while (offset < buffer.length) {
       const count = readSync(fd, buffer, offset, buffer.length - offset, null)
       if (count === 0) break
       offset += count
     }
-    if (offset > limit) {
+    const after = fstatSync(fd, { bigint: true })
+    let afterPath
+    try { afterPath = lstatSync(path, { bigint: true }) }
+    catch (error) { throw error }
+    const unchanged = sameIdentity(opened, after) && sameIdentity(opened, afterPath)
+      && opened.size === after.size && opened.mtimeNs === after.mtimeNs
+      && opened.ctimeNs === after.ctimeNs
+    if (!unchanged || offset !== expectedSize || offset > limit) {
       const invalid = learningError('invalid_store')
       invalid.storePresent = true
       throw invalid
     }
-    return Buffer.from(buffer.subarray(0, offset))
+    return buffer.subarray(0, offset)
   } catch (error) {
     if (error instanceof LearningError) throw error
     const unavailable = learningError(error?.code === 'ELOOP' || error?.code === 'ENXIO'
@@ -245,8 +261,9 @@ export function writeExclusiveMemorySnapshot(path, body, overrides = {}) {
     'invalid_state_root')
   check(typeof body === 'string' || Buffer.isBuffer(body), 'invalid_memory')
   check(Buffer.byteLength(body) <= MAX_STORE_BYTES, 'capacity')
+  const { syncDirectory: syncParent = true, ...ioOverrides } = overrides
   const io = { openSync, writeFileSync, fchmodSync, fstatSync, fsyncSync, closeSync,
-    lstatSync, unlinkSync, ...overrides }
+    lstatSync, unlinkSync, ...ioOverrides }
   const directory = dirname(path)
   let directoryHandle
   let fd
@@ -276,7 +293,7 @@ export function writeExclusiveMemorySnapshot(path, body, overrides = {}) {
     committed = true
     io.closeSync(fd)
     fd = undefined
-    if (!WINDOWS) io.fsyncSync(directoryHandle)
+    if (!WINDOWS && syncParent) io.fsyncSync(directoryHandle)
     return { committed: true, durable: true }
   } catch (error) {
     if (committed) {

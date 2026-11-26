@@ -6,6 +6,7 @@ import { MAX_GUARDS_PER_TURN, MAX_METHODS_PER_TURN, MAX_RECALL_TOTAL, packRecall
 import { ACTION_GROUPS, OPERATION_IDS, ADAPTIVE_TASK_OPERATION_IDS } from './adaptive-operations.mjs'
 import { estimateRecallTokens, MAX_RECALL_LINE_BYTES, RECALL_INJECTION_PREFIX,
   RECALL_TOKEN_UNIT } from './recall-budget.mjs'
+import { MAX_RECALL_TOKEN_BUDGET, MIN_RECALL_TOKEN_BUDGET } from './recall-budget-constants.mjs'
 
 const hash = value => createHash('sha256').update(value).digest('hex')
 const offerKey = row => `${row.id}\u0000${row.version}\u0000${row.mode}`
@@ -308,7 +309,8 @@ export function adaptivePolicyMatches(policy, queryFeatures) {
 const tokenContextSize = lines => estimateRecallTokens(`${RECALL_INJECTION_PREFIX}${lines.join('')}`)
 
 const isTokenBudget = budget => budget?.unit === RECALL_TOKEN_UNIT
-  && Number.isSafeInteger(budget.limit) && budget.limit >= 128 && budget.limit <= 1024
+  && Number.isSafeInteger(budget.limit) && budget.limit >= MIN_RECALL_TOKEN_BUDGET
+  && budget.limit <= MAX_RECALL_TOKEN_BUDGET
 const measuredSize = (lines, bytes, tokenMode) => tokenMode ? tokenContextSize(lines) : bytes
 const profileLimit = (maxBytes, budget, tokenMode) => tokenMode ? budget.limit
   : Math.min(768, budget?.unit === 'bytes' ? budget.limit

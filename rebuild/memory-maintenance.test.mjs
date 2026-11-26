@@ -2,11 +2,12 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import {
-  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createDoc, entryIdFor, MemoryStore } from './memory.mjs'
+import { V5_OBJECT_PREFIX, writeV5Document } from './storage-v5.mjs'
 
 const temporaryRoot = () => mkdtempSync(join(tmpdir(), 'mse-maintenance-test-'))
 const cliPath = new URL('../scripts/mse-maintenance.mjs', import.meta.url).pathname
@@ -42,10 +43,10 @@ function seed(root, mutate) {
   return store
 }
 
-function request(entryId) {
-  return { ticket: 'ticket-maint-1', kind: 'revise', at: 1000, problemId: null, entryId,
+function request(entryId, index = 1, settled = false) {
+  return { ticket: `ticket-maint-${index}`, kind: 'revise', at: 1000 + index, problemId: null, entryId,
     digestDay: null, requestHash: 'c'.repeat(64), dispatchHash: null, dispatchedAt: null,
-    settled: false, terminal: null, usage: null, maxTokens: 2048, evidenceIds: [], tokenHashes: [],
+    settled, terminal: settled ? 'completed' : null, usage: null, maxTokens: 2048, evidenceIds: [], tokenHashes: [],
     parentVersion: 1, routeId: null, material: 'd'.repeat(64), retryOf: null,
     digestFacts: null, digestThrough: null, sourceSessionId: null, sourceRoute: null }
 }
@@ -68,6 +69,7 @@ test('inspect is read-only and reports validated counts, capacity, unsettled wor
     doc.receipts.push(receipt(retiredBusy.id))
   })
   const before = readFileSync(store.path)
+  const storageBytes = store.stats().bytes
   t.after(() => rmSync(parent, { recursive: true, force: true }))
 
   const result = cli('inspect', ...state(root))
@@ -75,8 +77,10 @@ test('inspect is read-only and reports validated counts, capacity, unsettled wor
   assert.equal(result.status, 0)
   assert.deepEqual(result.output.counts.entriesByType, { lesson: 3 })
   assert.equal(result.output.capacity.entries.used, 3)
-  assert.equal(result.output.capacity.entries.limit, 256)
-  assert.equal(result.output.capacity.bytes.used, before.length)
+  assert.equal(result.output.capacity.entries.limit, null)
+  assert.equal(result.output.capacity.entries.legacyLimit, 4096)
+  assert.equal(result.output.capacity.bytes.used, storageBytes)
+  assert.equal(result.output.capacity.bytes.maxObjectBytes, 2 * 1024 * 1024)
   assert.equal(result.output.unsettled.requests, 1)
   assert.equal(result.output.unsettled.receipts, 1)
   assert.equal(result.output.archivableRetiredCount, 0)
@@ -103,10 +107,10 @@ test('inspect distinguishes an empty initialized directory from a missing state 
   assert.equal(emptyResult.output.bytes, 0)
 })
 
-test('export writes the exact validated source bytes to a new private file without changing the source', t => {
+test('format-6 export writes an exact private bundle and refuses to replace an existing path', t => {
   const parent = temporaryRoot()
   const root = join(parent, 'store')
-  const output = join(parent, 'backup.json')
+  const output = join(parent, 'backup.bundle')
   const retired = entry('export', { version: 3 })
   const store = seed(root, doc => {
     doc.entries.push(retired)
@@ -114,28 +118,37 @@ test('export writes the exact validated source bytes to a new private file witho
     doc.futureExtension = { preserved: ['unknown', 'fields'] }
   })
   const before = readFileSync(store.path)
+  const storageBytes = store.stats().bytes
   t.after(() => rmSync(parent, { recursive: true, force: true }))
 
   const result = cli('export', ...state(root), '--output', output)
 
   assert.equal(result.status, 0)
   assert.equal(result.output.containsPrivateLearningData, true)
-  assert.equal(result.output.bytes, before.length)
+  assert.equal(result.output.format, 6)
+  assert.equal(result.output.bundle, true)
+  assert.equal(result.output.bytes, storageBytes)
+  assert.ok(result.output.objects > 0)
   assert.deepEqual(result.output.backup, { created: true, durable: true })
   assert.deepEqual(result.output.source, { committed: false, durable: null })
-  assert.deepEqual(readFileSync(output), before)
+  assert.deepEqual(readFileSync(join(output, 'memory-v1.json')), before)
   assert.deepEqual(readFileSync(store.path), before)
-  assert.equal(statSync(output).mode & 0o777, 0o600)
-  writeFileSync(output, 'sentinel')
+  assert.equal(statSync(output).mode & 0o777, 0o700)
+  const sourceObjects = readdirSync(root).filter(name => name.startsWith('.memory-v1-object-')).sort()
+  const backupObjects = readdirSync(output).filter(name => name.startsWith('.memory-v1-object-')).sort()
+  assert.deepEqual(backupObjects, sourceObjects)
+  for (const name of sourceObjects) assert.deepEqual(readFileSync(join(output, name)), readFileSync(join(root, name)))
+  assert.deepEqual(new MemoryStore({ stateRoot: output }).read().futureExtension,
+    new MemoryStore({ stateRoot: root }).read().futureExtension)
   const refused = cli('export', ...state(root), '--output', output)
   assert.equal(refused.status, 1)
-  assert.equal(readFileSync(output, 'utf8'), 'sentinel')
+  assert.deepEqual(readFileSync(join(output, 'memory-v1.json')), before)
 })
 
 test('archive-retired snapshots under the writer transaction and removes only explicit unreferenced retired ids', t => {
   const parent = temporaryRoot()
   const root = join(parent, 'store')
-  const output = join(parent, 'archive.json')
+  const output = join(parent, 'archive.bundle')
   const archived = entry('archive', { type: 'rule', version: 4 })
   const blockedByWork = entry('still referenced')
   const active = entry('active', { status: 'pending' })
@@ -155,7 +168,8 @@ test('archive-retired snapshots under the writer transaction and removes only ex
   assert.equal(result.output.phase, 'complete')
   assert.deepEqual(result.output.backup, { created: true, durable: true })
   assert.deepEqual(result.output.source, { committed: true, durable: true })
-  assert.deepEqual(JSON.parse(readFileSync(output, 'utf8')), JSON.parse(before))
+  assert.deepEqual(readFileSync(join(output, 'memory-v1.json')), before)
+  assert.deepEqual(new MemoryStore({ stateRoot: output }).read().entries, beforeDoc.entries)
   const after = store.read()
   assert.deepEqual(after.entries, [blockedByWork, active])
   for (const key of ['receipts', 'requests', 'turnFacts', 'materials', 'checkEvents',
@@ -168,7 +182,7 @@ test('archive-retired snapshots under the writer transaction and removes only ex
 test('archive-retired refuses duplicate, active, missing, and referenced ids before writing a backup', t => {
   const parent = temporaryRoot()
   const root = join(parent, 'store')
-  const output = join(parent, 'archive.json')
+  const output = join(parent, 'archive.bundle')
   const retired = entry('referenced')
   const active = entry('active-target', { status: 'pending' })
   const store = seed(root, doc => {
@@ -193,13 +207,16 @@ test('archive-retired refuses duplicate, active, missing, and referenced ids bef
 test('archive-retired refuses all targets while any request remains unsettled', t => {
   const parent = temporaryRoot()
   const root = join(parent, 'store')
-  const output = join(parent, 'archive.json')
+  const output = join(parent, 'archive.bundle')
   const target = entry('unrelated-request-blocks-archive')
   const other = entry('unrelated-request-target', { status: 'pending' })
   const store = seed(root, doc => {
     doc.entries.push(target, other)
-    doc.requests.push(request(other.id))
+    doc.requests.push(request(other.id, 1, false),
+      ...Array.from({ length: 119 }, (_, index) => request(null, index + 2, true)))
   })
+  assert.equal(store.read().requests.some(row => row.ticket === 'ticket-maint-1'), false,
+    'the unsettled audit row is outside the 96-row hot projection')
   const before = readFileSync(store.path)
   t.after(() => rmSync(parent, { recursive: true, force: true }))
 
@@ -246,7 +263,7 @@ test('recover-copy validates an export and preserves rules, versions, controls, 
     doc.controls.userPaused = true
     doc.futureExtension = { revision: 12, nested: ['untouched'] }
   })
-  const exportPath = join(parent, 'export.json')
+  const exportPath = join(parent, 'export.bundle')
   execFileSync(process.execPath, [cliPath, 'export', ...state(root), '--output', exportPath], { encoding: 'utf8' })
   const before = store.read()
   t.after(() => rmSync(parent, { recursive: true, force: true }))
@@ -264,11 +281,109 @@ test('recover-copy validates an export and preserves rules, versions, controls, 
   assert.deepEqual(restored.futureExtension, before.futureExtension)
 })
 
+test('format-6 bundle recovery preserves every request body and the exact source manifest', t => {
+  const parent = temporaryRoot()
+  const root = join(parent, 'source')
+  const destination = join(parent, 'restored')
+  const exportPath = join(parent, 'complete.bundle')
+  const source = seed(root, doc => {
+    doc.requests.push(...Array.from({ length: 120 }, (_, index) => request(null, index + 1, true)))
+    doc.controls.userPaused = true
+  })
+  const manifestBytes = readFileSync(source.path)
+  const expected = source.listRequests()
+  assert.equal(expected.length, 120)
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+
+  const exported = cli('export', ...state(root), '--output', exportPath)
+  assert.equal(exported.status, 0)
+  assert.equal(exported.output.requests, 120)
+  const recovered = cli('recover-copy', '--input', exportPath, '--state-root', destination)
+
+  assert.equal(recovered.status, 0)
+  assert.equal(recovered.output.requests, 120)
+  const restored = new MemoryStore({ stateRoot: destination })
+  assert.deepEqual(readFileSync(restored.path), manifestBytes)
+  assert.deepEqual(restored.listRequests(), expected)
+  assert.equal(restored.read().controls.userPaused, true)
+})
+
+test('recover-copy rejects a bundle missing a directly referenced recall page before target creation', t => {
+  const parent = temporaryRoot()
+  const root = join(parent, 'source')
+  const exportPath = join(parent, 'broken.bundle')
+  const destination = join(parent, 'not-created')
+  seed(root, doc => { doc.entries.push(entry('missing-recall-shard', { type: 'rule', status: 'user_rule' })) })
+  execFileSync(process.execPath, [cliPath, 'export', ...state(root), '--output', exportPath],
+    { encoding: 'utf8' })
+  const manifest = JSON.parse(readFileSync(join(exportPath, 'memory-v1.json'), 'utf8'))
+  const missing = manifest.recallRoots.find(Boolean)
+  assert.ok(missing)
+  unlinkSync(join(exportPath, `${V5_OBJECT_PREFIX}${missing}.json`))
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+
+  const result = cli('recover-copy', '--input', exportPath, '--state-root', destination)
+
+  assert.equal(result.status, 1)
+  assert.equal(result.output.code, 'invalid_memory')
+  assert.equal(result.output.phase, 'rejected')
+  assert.equal(existsSync(destination), false)
+})
+
+test('format-5 export and recovery remain available for an older on-disk store', t => {
+  const parent = temporaryRoot()
+  const root = join(parent, 'legacy-store')
+  const output = join(parent, 'legacy.bundle')
+  const destination = join(parent, 'legacy-copy')
+  mkdirSync(root, { mode: 0o700 })
+  const doc = createDoc()
+  doc.format = 5
+  const oldRule = entry('legacy-v5', { type: 'rule', status: 'user_rule' })
+  doc.entries.push(oldRule)
+  writeV5Document(root, doc, { validateEntry: () => {} })
+  const source = new MemoryStore({ stateRoot: root })
+  assert.equal(source.read().format, 5)
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+
+  const exported = cli('export', ...state(root), '--output', output)
+  assert.equal(exported.status, 0)
+  assert.equal(exported.output.format, 5)
+  const recovered = cli('recover-copy', '--input', output, '--state-root', destination)
+  assert.equal(recovered.status, 0)
+  assert.equal(recovered.output.format, 5)
+  assert.deepEqual(new MemoryStore({ stateRoot: destination }).read().entries, [oldRule])
+})
+
+test('recover-copy rejects a bundle missing a directly referenced turn-fact bucket before target creation', t => {
+  const parent = temporaryRoot()
+  const root = join(parent, 'source')
+  const exportPath = join(parent, 'broken.bundle')
+  const destination = join(parent, 'not-created')
+  seed(root, doc => doc.turnFacts.push({ id: 'a'.repeat(64), turnKey: 'a'.repeat(64),
+    sessionId: 'turn-fact-bundle-test', day: '2026-11-20', at: 1_800_000_000_000,
+    taskSummary: 'archive validation', outcome: null, evidenceBrief: null, evidenceHash: null,
+    failures: 0, cancellations: 0 }))
+  execFileSync(process.execPath, [cliPath, 'export', ...state(root), '--output', exportPath],
+    { encoding: 'utf8' })
+  const manifest = JSON.parse(readFileSync(join(exportPath, 'memory-v1.json'), 'utf8'))
+  const missing = manifest.turnFactBuckets.find(Boolean)
+  assert.ok(missing)
+  unlinkSync(join(exportPath, `${V5_OBJECT_PREFIX}${missing}.json`))
+  t.after(() => rmSync(parent, { recursive: true, force: true }))
+
+  const result = cli('recover-copy', '--input', exportPath, '--state-root', destination)
+
+  assert.equal(result.status, 1)
+  assert.equal(result.output.code, 'invalid_memory')
+  assert.equal(result.output.phase, 'rejected')
+  assert.equal(existsSync(destination), false)
+})
+
 test('recover-copy refuses a nonempty target before changing its mode or contents', t => {
   const parent = temporaryRoot()
   const sourceRoot = join(parent, 'source')
   const destination = join(parent, 'nonempty')
-  const exportPath = join(parent, 'export.json')
+  const exportPath = join(parent, 'export.bundle')
   const sourceEntry = entry('preflight-source')
   const source = seed(sourceRoot, doc => { doc.entries.push(sourceEntry) })
   execFileSync(process.execPath, [cliPath, 'export', ...state(sourceRoot), '--output', exportPath],
@@ -294,7 +409,7 @@ test('recover-copy accepts an existing empty directory and secures it before wri
   const parent = temporaryRoot()
   const sourceRoot = join(parent, 'source')
   const destination = join(parent, 'empty')
-  const exportPath = join(parent, 'export.json')
+  const exportPath = join(parent, 'export.bundle')
   const sourceEntry = entry('empty-target-source')
   seed(sourceRoot, doc => { doc.entries.push(sourceEntry) })
   execFileSync(process.execPath, [cliPath, 'export', ...state(sourceRoot), '--output', exportPath],

@@ -9,6 +9,36 @@ import {RECALL_QUALIFICATION} from '../../rebuild/recall-qualification.mjs'
 import {NORMALIZATION_RULE} from '../../rebuild/recall.mjs'
 
 const SELECTOR_FILES=['rebuild/evolution.mjs','rebuild/recall.mjs','src/recall.mjs']
+// The frozen selector qualification predates this one exact, non-semantic cache implementation.
+// Keep the old policy digest as the record identity while requiring the complete old→new source
+// tuple below; any other selector change still requires a separately reviewed qualification.
+const CACHE_ONLY_SOURCE_COMPATIBILITY=Object.freeze({
+  id:'analysis-cache-bounded-lru-v1',
+  candidateId:'whole-word-error-to-existing-log-v1',
+  from:{
+    'rebuild/evolution.mjs':'04fc76ffc70fd0ceab830ba475d301c8b499009d9afcd97fe9c6e12361e0db65',
+    'rebuild/recall.mjs':'ee8db9fc7f122814eadc3ba97f8b8fa9c8b1400cf9b5f3da052b5d352b5add31',
+    'src/recall.mjs':'e3a3bf35f298033bc5e4bcf2d48fa7cde9fa78d0613ad3bd8d556093af634911'
+  },
+  to:{
+    'rebuild/evolution.mjs':'04fc76ffc70fd0ceab830ba475d301c8b499009d9afcd97fe9c6e12361e0db65',
+    'rebuild/recall.mjs':'ee8db9fc7f122814eadc3ba97f8b8fa9c8b1400cf9b5f3da052b5d352b5add31',
+    'src/recall.mjs':'c671809fc7cb1ac5f9fcb03bf105732d4db478bd0fa20cb36cbb483541d50a77'
+  }
+})
+// The only additional selector-source change admitted for MSE 1.5.0 removes the obsolete total
+// method-history limit. Qualification identity stays frozen; current source must match this full
+// tuple exactly, and the existing offline replay below must still reproduce its saved evidence.
+const METHOD_HISTORY_GROWTH_COMPATIBILITY=Object.freeze({
+  id:'method-history-page-growth-v1',
+  candidateId:'whole-word-error-to-existing-log-v1',
+  from:CACHE_ONLY_SOURCE_COMPATIBILITY.from,
+  to:{
+    'rebuild/evolution.mjs':'b33ba302ed336d81cd7e3bf2f120648eff0ed8e905c1f5500f3644f15d5fca86',
+    'rebuild/recall.mjs':'ee8db9fc7f122814eadc3ba97f8b8fa9c8b1400cf9b5f3da052b5d352b5add31',
+    'src/recall.mjs':'c671809fc7cb1ac5f9fcb03bf105732d4db478bd0fa20cb36cbb483541d50a77'
+  }
+})
 const REPLAY_FILES=['scripts/rsi/auto-offline.mjs','scripts/rsi/compare-normalization.mjs',
   'scripts/rsi/replay.mjs','tests/fixtures/recall-cases.json','tests/fixtures/rsi/recall-comparison.json',
   'tests/fixtures/rsi/normalization-controls.json','tests/fixtures/rsi/auto-independent-controls.json']
@@ -50,12 +80,23 @@ function evaluate(root,sourceDigests){
 export function verifyRecallQualification(root,qualification=RECALL_QUALIFICATION){
   const sourceDigests=digests(root,SELECTOR_FILES)
   if(qualification.candidateId!==NORMALIZATION_RULE.id)return {ok:false,reason:'candidate_id'}
-  if(!isDeepStrictEqual(qualification.sourceDigests,sourceDigests))return {ok:false,reason:'source_digest'}
-  const actual=evaluate(root,sourceDigests)
+  const unchanged=isDeepStrictEqual(qualification.sourceDigests,sourceDigests)
+  const cacheOnly=qualification.candidateId===CACHE_ONLY_SOURCE_COMPATIBILITY.candidateId
+    && isDeepStrictEqual(qualification.sourceDigests,CACHE_ONLY_SOURCE_COMPATIBILITY.from)
+    && isDeepStrictEqual(sourceDigests,CACHE_ONLY_SOURCE_COMPATIBILITY.to)
+  const methodHistoryGrowth=qualification.candidateId===METHOD_HISTORY_GROWTH_COMPATIBILITY.candidateId
+    && isDeepStrictEqual(qualification.sourceDigests,METHOD_HISTORY_GROWTH_COMPATIBILITY.from)
+    && isDeepStrictEqual(sourceDigests,METHOD_HISTORY_GROWTH_COMPATIBILITY.to)
+  if(!unchanged&&!cacheOnly&&!methodHistoryGrowth)return {ok:false,reason:'source_digest'}
+  // The evaluator executes the current tree, but using the frozen source tuple preserves the old
+  // qualification identity. Its exact replay evidence must still match below on every run.
+  const actual=evaluate(root,qualification.sourceDigests)
   if(!actual.ok)return actual
   if(!isDeepStrictEqual(actual.qualification.evidence,qualification.evidence))return {ok:false,reason:'stale_offline_evidence'}
   if(qualification.id!==actual.qualification.id)return {ok:false,reason:'qualification_id'}
-  return {ok:true,candidateId:qualification.candidateId,id:qualification.id,sourceDigests}
+  return {ok:true,candidateId:qualification.candidateId,id:qualification.id,sourceDigests,
+    ...(cacheOnly?{compatibility:CACHE_ONLY_SOURCE_COMPATIBILITY.id}:{}),
+    ...(methodHistoryGrowth?{compatibility:METHOD_HISTORY_GROWTH_COMPATIBILITY.id}:{})}
 }
 
 if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).href){

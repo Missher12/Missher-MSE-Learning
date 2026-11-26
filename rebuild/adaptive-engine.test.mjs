@@ -5,9 +5,49 @@ import { rmSync } from 'node:fs'
 import { buildEngine, cleanupAdaptiveEngineFixture, failureX, failureY, failureZ, failureW,
   trainApiPolicy } from '../scripts/rsi/adaptive-engine-fixture.mjs'
 import { RECALL_QUALIFICATION } from './recall-qualification.mjs'
-import { synthesizeAdaptivePolicy } from './adaptive-recall.mjs'
+import { synthesizeAdaptivePolicy, synthesizeAdaptiveTaskPolicy } from './adaptive-recall.mjs'
 import { RECALL_TOKEN_UNIT } from './recall-budget.mjs'
-import { validateDoc } from './memory.mjs'
+import { ADAPTIVE_RECALL_POLICY_LIMIT, validateDoc } from './memory.mjs'
+
+const hash = value => createHash('sha256').update(value).digest('hex')
+
+test('a full active policy ledger refuses new candidates with a readable capacity reason', () => {
+  const { root, engine, targetX, fail, prepare, settle } = buildEngine()
+  try {
+    const policies = Array.from({ length: ADAPTIVE_RECALL_POLICY_LIMIT }, (_, index) => {
+      const entry = structuredClone(targetX)
+      const policy = synthesizeAdaptiveTaskPolicy({ scope: hash('scope'),
+        qualification: RECALL_QUALIFICATION.id, entry, taskFeatures: ['api', 'opdebug'],
+        turnKey: hash(`adaptive-capacity-turn-${index}`),
+        session: hash(`adaptive-capacity-session-${index}`),
+        queryKey: hash(`adaptive-capacity-query-${index}`), now: 1_800_000_000_000 })
+      assert.ok(policy)
+      policy.scope = hash(`adaptive-capacity-scope-${index}`)
+      // Keep the identity consistent after varying scope; each row still passes the real schema.
+      const identity = { schema: policy.schema, scope: policy.scope,
+        qualification: policy.qualification, entryId: policy.entryId, version: policy.version,
+        objective: policy.objective, features: policy.features,
+        excludedFeatures: policy.excludedFeatures, familyId: policy.familyId,
+        familyGeneration: policy.familyGeneration, parentId: policy.parentId }
+      policy.id = hash(JSON.stringify(identity))
+      return { entry, policy }
+    })
+    engine.store.transaction(doc => {
+      doc.recallStrategy.adaptive.policies = policies.map(row => row.policy)
+      return true
+    })
+
+    prepare('capacity-discovery', '1', 'API 调用遇到阻塞，请定位原因')
+    fail('capacity-discovery', '1', 'capacity-discovery-failure', failureX)
+    settle('capacity-discovery', '1')
+
+    const adaptive = engine.store.read().recallStrategy.adaptive
+    assert.equal(adaptive.policies.length, ADAPTIVE_RECALL_POLICY_LIMIT,
+      'current and in-validation policies remain intact')
+    assert.ok(adaptive.decisions.some(row => row.reason === 'active_policy_capacity'),
+      'the rejected candidate records the readable full-ledger reason')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
 
 test('status exposes only the newest eight fixed-field persisted adaptive decisions', () => {
   const { root, engine, targetX } = buildEngine()
@@ -213,7 +253,8 @@ test('token-profile RSI keeps its evidence separate from a legacy byte observer'
     assert.equal(legacy.mode, 'observing')
     assert.equal(legacy.budget, undefined, 'the old policy keeps its original byte evidence shape')
 
-    engine.setRecallBudget({ unit: RECALL_TOKEN_UNIT, limit: 512 })
+    assert.doesNotThrow(() => engine.setRecallBudget({ unit: RECALL_TOKEN_UNIT, limit: 1537 }),
+      'a custom Token profile can start an independent observation cohort')
     seed(sharedSession, 'new-token-turn', 'API 调用遇到阻塞，请定位原因', 'token-discovery-failure')
     let policies = engine.store.read().recallStrategy.adaptive.policies
     assert.equal(policies.length, 2, 'a profileless byte observer does not block a distinct token policy')
@@ -229,16 +270,16 @@ test('token-profile RSI keeps its evidence separate from a legacy byte observer'
     const holdout = prepare('token-holdout', 'positive', 'API 请求仍然阻塞，麻烦定位原因')
     const probe = engine.store.read().recallStrategy.adaptive.probes
       .find(row => row.turnKey === holdout.turnKey)
-    assert.deepEqual(probe.budget, { unit: RECALL_TOKEN_UNIT, limit: 512 })
+    assert.deepEqual(probe.budget, { unit: RECALL_TOKEN_UNIT, limit: 1537 })
     assert.ok(probe.comparisons.some(row => row.policyId === tokenPolicy.id
       && row.budget.unit === RECALL_TOKEN_UNIT
-      && row.baselineTokens <= 512 && row.candidateTokens <= 512))
+      && row.baselineTokens <= 1537 && row.candidateTokens <= 1537))
     fail('token-holdout', 'positive', 'token-positive-failure', failureX)
     settle('token-holdout', 'positive')
     policies = engine.store.read().recallStrategy.adaptive.policies
     const updated = policies.find(row => row.id === tokenPolicy.id)
     assert.equal(updated.mode, 'observing', 'a token seed plus one token gain cannot borrow byte gains')
-    assert.equal(updated.samples.at(-1).replay.budget.limit, 512)
+    assert.equal(updated.samples.at(-1).replay.budget.limit, 1537)
     assert.equal(engine.statusView().recallStrategy.adaptive.recent
       .find(row => row.id === tokenPolicy.id).replay.independentGains, 1)
 

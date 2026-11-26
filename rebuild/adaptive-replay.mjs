@@ -2,6 +2,7 @@
 import { adaptivePolicyMatches } from './adaptive-recall.mjs'
 import { judge } from './adaptive-selection.mjs'
 import { MAX_RECALL_LINE_BYTES, RECALL_TOKEN_UNIT } from './recall-budget.mjs'
+import { MAX_RECALL_TOKEN_BUDGET, MIN_RECALL_TOKEN_BUDGET } from './recall-budget-constants.mjs'
 
 const key = row => `${row.id}\u0000${row.version}\u0000${row.mode}`
 const sameOffers = (left, right) => left.length === right.length
@@ -14,7 +15,8 @@ const has = (rows, id, version) => rows.some(row => row.id === id && row.version
 const validBudget = budget => budget !== null && typeof budget === 'object' && !Array.isArray(budget)
   && Object.keys(budget).every(key => ['unit', 'limit'].includes(key))
   && Number.isSafeInteger(budget.limit)
-  && (budget.unit === RECALL_TOKEN_UNIT ? budget.limit >= 128 && budget.limit <= 1024
+  && (budget.unit === RECALL_TOKEN_UNIT ? budget.limit >= MIN_RECALL_TOKEN_BUDGET
+    && budget.limit <= MAX_RECALL_TOKEN_BUDGET
     : budget.unit === 'bytes' && budget.limit >= 128 && budget.limit < 768)
 const measuredForPolicy = (policy, row) => {
   const budget = policy.budget

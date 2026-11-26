@@ -30,21 +30,28 @@
  */
 import { createHash } from 'node:crypto'
 import { isAbsolute, join } from 'node:path'
-import { LearningError, check } from '../src/store.mjs'
+import { LearningError, MAX_STORE_BYTES, check } from '../src/store.mjs'
 import { commitMemoryFile, prepareMemoryDirectory, readBoundedMemoryFileBytes, resolveMemoryDirectory,
   withMemoryStoreLock, encodeMemoryDocument, decodeMemoryDocument, REQUEST_AUDIT_LIMIT }
   from './storage.mjs'
-import { problemLoopValid, ensureProblemLoop } from '../src/problems.mjs'
+import { problemLoopValid, problemRowValid, ensureProblemLoop } from '../src/problems.mjs'
 import { PYTHON_RECEIPT_BIRTH_PROOF_MAX_BYTES, pythonReceiptBirthProofValid } from '../src/failure-evidence.mjs'
 import { ADAPTIVE_TASK_OPERATION_IDS } from './adaptive-operations.mjs'
 import { MAX_RECALL_LINE_BYTES, RECALL_TOKEN_UNIT } from './recall-budget.mjs'
+import { MAX_RECALL_TOKEN_BUDGET, MIN_RECALL_TOKEN_BUDGET } from './recall-budget-constants.mjs'
 import { MAX_RECALL_TOTAL } from './recall.mjs'
+import { isV5Manifest, loadV5Document, writeV5Document, getV5Request, listV5Requests,
+  getV5RequestMetadata, getV5LatestMaterialRequest, listV5RequestMetadata,
+  getV5MigrationSource, readV5RecallCandidates,
+  v5StorageStats, v5DocumentFits } from './storage-v5.mjs'
+import { isV6Manifest, loadV6Document, writeV6Document, readV6RecallCandidates,
+  getV6MigrationSource, v6StorageStats, v6DocumentFits, v6StrategyHistoryKey,
+  v6HasAdaptivePolicyHistory, v6HasRecallStrategyHistory, v6GetMethodHistory } from './storage-v6.mjs'
 
-// EVOLUTION016: format 4 adds the version evidence ledger (methodStats / methodHistory /
-// receipt.methodFeedback / request.methodFingerprint). Format 3 stays READ-COMPATIBLE: a pure
-// read never rewrites it, and the first real write transaction migrates it atomically.
-export const MEMORY_FORMAT = 4
-export const READABLE_FORMATS = [3, 4]
+// Format 6 adds persistent collection trees while formats 3/4/5 remain read-compatible. A
+// format-5 or legacy source is upgraded only by the first successful real write.
+export const MEMORY_FORMAT = 6
+export const READABLE_FORMATS = [3, 4, 5, 6]
 export const ENTRY_STATUSES = ['user_rule', 'pending', 'check_passed', 'needs_revision', 'retired']
 export const TURN_OUTCOMES = ['failed', 'cancelled', 'unknown', 'verified']
 export const METHOD_HISTORY_LIMIT = 128
@@ -82,12 +89,12 @@ const ADAPTIVE_DECISION_REASONS = ['unique_native_method_match', 'independent_sa
   'policy_stale', 'insufficient_safe_features', 'already_tracked', 'candidate_not_additive',
   'ambiguous_native_failure', 'baseline_explains_failure', 'stale_probe', 'probe_capacity',
   'independent_unmatched_objective', 'awaiting_negative_control', 'strategy_disabled',
-  'revision_limit', 'same_mechanism_rejected', 'counterexample_child',
+  'revision_limit', 'same_mechanism_rejected', 'active_policy_capacity', 'counterexample_child',
   'condition_missed_same_objective', 'incomparable_evidence', 'round_not_selected']
 const safeAdaptiveFeature = value => typeof value === 'string' && /^[a-z][a-z0-9]{0,15}$/u.test(value)
 const ADAPTIVE_TASK_OPERATIONS = new Set(ADAPTIVE_TASK_OPERATION_IDS)
 const ADAPTIVE_GENERIC_TASK_FEATURES = new Set(['null', 'empty', 'error', 'log', 'value', 'result', 'problem'])
-export const ENTRY_LIMIT = 256
+export const ENTRY_LIMIT = 4096
 export const RECEIPT_LIMIT = 256
 export const MID_TURN_RECEIPT_LIMIT = 256
 export const REQUEST_LIMIT = REQUEST_AUDIT_LIMIT
@@ -262,7 +269,8 @@ const receiptValid = row => isPlainObject(row)
   && (row.budgetUnit === undefined
     ? row.contextTokens === undefined && row.budgetLimit === undefined && row.bytes <= 1536
     : row.budgetUnit === RECALL_TOKEN_UNIT
-      ? Number.isSafeInteger(row.budgetLimit) && row.budgetLimit >= 128 && row.budgetLimit <= 1024
+      ? Number.isSafeInteger(row.budgetLimit) && row.budgetLimit >= MIN_RECALL_TOKEN_BUDGET
+        && row.budgetLimit <= MAX_RECALL_TOKEN_BUDGET
         && Number.isSafeInteger(row.contextTokens) && row.contextTokens >= 0
         && row.contextTokens <= row.budgetLimit
         && row.bytes <= MAX_RECALL_LINE_BYTES * MAX_RECALL_TOTAL
@@ -298,7 +306,8 @@ const midTurnReceiptValid = row => isPlainObject(row)
   && (row.budgetUnit === undefined
     ? row.contextTokens === undefined && row.budgetLimit === undefined && row.bytes <= 1536
     : row.budgetUnit === RECALL_TOKEN_UNIT
-      ? Number.isSafeInteger(row.budgetLimit) && row.budgetLimit >= 128 && row.budgetLimit <= 1024
+      ? Number.isSafeInteger(row.budgetLimit) && row.budgetLimit >= MIN_RECALL_TOKEN_BUDGET
+        && row.budgetLimit <= MAX_RECALL_TOKEN_BUDGET
         && Number.isSafeInteger(row.contextTokens) && row.contextTokens >= 0
         && row.contextTokens <= row.budgetLimit
       : row.budgetUnit === 'bytes' && row.contextTokens === undefined
@@ -578,7 +587,8 @@ const adaptiveOfferListValid = rows => Array.isArray(rows) && rows.length <= 3
 const adaptiveBudgetValid = budget => isPlainObject(budget)
   && Object.keys(budget).every(key => ['unit', 'limit'].includes(key))
   && Number.isSafeInteger(budget.limit)
-  && (budget.unit === RECALL_TOKEN_UNIT ? budget.limit >= 128 && budget.limit <= 1024
+  && (budget.unit === RECALL_TOKEN_UNIT ? budget.limit >= MIN_RECALL_TOKEN_BUDGET
+    && budget.limit <= MAX_RECALL_TOKEN_BUDGET
     : budget.unit === 'bytes' && budget.limit >= 128 && budget.limit < 768)
 const sameAdaptiveBudget = (left, right) => left === undefined || right === undefined
   ? left === right : left.unit === right.unit && left.limit === right.limit
@@ -785,7 +795,8 @@ const defaultRecallStrategy = () => ({ generation: 0, rows: [], adaptive: defaul
 
 export function createDoc() {
   return { format: MEMORY_FORMAT, updatedAt: 0, entries: [], receipts: [], midTurnReceipts: [], requests: [], turnFacts: [],
-    materials: [], checkEvents: [], routes: [], corrections: [], methodHistory: [],
+    materials: [], checkEvents: [], routes: [], corrections: [], methodHistory: [], adaptiveHistory: [],
+    recallStrategyHistory: [],
     recallStrategy: defaultRecallStrategy(),
     controls: { userPaused: false },
     digest: { lastDoneDay: null, backlog: [], lastRunAt: null, waitReason: null, days: [] },
@@ -794,7 +805,7 @@ export function createDoc() {
 
 export function validateDoc(doc) {
   if (!isPlainObject(doc) || !READABLE_FORMATS.includes(doc.format)) throw new LearningError('invalid_memory')
-  if (!Array.isArray(doc.entries) || doc.entries.length > ENTRY_LIMIT || !doc.entries.every(entryValid)) {
+  if (!Array.isArray(doc.entries) || !doc.entries.every(entryValid)) {
     throw new LearningError('invalid_memory')
   }
   if (!Array.isArray(doc.receipts) || doc.receipts.length > RECEIPT_LIMIT || !doc.receipts.every(receiptValid)) {
@@ -820,14 +831,28 @@ export function validateDoc(doc) {
   if (doc.recallStrategy === undefined) doc.recallStrategy = defaultRecallStrategy()
   if (doc.recallStrategy.adaptive === undefined) doc.recallStrategy.adaptive = defaultAdaptiveRecall()
   if (!recallStrategyValid(doc.recallStrategy)) throw new LearningError('invalid_memory')
+  if (doc.recallStrategyHistory === undefined) doc.recallStrategyHistory = []
+  if (!Array.isArray(doc.recallStrategyHistory)
+    || !doc.recallStrategyHistory.every(recallStrategyRowValid)) throw new LearningError('invalid_memory')
+  const strategyHistoryKeys = doc.recallStrategyHistory.map(v6StrategyHistoryKey)
+  const activeStrategyKeys = doc.recallStrategy.rows.map(v6StrategyHistoryKey)
+  if (new Set(strategyHistoryKeys).size !== strategyHistoryKeys.length
+    || strategyHistoryKeys.some(key => activeStrategyKeys.includes(key))) {
+    throw new LearningError('invalid_memory')
+  }
   // EVOLUTION016: the archived method ledger. Absent in a format3 library (defaulted, never
-  // written on a pure read); bounded by count, by unique (entryId,version) and by row bytes.
+  // written on a pure read); page-backed, unique by (entryId,version), with a per-row byte bound.
   if (doc.methodHistory === undefined) doc.methodHistory = []
-  if (!Array.isArray(doc.methodHistory) || doc.methodHistory.length > METHOD_HISTORY_LIMIT
-    || !doc.methodHistory.every(row => historyRowValid(row)
+  if (!Array.isArray(doc.methodHistory) || !doc.methodHistory.every(row => historyRowValid(row)
       && Buffer.byteLength(JSON.stringify(row), 'utf8') <= METHOD_HISTORY_ROW_BYTES)
     || new Set(doc.methodHistory.map(row => `${row.entryId}\u0000${row.version}`)).size
       !== doc.methodHistory.length) throw new LearningError('invalid_memory')
+  if (doc.adaptiveHistory === undefined) doc.adaptiveHistory = []
+  if (!Array.isArray(doc.adaptiveHistory) || !doc.adaptiveHistory.every(adaptivePolicyValid)
+    || new Set(doc.adaptiveHistory.map(row => row.id)).size !== doc.adaptiveHistory.length
+    || doc.adaptiveHistory.some(row => doc.recallStrategy.adaptive.policies.some(active => active.id === row.id))) {
+    throw new LearningError('invalid_memory')
+  }
   if (!isPlainObject(doc.controls) || typeof doc.controls.userPaused !== 'boolean'
     || Object.keys(doc.controls).some(key => key !== 'userPaused')) throw new LearningError('invalid_memory')
   if (doc.corrections === undefined) doc.corrections = [] // additive default: old docs migrate, nothing lost
@@ -878,8 +903,9 @@ const NO_COMMIT = Symbol('mse-rebuild.no-commit')
 export const noCommit = value => ({ [NO_COMMIT]: value })
 
 /**
- * EVOLUTION016 format3 → format4 migration, executed ONLY inside the first real write transaction
- * (a pure read never calls this). Old text/status/counters/gates are untouched. The one existing
+ * EVOLUTION016 format3 → format4 logical migration, executed ONLY inside the first real write
+ * transaction (a pure read never calls this); the writer then stores the migrated doc as format 6.
+ * Old text/status/counters/gates are untouched. The one existing
  * `superseded` snapshot of a LESSON becomes a partial history row — no statistics, no evidence
  * hash and no lesson body are invented. User-rule snapshots never enter the method ledger.
  */
@@ -891,7 +917,6 @@ export function upgradeDocFormat(doc, now) {
     const version = entry.superseded.version
     if (!Number.isSafeInteger(version) || version < 1 || version >= entry.version) continue
     if (doc.methodHistory.some(row => row.entryId === entry.id && row.version === version)) continue
-    if (doc.methodHistory.length >= METHOD_HISTORY_LIMIT) break
     const row = {
       entryId: entry.id, version,
       instruction: boundedCodepoints(String(entry.superseded.instruction ?? ''), 240, 480),
@@ -938,14 +963,15 @@ export class MemoryStore {
     this.path = join(this.root, 'memory-v1.json')
     return this.root
   }
-  #readSnapshotAt(root, compareLogical = false) {
+  #readSnapshotAt(root, compareLogical = false, { recallPrompt = null, extraEntryIds = [],
+    includeRequests = true } = {}) {
     let bytes
     try { bytes = readBoundedMemoryFileBytes(join(root, 'memory-v1.json')) }
     catch (error) {
       if (error.storePresent === true || error.code !== 'ENOENT') this.hasObservedStore = true
       if (error.code === 'ENOENT') {
         if (this.hasObservedStore) throw new LearningError('state_unavailable')
-        return { doc: createDoc(), exists: false, bytes: null }
+        return { doc: createDoc(), exists: false, bytes: null, manifest: null }
       }
       if (error instanceof LearningError) throw error
       throw new LearningError('state_unavailable')
@@ -953,27 +979,167 @@ export class MemoryStore {
     this.hasObservedStore = true
     let doc
     let logicalBody
+    let manifest = null
     try {
-      doc = decodeMemoryDocument(bytes)
+      const parsed = JSON.parse(bytes.toString('utf8'))
+      if (parsed?.format === 6 && Object.hasOwn(parsed, 'storageSchema')) {
+        check(isV6Manifest(parsed), 'invalid_memory')
+        manifest = parsed
+        if (recallPrompt === null) {
+          doc = loadV6Document(root, manifest,
+            { validateEntry: row => check(entryValid(row), 'invalid_memory'),
+              validateProblem: row => check(problemRowValid(row), 'invalid_memory'),
+              validateTurnFact: row => check(factValid(row), 'invalid_memory'),
+              validateRequest: row => check(requestValid(row), 'invalid_memory'), includeRequests })
+        } else {
+          doc = loadV6Document(root, manifest, { includeEntries: false, includeProblems: false,
+            includeRequests: false, includeHistory: false, includeAdaptiveHistory: false,
+            includeStrategyHistory: false,
+            validateTurnFact: row => check(factValid(row), 'invalid_memory'),
+            validateRequest: row => check(requestValid(row), 'invalid_memory') })
+          const extraIds = [...(doc.recallStrategy?.rows ?? []).map(row => row.id),
+            ...(doc.recallStrategy?.adaptive?.policies ?? []).map(row => row.entryId), ...extraEntryIds]
+          doc.entries = readV6RecallCandidates(root, manifest, recallPrompt,
+            { validateEntry: row => check(entryValid(row), 'invalid_memory'), extraIds })
+        }
+      } else if (parsed?.format === 5 && Object.hasOwn(parsed, 'storageSchema')) {
+        check(isV5Manifest(parsed), 'invalid_memory')
+        manifest = parsed
+        if (recallPrompt === null) {
+          doc = loadV5Document(root, manifest,
+          { validateEntry: row => check(entryValid(row), 'invalid_memory'),
+            validateProblem: row => check(problemRowValid(row), 'invalid_memory'),
+              validateTurnFact: row => check(factValid(row), 'invalid_memory'),
+            validateRequest: row => check(requestValid(row), 'invalid_memory'), includeRequests })
+        } else {
+          doc = loadV5Document(root, manifest, { includeEntries: false, includeProblems: false,
+            includeRequests: false,
+            validateProblem: row => check(problemRowValid(row), 'invalid_memory'),
+            validateTurnFact: row => check(factValid(row), 'invalid_memory'),
+            validateRequest: row => check(requestValid(row), 'invalid_memory') })
+          const extraIds = [...(doc.recallStrategy?.rows ?? []).map(row => row.id),
+            ...(doc.recallStrategy?.adaptive?.policies ?? []).map(row => row.entryId), ...extraEntryIds]
+          doc.entries = readV5RecallCandidates(root, manifest, recallPrompt,
+            { validateEntry: row => check(entryValid(row), 'invalid_memory'), extraIds })
+        }
+      } else {
+        doc = decodeMemoryDocument(bytes)
+      }
       if (compareLogical) logicalBody = JSON.stringify(doc)
       validateDoc(doc)
     }
     catch { throw new LearningError('invalid_memory') }
-    return { doc, exists: true, bytes, logicalBody }
+    return { doc, exists: true, bytes, logicalBody, manifest }
   }
-  #readAt(root) { return this.#readSnapshotAt(root).doc }
+  #attachRequestAccess(doc, root, manifest, changes = null) {
+    if (manifest === null) return doc
+    Object.defineProperties(doc, {
+      __getMethodHistory: { enumerable: false, value: (entryId, version) => {
+        const projected = doc.methodHistory.find(row => row.entryId === entryId && row.version === version)
+        if (projected !== undefined) return projected
+        if (!isV6Manifest(manifest)) return undefined
+        return v6GetMethodHistory(root, manifest, entryId, version, row => check(historyRowValid(row)
+          && Buffer.byteLength(JSON.stringify(row), 'utf8') <= METHOD_HISTORY_ROW_BYTES, 'invalid_memory'))
+      } },
+      __getRequest: { enumerable: false, value: ticket => {
+        const projected = doc.requests.find(row => row.ticket === ticket)
+        if (projected !== undefined) return projected
+        const row = getV5Request(root, manifest, ticket, value => check(requestValid(value), 'invalid_memory'))
+        if (row !== undefined && changes !== null) changes.set(ticket, row)
+        return row
+      } },
+      __getRequestSummary: { enumerable: false, value: ticket => {
+        const projected = doc.requests.find(row => row.ticket === ticket)
+        if (projected !== undefined) return projected
+        const changed = changes?.get(ticket)
+        if (changed !== undefined) return changed
+        return getV5RequestMetadata(root, manifest, ticket)
+      } },
+      __latestRequestForMaterial: { enumerable: false, value: material => {
+        const changed = [...(changes?.values() ?? [])].filter(row => row.material === material)
+          .sort((left, right) => right.at - left.at)[0]
+        if (changed !== undefined) return changed
+        return getV5LatestMaterialRequest(root, manifest, material)
+      } },
+      __hasInFlight: { enumerable: false, value: () => {
+        const active = new Set(manifest.activeRequests)
+        for (const row of doc.requests) row.settled === true ? active.delete(row.ticket) : active.add(row.ticket)
+        for (const row of changes?.values() ?? []) row.settled === true
+          ? active.delete(row.ticket) : active.add(row.ticket)
+        return active.size > 0
+      } },
+      __inFlightTickets: { enumerable: false, value: () => {
+        const active = new Set(manifest.activeRequests)
+        for (const row of doc.requests) row.settled === true ? active.delete(row.ticket) : active.add(row.ticket)
+        for (const row of changes?.values() ?? []) row.settled === true
+          ? active.delete(row.ticket) : active.add(row.ticket)
+        return [...active]
+      } },
+      __requestSummaries: { enumerable: false, value: predicate => {
+        const rows = new Map(listV5RequestMetadata(root, manifest).map(row => [row.ticket, row]))
+        for (const row of doc.requests) {
+          const prior = rows.get(row.ticket)
+          rows.set(row.ticket, { ...(prior ?? {}), ...row,
+            sequence: prior?.sequence ?? Number.MAX_SAFE_INTEGER })
+        }
+        for (const row of changes?.values() ?? []) {
+          const prior = rows.get(row.ticket)
+          rows.set(row.ticket, { ...(prior ?? {}), ...row,
+            sequence: prior?.sequence ?? Number.MAX_SAFE_INTEGER })
+        }
+        return [...rows.values()].filter(row => predicate === undefined || predicate(row))
+          .sort((left, right) => left.sequence - right.sequence)
+      } },
+      __saveRequest: { enumerable: false, value: row => { if (changes !== null) changes.set(row.ticket, row) } },
+      __hasArchivedAdaptivePolicy: { enumerable: false, value: id =>
+        doc.adaptiveHistory.some(row => row.id === id)
+          || (isV6Manifest(manifest) && v6HasAdaptivePolicyHistory(root, manifest, id)) },
+      __hasArchivedRecallStrategyRow: { enumerable: false, value: row =>
+        doc.recallStrategyHistory.some(item => v6StrategyHistoryKey(item) === v6StrategyHistoryKey(row))
+          || (isV6Manifest(manifest) && v6HasRecallStrategyHistory(root, manifest, row)) },
+      __forecastV5: { enumerable: false, value: (candidate, reserve, entryAdds = 0) =>
+        isV6Manifest(manifest) ? v6DocumentFits(candidate, reserve, { entryAdds })
+          : v5DocumentFits(candidate, reserve, { root, manifest, entryAdds }) },
+    })
+    return doc
+  }
+  #readAt(root) {
+    const source = this.#readSnapshotAt(root)
+    return this.#attachRequestAccess(source.doc, root, source.manifest)
+  }
   read() { return this.#readAt(this.#resolveRoot()) }
+  readLight() {
+    const root = this.#resolveRoot()
+    const snapshot = this.#readSnapshotAt(root, false, { includeRequests: false })
+    return this.#attachRequestAccess(snapshot.doc, root, snapshot.manifest)
+  }
   /** One validated document plus its exact bounded source bytes; reads never create or migrate. */
   readSnapshot() {
     const snapshot = this.#readSnapshotAt(this.#resolveRoot())
-    return { doc: snapshot.doc, exists: snapshot.exists,
+    return { doc: this.#attachRequestAccess(snapshot.doc, this.root, snapshot.manifest), exists: snapshot.exists,
       bytes: snapshot.bytes === null ? null : Buffer.from(snapshot.bytes) }
   }
-  transaction(mutate) {
+  transaction(mutate) { return this.#transaction(mutate) }
+  transactionWithoutRequests(mutate) { return this.#transaction(mutate, { includeRequests: false }) }
+  transactionRecall(prompt, mutate, extraEntryIds = []) {
+    check(typeof prompt === 'string' && prompt.length <= 32_768, 'invalid_prompt')
+    check(Array.isArray(extraEntryIds), 'invalid_entry_ids')
+    return this.#transaction(mutate, { recallPrompt: prompt, extraEntryIds })
+  }
+  #transaction(mutate, { recallPrompt = null, extraEntryIds = [], includeRequests = true } = {}) {
     const root = this.#resolveRoot({ writable: true })
     return withMemoryStoreLock(root, () => {
-      const source = this.#readSnapshotAt(root, true)
+      let source = this.#readSnapshotAt(root, true, { recallPrompt, extraEntryIds,
+        includeRequests: recallPrompt === null && includeRequests })
+      // The one-time format-5 → format-6 migration needs the full legacy ordered collections.
+      // Subsequent format-6 recall transactions stay indexed and only open candidates.
+      if (recallPrompt !== null && isV5Manifest(source.manifest)) {
+        source = this.#readSnapshotAt(root, true, { includeRequests })
+      }
       const doc = source.doc
+      const beforeDoc = structuredClone(doc)
+      const requestChanges = new Map()
+      this.#attachRequestAccess(doc, root, source.manifest, requestChanges)
       // EVOLUTION016: migrate format3 only inside the one locked commit; pure reads do not rewrite.
       if (doc.format === 3) upgradeDocFormat(doc, Date.now())
       const out = mutate(doc, { exists: source.exists,
@@ -987,20 +1153,56 @@ export class MemoryStore {
       const requestedNoCommit = out !== null && typeof out === 'object'
         && Object.hasOwn(out, NO_COMMIT)
       const result = requestedNoCommit ? out[NO_COMMIT] : out
+      const priorRequests = new Map(beforeDoc.requests.map(row => [row.ticket, row]))
+      for (const row of doc.requests) {
+        if (!priorRequests.has(row.ticket) || JSON.stringify(priorRequests.get(row.ticket)) !== JSON.stringify(row)) {
+          requestChanges.set(row.ticket, row)
+        }
+      }
+      if (doc.requests.length > REQUEST_LIMIT) {
+        doc.requests = doc.requests.slice(-REQUEST_LIMIT)
+      }
       validateDoc(doc)
-      // An empty optional ledger is losslessly reconstructed on read. Do not charge an old,
-      // nearly-full library for carrying no policies: even pausing must remain writable.
-      const adaptive = doc.recallStrategy.adaptive
-      if (adaptive?.generation === 0 && !adaptive.policies.length && !adaptive.probes.length
-        && !adaptive.decisions.length) delete doc.recallStrategy.adaptive
       if (requestedNoCommit) {
         const unchangedBody = JSON.stringify(doc)
-        if (source.bytes !== null && unchangedBody === source.logicalBody) return result
+        if (source.manifest !== null && unchangedBody === JSON.stringify(beforeDoc)) return result
       }
+      // An empty optional ledger is losslessly reconstructed on read. Do not charge an old,
+      // nearly-full library for carrying no policies: even pausing must remain writable. Keep
+      // no-op detection above this serialization-only elision so an unchanged read shape is not
+      // rewritten just to omit the reconstructable default.
+      const adaptive = doc.recallStrategy.adaptive
+      if (adaptive?.generation === 0 && !adaptive.policies.length && !adaptive.probes.length
+        && !adaptive.decisions.length && doc.adaptiveHistory.length === 0) delete doc.recallStrategy.adaptive
       doc.updatedAt = Date.now()
-      const body = encodeMemoryDocument(doc)
       try {
-        commitMemoryFile(join(root, 'memory-v1.json'), body)
+        const legacyRequests = source.manifest === null ? beforeDoc.requests : []
+        if (doc.format !== MEMORY_FORMAT) doc.format = MEMORY_FORMAT
+        const entryChanges = source.manifest === null ? null : diffRows(beforeDoc.entries, doc.entries)
+        const problemChanges = source.manifest === null ? null
+          : diffRows(beforeDoc.problemLoop?.problems ?? [], doc.problemLoop?.problems ?? [])
+        const turnFactChanges = source.manifest === null ? null
+          : diffRows(beforeDoc.turnFacts, doc.turnFacts)
+        const methodHistoryChanges = source.manifest === null ? null
+          : diffKeyedRows(beforeDoc.methodHistory, doc.methodHistory, row => `${row.entryId}\u0000${row.version}`)
+        const adaptiveHistoryChanges = source.manifest === null ? null
+          : diffKeyedRows(beforeDoc.adaptiveHistory ?? [], doc.adaptiveHistory ?? [], row => row.id)
+        const recallStrategyHistoryChanges = source.manifest === null ? null
+          : diffKeyedRows(beforeDoc.recallStrategyHistory ?? [], doc.recallStrategyHistory ?? [], v6StrategyHistoryKey)
+        const seenEventChanges = source.manifest === null ? null
+          : diffKeyedRows(beforeDoc.problemLoop?.seenEvents ?? [], doc.problemLoop?.seenEvents ?? [], row => row.eventId)
+        writeV6Document(root, doc, { previousManifest: source.manifest,
+          sourceBytes: source.manifest === null && source.exists ? source.bytes : null,
+          validateEntry: row => check(entryValid(row), 'invalid_memory'),
+          validateProblem: row => check(problemRowValid(row), 'invalid_memory'),
+          validateRequest: row => check(requestValid(row), 'invalid_memory'),
+          entryChanges, problemChanges, methodHistoryChanges, adaptiveHistoryChanges,
+          recallStrategyHistoryChanges, seenEventChanges,
+          turnFactChanges,
+          validateTurnFact: row => check(factValid(row), 'invalid_memory'),
+          requestChanges: [...requestChanges.values()], bootstrapRequests: legacyRequests,
+          partialEntries: recallPrompt !== null,
+        })
         this.hasObservedStore = true
         this.#recordCommit('confirmed')
       } catch (error) {
@@ -1013,6 +1215,124 @@ export class MemoryStore {
       return result
     })
   }
+  #readRawManifest() {
+    const root = this.#resolveRoot()
+    let bytes
+    try { bytes = readBoundedMemoryFileBytes(join(root, 'memory-v1.json')) }
+    catch (error) {
+      if (error.code === 'ENOENT' && !this.hasObservedStore) return { root, bytes: null, manifest: null }
+      if (error.storePresent === true || error.code !== 'ENOENT') this.hasObservedStore = true
+      if (error instanceof LearningError) throw error
+      throw new LearningError('state_unavailable')
+    }
+    this.hasObservedStore = true
+    let parsed
+    try { parsed = JSON.parse(bytes.toString('utf8')) }
+    catch { throw new LearningError('invalid_memory') }
+    if (parsed?.format === 5 && !isV5Manifest(parsed)) throw new LearningError('invalid_memory')
+    if (parsed?.format === 6 && !isV6Manifest(parsed)) throw new LearningError('invalid_memory')
+    return { root, bytes, manifest: isV6Manifest(parsed) ? parsed : isV5Manifest(parsed) ? parsed : null }
+  }
+  getRequest(ticket) {
+    check(typeof ticket === 'string' && ticket.length > 0 && ticket.length <= 64, 'invalid_ticket')
+    const { root, bytes, manifest } = this.#readRawManifest()
+    if (bytes === null) return undefined
+    if (manifest !== null) return getV5Request(root, manifest, ticket, row => check(requestValid(row), 'invalid_memory'))
+    return this.#readSnapshotAt(root).doc.requests.find(row => row.ticket === ticket)
+  }
+  listRequests() {
+    const { root, bytes, manifest } = this.#readRawManifest()
+    if (bytes === null) return []
+    if (manifest !== null) return listV5Requests(root, manifest, row => check(requestValid(row), 'invalid_memory'))
+    return this.#readSnapshotAt(root).doc.requests
+  }
+  listRequestMetadata(predicate = null) {
+    const { root, bytes, manifest } = this.#readRawManifest()
+    if (bytes === null) return []
+    const rows = manifest === null ? this.#readSnapshotAt(root).doc.requests : listV5RequestMetadata(root, manifest)
+    return rows.filter(row => predicate === null || predicate(row))
+  }
+  getMigrationSource() {
+    const { root, bytes, manifest } = this.#readRawManifest()
+    if (bytes === null) return null
+    return manifest === null ? Buffer.from(bytes)
+      : isV6Manifest(manifest) ? getV6MigrationSource(root, manifest) : getV5MigrationSource(root, manifest)
+  }
+  stats() {
+    const { root, bytes, manifest } = this.#readRawManifest()
+    if (bytes === null) return { entries: 0, problems: 0, requests: 0, bytes: 0,
+      maxObjectBytes: MAX_STORE_BYTES, format: MEMORY_FORMAT }
+    if (isV6Manifest(manifest)) return { ...v6StorageStats(root, manifest, bytes), format: 6,
+      generation: manifest.generation }
+    if (manifest !== null) return { ...v5StorageStats(root, manifest, bytes), format: 5,
+      generation: manifest.generation }
+    const doc = this.#readSnapshotAt(root).doc
+    return { entries: doc.entries.length, problems: doc.problemLoop?.problems.length ?? 0,
+      requests: doc.requests.length, bytes: bytes.length, maxObjectBytes: MAX_STORE_BYTES, format: doc.format }
+  }
+  readRecallView(prompt, extraIds = []) {
+    const root = this.#resolveRoot()
+    const source = this.#readSnapshotAt(root, false, { recallPrompt: prompt, extraEntryIds: extraIds })
+    return this.#attachRequestAccess(source.doc, root, source.manifest)
+  }
+}
+
+function diffRows(before, after) {
+  const left = new Map(before.map(row => [row.id, row]))
+  const right = new Map(after.map(row => [row.id, row]))
+  const changes = []
+  for (const id of new Set([...left.keys(), ...right.keys()])) {
+    const old = left.get(id) ?? null
+    const next = right.get(id) ?? null
+    if (JSON.stringify(old) === JSON.stringify(next)) continue
+    changes.push({ id, before: old, after: next })
+  }
+  return changes
+}
+
+function diffKeyedRows(before, after, keyOf) {
+  const left = new Map(before.map(row => [keyOf(row), row]))
+  const right = new Map(after.map(row => [keyOf(row), row]))
+  const changes = []
+  for (const key of new Set([...left.keys(), ...right.keys()])) {
+    const old = left.get(key) ?? null
+    const next = right.get(key) ?? null
+    if (JSON.stringify(old) === JSON.stringify(next)) continue
+    changes.push({ id: key, before: old, after: next })
+  }
+  return changes
+}
+
+export function requestForDoc(doc, ticket, predicate = null) {
+  const row = doc.requests.find(item => item.ticket === ticket)
+    ?? doc.__getRequest?.(ticket)
+  return row !== undefined && (predicate === null || predicate(row)) ? row : undefined
+}
+
+export function requestSummariesForDoc(doc, predicate = null) {
+  if (typeof doc.__requestSummaries === 'function') return doc.__requestSummaries(predicate ?? undefined)
+  return doc.requests.filter(row => predicate === null || predicate(row))
+}
+
+export function requestSummaryForDoc(doc, ticket) {
+  return doc.requests.find(row => row.ticket === ticket) ?? doc.__getRequestSummary?.(ticket)
+}
+
+export function latestRequestForMaterialDoc(doc, material) {
+  if (typeof doc.__latestRequestForMaterial === 'function') {
+    return doc.__latestRequestForMaterial(material)
+  }
+  return doc.requests.filter(row => row.material === material).at(-1)
+}
+
+export function hasInFlightRequests(doc) {
+  return typeof doc.__hasInFlight === 'function'
+    ? doc.__hasInFlight() : doc.requests.some(row => row.settled !== true)
+}
+
+export function inFlightRequestRows(doc) {
+  if (typeof doc.__inFlightTickets !== 'function') return doc.requests.filter(row => row.settled !== true)
+  return doc.__inFlightTickets().map(ticket => requestForDoc(doc, ticket)).filter(Boolean)
 }
 export const ROLLBACK = Symbol.for('mse-rebuild.rollback')
 

@@ -16,6 +16,10 @@ If `node` is not on PATH on the DSH Mac, use
 The comparison below describes the historical sort-only replay (`replay.mjs`). Neither tool
 reads the live learning library, calls a provider, or changes the installed plugin.
 
+Release qualification permits one exact source-digest compatibility pair for the bounded
+analysis-cache LRU change. It still reruns the current offline evidence and keeps the frozen
+qualification id; any other selector-source change requires a new reviewed qualification.
+
 ## Historical sort-only candidate
 
 - **baseline**: `recallSelection` from `rebuild/recall.mjs`, unchanged.

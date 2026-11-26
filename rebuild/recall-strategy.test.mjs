@@ -374,7 +374,7 @@ test('candidate activation survives restart and old format-3 documents default t
       delete doc.recallStrategy
       writeFileSync(old.store.path, JSON.stringify(doc))
       old.recordTurnFacts({ sessionId: 'old-format', turnId: '1', taskSummary: 'legacy' })
-      assert.equal(old.store.read().format, 4)
+      assert.equal(old.store.read().format, 6)
       assert.equal(old.store.read().recallStrategy.generation, 0)
     } finally { rmSync(oldRoot, { recursive: true, force: true }) }
   } finally { rmSync(root, { recursive: true, force: true }) }
@@ -383,23 +383,35 @@ test('candidate activation survives restart and old format-3 documents default t
 test('a recall-state transaction failure fails closed without escaping into the caller', () => {
   const { engine, root } = seedEngine()
   try {
-    engine.store.transaction = () => { throw Object.assign(new Error('capacity'), { code: 'capacity' }) }
-    assert.doesNotThrow(() => prepare(engine, 'capacity', '1'))
+    let calls = 0
+    engine.store.transactionRecall = () => {
+      calls += 1
+      throw Object.assign(new Error('capacity'), { code: 'capacity' })
+    }
+    const out = prepare(engine, 'capacity', '1')
+    assert.equal(calls, 1, 'the production indexed recall transaction hit the injected failure')
+    assert.equal(out.ok, false)
+    assert.equal(out.reason, 'recall_state_unavailable')
+    const turnKey = hex(JSON.stringify(['capacity', '1']))
+    assert.equal(engine.store.read().receipts.some(row => row.turnKey === turnKey), false,
+      'failed recall state leaves no receipt for the turn')
+    assert.equal(engine.store.read().turnUsage.some(row => row.turnKey === turnKey), false,
+      'failed recall state leaves no dedup usage marker for the turn')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
 test('an optional strategy capacity failure retries once with the normal baseline receipt', () => {
   const { engine, root, targetId } = seedEngine()
   try {
-    const transaction = engine.store.transaction.bind(engine.store)
+    const transactionRecall = engine.store.transactionRecall.bind(engine.store)
     let calls = 0
-    engine.store.transaction = mutate => {
+    engine.store.transactionRecall = (prompt, mutate, extraEntryIds) => {
       calls += 1
       if (calls === 1) {
         mutate(engine.store.read()) // MemoryStore mutates a private copy, then refuses it pre-write.
         throw Object.assign(new Error('capacity'), { code: 'capacity' })
       }
-      return transaction(mutate)
+      return transactionRecall(prompt, mutate, extraEntryIds)
     }
     const out = prepare(engine, 'capacity-fallback', '1')
     assert.equal(calls, 2)
@@ -425,6 +437,8 @@ test('strategy append reclaims only durable rows whose method version or qualifi
     const rows = engine.store.read().recallStrategy.rows
     assert.equal(rows.length, 1)
     assert.ok(rows.some(row => row.id === targetId && row.mode === 'shadow'))
+    assert.equal(engine.store.read().recallStrategyHistory.length, 128,
+      'settled obsolete rows move to the page-backed audit history')
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

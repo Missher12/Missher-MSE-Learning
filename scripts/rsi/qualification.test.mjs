@@ -19,7 +19,15 @@ test('a release with the same selector must still establish a gain on its curren
         return !probeDirectories.some(name=>rel===name||rel.startsWith(`${name}${sep}`))
       }})
     }
-    assert.equal(verifyRecallQualification(copy).ok,true)
+    const compatible=verifyRecallQualification(copy)
+    assert.equal(compatible.ok,true)
+    assert.equal(compatible.compatibility,'method-history-page-growth-v1')
+    const evolution=join(copy,'rebuild/evolution.mjs')
+    const evolutionSource=readFileSync(evolution,'utf8')
+    writeFileSync(evolution,evolutionSource+'\n')
+    assert.equal(verifyRecallQualification(copy).reason,'source_digest',
+      'an unreviewed selector source tuple still requires a new qualification')
+    writeFileSync(evolution,evolutionSource)
     const fixture=join(copy,'tests/fixtures/rsi/auto-independent-controls.json')
     const data=JSON.parse(readFileSync(fixture,'utf8'))
     // Only this disposable negative test changes a label. The saved certificate and selector

@@ -116,7 +116,7 @@ function historicalSession(id, cwd, { effort = 'high' } = {}) {
     eventAt(index) { return events[index] } }
 }
 
-function historicalSessionWithPriorTurnRoute(id, cwd) {
+function historicalSessionWithMismatchedPriorTurnRoute(id, cwd) {
   const events = []
   const append = (type, data) => events.push({ seq: events.length, type, data })
   append('turn/start', { turn: 0 })
@@ -132,7 +132,7 @@ function historicalSessionWithPriorTurnRoute(id, cwd) {
   append('turn/start', { turn: 1 })
   append('step/start', { turn: 1, step: 1 })
   append('assistant/message', { turn: 1, step: 1, message: { role: 'assistant', source: {
-    kind: 'model', provider: `provider-${id}`, model: `model-${id}`,
+    kind: 'model', provider: `other-provider-${id}`, model: `other-model-${id}`,
   } } })
   append('step/end', { turn: 1, step: 1 })
   append('turn/end', { turn: 1, reason: { kind: 'completed' } })
@@ -247,11 +247,11 @@ test('route-less first session rotates after a completed turn lacks effort, then
   }
 })
 
-test('a route from an earlier turn is never borrowed for a later route-less correction', async () => {
+test('a mismatched prior-turn response cannot authorize a route-less correction', async () => {
   const sessions = {}
   const h = routeRecoveryHarness({ sessions, sessionIds: ['stale', 'valid'] })
   try {
-    sessions.stale = historicalSessionWithPriorTurnRoute('stale', h.workspace)
+    sessions.stale = historicalSessionWithMismatchedPriorTurnRoute('stale', h.workspace)
     sessions.valid = historicalSession('valid', h.workspace)
     for (const [id, turnId] of [['stale', '1'], ['valid', '1']]) {
       h.plugin.engine.recordCorrectionCandidate({ sessionId: id, turnId, cwd: h.workspace,
@@ -265,6 +265,30 @@ test('a route from an earlier turn is never borrowed for a later route-less corr
     assert.equal(h.calls.length, 1)
     assert.equal(Object.hasOwn(h.plugin.engine.store.read().corrections
       .find(row => row.sessionId === 'stale'), 'sourceRoute'), false)
+  } finally { h.dispose() }
+})
+
+test('an unchanged SDK route remains effective for a later turn without a new header', async () => {
+  const sessions = {}
+  const h = routeRecoveryHarness({ sessions, sessionIds: ['reused', 'valid'] })
+  try {
+    sessions.reused = historicalSessionWithMismatchedPriorTurnRoute('reused', h.workspace)
+    const events = sessions.reused.events
+    const prior = events.find(event => event.type === 'request/header')
+    const secondResponse = events.find(event => event.type === 'assistant/message'
+      && event.data.turn === 1)
+    secondResponse.data.message.source = { kind: 'model', provider: prior.data.header.config.provider,
+      model: prior.data.header.config.model }
+    sessions.valid = historicalSession('valid', h.workspace)
+    assert.equal(h.plugin.engine.recordCorrectionCandidate({ sessionId: 'reused', turnId: '1',
+      cwd: h.workspace, userText: '你又把资料核错了，应该先按来源原文确认后再交付。' }).ok, true)
+    await h.plugin.wake()
+    assert.deepEqual(h.inspections, ['reused'])
+    assert.equal(h.calls.length, 1, 'the unchanged route is recovered for the completed second turn')
+    assert.deepEqual({ provider: h.calls[0].provider, model: h.calls[0].model,
+      reasoningEffort: h.calls[0].reasoningEffort }, {
+      provider: 'provider-reused', model: 'model-reused', reasoningEffort: 'high',
+    })
   } finally { h.dispose() }
 })
 

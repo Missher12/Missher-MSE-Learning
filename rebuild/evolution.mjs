@@ -17,7 +17,7 @@
  *   - guard wording states only what really happened (a recurrence is not a checker failure).
  */
 import { createHash } from 'node:crypto'
-import { boundedUnits, boundedCodepoints, METHOD_HISTORY_LIMIT, METHOD_HISTORY_ROW_BYTES } from './memory.mjs'
+import { boundedUnits, boundedCodepoints, METHOD_HISTORY_ROW_BYTES } from './memory.mjs'
 
 export const MAX_HISTORY_ENTRIES = 6
 export const MAX_HISTORY_PROMPT_BYTES = 1536
@@ -351,9 +351,6 @@ export function historyRowPreview(entry, options = {}) {
  */
 export function archiveVersion(doc, entry, { now, reason = 'matched_recurrence' } = {}) {
   if (!Array.isArray(doc.methodHistory)) doc.methodHistory = []
-  if (doc.methodHistory.length >= METHOD_HISTORY_LIMIT) {
-    return { ok: false, code: 'method_history_full' }
-  }
   if (doc.methodHistory.some(row => row.entryId === entry.id && row.version === entry.version)) {
     return { ok: true, duplicate: true }
   }
@@ -366,6 +363,5 @@ export function archiveVersion(doc, entry, { now, reason = 'matched_recurrence' 
 /** Bound used by the pre-flight capacity check before a revise request may spend model tokens. */
 export function historyCapacity(doc) {
   const rows = doc.methodHistory ?? []
-  return { count: rows.length, limit: METHOD_HISTORY_LIMIT,
-    full: rows.length >= METHOD_HISTORY_LIMIT, reserveBytes: METHOD_HISTORY_ROW_BYTES }
+  return { count: rows.length, limit: null, full: false, reserveBytes: METHOD_HISTORY_ROW_BYTES }
 }

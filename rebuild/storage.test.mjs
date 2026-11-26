@@ -219,7 +219,7 @@ test('format-3 pure reads do not rewrite; the first real transaction upgrades on
     assert.deepEqual(readFileSync(store.path), before)
     store.transaction(doc => { doc.controls.userPaused = true; return true })
     const migrated = store.read()
-    assert.equal(migrated.format, 4)
+    assert.equal(migrated.format, 6)
     assert.deepEqual(migrated.preservedUnknownField, { owner: 'earlier writer' })
     assert.equal(migrated.controls.userPaused, true)
   } finally { rmSync(root, { recursive: true, force: true }) }
